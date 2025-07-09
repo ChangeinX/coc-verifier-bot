@@ -1,3 +1,21 @@
+#!/usr/bin/env python3
+"""Discord–Clash-of-Clans gateway verification bot
+-------------------------------------------------
+Checks that a user‑supplied player tag belongs to your clan, then
+assigns them a "Verified" (or any) role in the server.
+
+**Changes in this version (2025‑07‑09)**
+* Gracefully handle **discord.Forbidden (HTTP 403)** when adding roles and
+  give the user/admin a clear message.
+* Extra logging for easier diagnosis.
+
+Env‑vars required (see README/instructions):
+  DISCORD_TOKEN        – the Discord bot token
+  COC_API_TOKEN        – Supercell developer API token
+  CLAN_TAG             – your clan tag, e.g. #2ABCXYZ
+  VERIFIED_ROLE_ID     – numeric ID of the Discord role to grant
+  ADMIN_LOG_CHANNEL_ID – *optional* channel‑ID for logs
+"""
 import asyncio
 import logging
 import os
@@ -14,19 +32,27 @@ CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")  # must start with "#"
 VERIFIED_ROLE_ID: Final[int] = int(os.getenv("VERIFIED_ROLE_ID", "0"))
 ADMIN_LOG_CHANNEL_ID: Final[int] = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
 
-REQUIRED_VARS = ("DISCORD_TOKEN", "COC_API_TOKEN", "CLAN_TAG", "VERIFIED_ROLE_ID")
+REQUIRED_VARS = (
+    "DISCORD_TOKEN",
+    "COC_API_TOKEN",
+    "CLAN_TAG",
+    "VERIFIED_ROLE_ID",
+)
 
 # ---------- Discord setup ----------
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True  # we need this to add roles
+intents.members = True  # required to add roles
 
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
 # ---------- Logging ----------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("coc-gateway")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("coc‑gateway")
 
 # ---------- Clash of Clans API helper ----------
 COC_API_BASE = "https://api.clashofclans.com/v1"
@@ -46,14 +72,14 @@ async def is_member_of_clan(player_tag: str) -> bool:
             data = await resp.json()
 
     clan = data.get("clan")
-    if not clan:
-        return False
-    # clan.tag from API does *include* the leading '#'
-    return clan.get("tag", "").upper() == CLAN_TAG.upper()
+    return bool(clan) and clan.get("tag", "").upper() == CLAN_TAG.upper()
 
 
 # ---------- Slash command ----------
-@tree.command(name="verify", description="Verify yourself as a clan member by providing your player tag.")
+@tree.command(
+    name="verify",
+    description="Verify yourself as a clan member by providing your player tag.",
+)
 @app_commands.describe(player_tag="Your Clash of Clans player tag, e.g. #ABCD123")
 async def verify(interaction: discord.Interaction, player_tag: str):
     await interaction.response.defer(ephemeral=True)
@@ -63,21 +89,44 @@ async def verify(interaction: discord.Interaction, player_tag: str):
         player_tag = "#" + player_tag
 
     if not await is_member_of_clan(player_tag):
-        await interaction.followup.send("❌ Verification failed. You are not listed in the clan.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ Verification failed – you are not listed in the clan.",
+            ephemeral=True,
+        )
         return
 
     role = interaction.guild.get_role(VERIFIED_ROLE_ID)
     if role is None:
-        await interaction.followup.send("Role not found – please tell an admin.", ephemeral=True)
+        await interaction.followup.send(
+            "Setup error: verified role not found – contact an admin.",
+            ephemeral=True,
+        )
         return
 
-    await interaction.user.add_roles(role, reason="Passed CoC clan verification")
+    # Attempt to add the role and handle lack‑of‑permission situations gracefully
+    try:
+        await interaction.user.add_roles(role, reason="Passed CoC clan verification")
+    except discord.Forbidden:
+        msg = (
+            "🚫 Bot lacks **Manage Roles** permission *or* its highest role is "
+            "below the role it is trying to assign. Ask an admin to fix the "
+            "role hierarchy / permissions and then run /verify again."
+        )
+        await interaction.followup.send(msg, ephemeral=True)
+        log.warning("Forbidden 403 when adding role %s to %s", role.id, interaction.user)
+        return
+    except discord.HTTPException as exc:
+        await interaction.followup.send("Unexpected Discord error. Try again later.", ephemeral=True)
+        log.exception("Failed to add role: %s", exc)
+        return
+
     await interaction.followup.send("✅ Success! You now have access.", ephemeral=True)
 
     if ADMIN_LOG_CHANNEL_ID:
-        channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if channel:
-            await channel.send(f"{interaction.user.mention} verified with tag {player_tag}.")
+        if (channel := interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)):
+            await channel.send(
+                f"{interaction.user.mention} verified with tag {player_tag}.",
+            )
 
 
 # ---------- Bot lifecycle ----------
