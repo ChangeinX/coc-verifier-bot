@@ -11,6 +11,7 @@ Required env‑vars: DISCORD_TOKEN, COC_API_TOKEN, CLAN_TAG, VERIFIED_ROLE_ID
 Optional: ADMIN_LOG_CHANNEL_ID (numeric).
 """
 import asyncio
+import json
 import logging
 import os
 from typing import Final, Optional
@@ -25,6 +26,9 @@ COC_API_TOKEN: Final[str | None] = os.getenv("COC_API_TOKEN")
 CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")
 VERIFIED_ROLE_ID: Final[int] = int(os.getenv("VERIFIED_ROLE_ID", "0"))
 ADMIN_LOG_CHANNEL_ID: Final[int] = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
+DATA_FILE: Final[str] = os.getenv("DATA_FILE", "verified.json")
+CHECK_INTERVAL: Final[int] = int(os.getenv("CHECK_INTERVAL", "3600"))
+KICK_ON_LEAVE: Final[bool] = os.getenv("KICK_ON_LEAVE", "true").lower() in ("1", "true", "yes")
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
@@ -47,6 +51,22 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("coc-gateway")
+
+_verified: dict[str, dict[str, str]] = {}
+
+
+def load_verified() -> None:
+    global _verified
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as fh:
+            _verified = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        _verified = {}
+
+
+def save_verified() -> None:
+    with open(DATA_FILE, "w", encoding="utf-8") as fh:
+        json.dump(_verified, fh)
 
 
 async def resolve_log_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
@@ -123,6 +143,10 @@ async def verify(interaction: discord.Interaction, player_tag: str):
 
     await interaction.followup.send("✅ Success! You now have access.", ephemeral=True)
 
+    guild_data = _verified.setdefault(str(interaction.guild.id), {})
+    guild_data[str(interaction.user.id)] = player_tag
+    save_verified()
+
     if (log_chan := await resolve_log_channel(interaction.guild)):
         try:
             await log_chan.send(f"{interaction.user.mention} verified with tag {player_tag}.")
@@ -132,17 +156,51 @@ async def verify(interaction: discord.Interaction, player_tag: str):
             log.exception("Failed to log verification: %s", exc)
 
 
+# ---------- Cleanup task ----------
+async def cleanup_members() -> None:
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in bot.guilds:
+            guild_data = _verified.get(str(guild.id), {})
+            if not guild_data:
+                continue
+            to_remove: list[str] = []
+            for user_id, tag in guild_data.items():
+                member = guild.get_member(int(user_id))
+                if member is None:
+                    to_remove.append(user_id)
+                    continue
+                if not await is_member_of_clan(tag):
+                    if KICK_ON_LEAVE:
+                        try:
+                            await member.kick(reason="Not in clan anymore")
+                            log.info("Kicked %s (%s) for leaving clan", member, user_id)
+                        except discord.Forbidden:
+                            log.warning("No permission to kick %s", member)
+                        except discord.HTTPException as exc:
+                            log.exception("Failed to kick %s: %s", member, exc)
+                            continue
+                    to_remove.append(user_id)
+            for uid in to_remove:
+                guild_data.pop(uid, None)
+            if to_remove:
+                save_verified()
+        await asyncio.sleep(CHECK_INTERVAL)
+
 # ---------- Lifecycle ----------
 @bot.event
 async def on_ready():
     await tree.sync()
     log.info("Bot ready as %s (%s)", bot.user, bot.user.id)
+    bot.loop.create_task(cleanup_members())
 
 
 def main() -> None:
     missing = [v for v in REQUIRED_VARS if not os.getenv(v)]
     if missing:
         raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
+
+    load_verified()
 
     bot.run(DISCORD_TOKEN)  # type: ignore[arg-type]
 
