@@ -25,6 +25,7 @@ async def on_ready():
     await coc_client.login(COC_EMAIL, COC_PASSWORD)
     membership_check.start()
     log.info("Bot ready as %s (%s)", bot.user, bot.user.id)
+    log.info("Build date: 31 July 2025 - 18:45 UTC")
 
 
 async def main() -> None:
