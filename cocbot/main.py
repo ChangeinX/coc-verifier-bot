@@ -7,6 +7,8 @@ from .clients import bot, coc_client, tree
 from . import commands  # noqa: F401
 from .tasks import membership_check
 
+tree_synced = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -16,7 +18,10 @@ log = logging.getLogger("coc-gateway")
 
 @bot.event
 async def on_ready():
-    await tree.sync()
+    global tree_synced
+    if not tree_synced:
+        await tree.sync()
+        tree_synced = True
     await coc_client.login(COC_EMAIL, COC_PASSWORD)
     membership_check.start()
     log.info("Bot ready as %s (%s)", bot.user, bot.user.id)
