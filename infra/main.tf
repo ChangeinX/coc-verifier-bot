@@ -26,6 +26,7 @@ variable "coc_email" {}
 variable "coc_password" {}
 variable "clan_tag" {}
 variable "verified_role_id" {}
+variable "openai_api_key" {}
 variable "admin_log_channel_id" { default = "" }
 variable "subnets" { type = list(string) }
 variable "vpc_id" {}
@@ -142,6 +143,7 @@ resource "aws_ecs_task_definition" "bot" {
         { name = "COC_PASSWORD", value = var.coc_password },
         { name = "CLAN_TAG", value = var.clan_tag },
         { name = "VERIFIED_ROLE_ID", value = var.verified_role_id },
+        { name = "OPENAI_API_KEY", value = var.openai_api_key },
         { name = "ADMIN_LOG_CHANNEL_ID", value = var.admin_log_channel_id },
         { name = "DDB_TABLE_NAME", value = aws_dynamodb_table.verifications.name },
         { name = "AWS_REGION", value = var.aws_region }

@@ -44,6 +44,7 @@ jobs:
             -var coc_password=${{ secrets.COC_PASSWORD }} \
             -var clan_tag=${{ secrets.CLAN_TAG }} \
             -var verified_role_id=${{ secrets.VERIFIED_ROLE_ID }} \
+            -var openai_api_key=${{ secrets.OPENAI_API_KEY }} \
             -var admin_log_channel_id=${{ secrets.ADMIN_LOG_CHANNEL_ID }} \
             -var subnets=${{ secrets.SUBNETS }} \
             -var vpc_id=${{ secrets.VPC_ID }}

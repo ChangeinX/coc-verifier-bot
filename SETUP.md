@@ -26,6 +26,7 @@ The bot requires the following environment variables:
 - `CLAN_TAG` – the tag of your clan (e.g. `#ABCD123`).
 - `VERIFIED_ROLE_ID` – ID of the role created above.
 - `DDB_TABLE_NAME` – DynamoDB table name to store verifications.
+- `OPENAI_API_KEY` – API key for OpenAI.
 - `ADMIN_LOG_CHANNEL_ID` (optional) – channel ID for verification logs.
 - `AWS_REGION` (optional) – defaults to `us-east-1`.
 
@@ -38,5 +39,6 @@ Once running, the bot exposes the following commands:
 
 - `/verify <player_tag>` – verify a member by Clash of Clans tag.
 - `/whois @member` – show the in‑game name for a Discord user (only visible to you).
+- `/strat <town hall>` – get recommended war attack strategies for a Town Hall level.
 
 The bot will also automatically remove members from the server if they leave the clan.
