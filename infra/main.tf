@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.5"
   required_providers {
     aws = {
-      source = "hashicorp/aws"
+      source  = "hashicorp/aws"
       version = "~> 5.0"
     }
   }
@@ -30,6 +30,11 @@ variable "admin_log_channel_id" { default = "" }
 variable "subnets" { type = list(string) }
 variable "vpc_id" {}
 
+resource "aws_cloudwatch_log_group" "bot" {
+  name              = "/ecs/coc-verifier-bot"
+  retention_in_days = 7
+}
+
 resource "aws_dynamodb_table" "verifications" {
   name         = var.ddb_table_name
   billing_mode = "PAY_PER_REQUEST"
@@ -45,7 +50,7 @@ data "aws_iam_policy_document" "ecs_task_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
-      type        = "Service"
+      type = "Service"
       identifiers = ["ecs-tasks.amazonaws.com"]
     }
   }
@@ -58,7 +63,7 @@ resource "aws_iam_role" "task" {
 
 data "aws_iam_policy_document" "ddb_access" {
   statement {
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan", "dynamodb:UpdateItem"]
+    actions = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.verifications.arn]
   }
 }
@@ -66,6 +71,31 @@ data "aws_iam_policy_document" "ddb_access" {
 resource "aws_iam_role_policy" "task" {
   role   = aws_iam_role.task.id
   policy = data.aws_iam_policy_document.ddb_access.json
+}
+
+data "aws_iam_policy_document" "task_extra" {
+  statement {
+    actions = [
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents"
+    ]
+    resources = ["${aws_cloudwatch_log_group.bot.arn}:*"]
+  }
+}
+
+resource "aws_iam_role_policy" "task_extra" {
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_extra.json
 }
 
 resource "aws_ecr_repository" "bot" {
@@ -77,25 +107,29 @@ resource "aws_ecs_cluster" "bot" {
 }
 
 resource "aws_security_group" "bot" {
-  name        = "coc-bot-sg"
-  vpc_id      = var.vpc_id
+  name   = "coc-bot-sg"
+  vpc_id = var.vpc_id
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
 resource "aws_ecs_task_definition" "bot" {
-  family                   = "coc-bot"
+  family       = "coc-bot"
   requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = aws_iam_role.task.arn
-  task_role_arn            = aws_iam_role.task.arn
+  network_mode = "awsvpc"
+  cpu          = "256"
+  memory       = "512"
+  runtime_platform {
+    cpu_architecture        = "ARM64"
+    operating_system_family = "LINUX"
+  }
+  execution_role_arn = aws_iam_role.task.arn
+  task_role_arn      = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
@@ -112,6 +146,14 @@ resource "aws_ecs_task_definition" "bot" {
         { name = "DDB_TABLE_NAME", value = aws_dynamodb_table.verifications.name },
         { name = "AWS_REGION", value = var.aws_region }
       ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.bot.name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = "bot"
+        }
+      }
     }
   ])
 }
@@ -124,7 +166,7 @@ resource "aws_ecs_service" "bot" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets         = var.subnets
+    subnets          = var.subnets
     security_groups = [aws_security_group.bot.id]
     assign_public_ip = true
   }
