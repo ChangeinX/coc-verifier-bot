@@ -7,30 +7,38 @@ Changes in this version (2025‑07‑09 b)
   - Warns if the bot lacks permission to send or the channel ID is wrong.
 * Extra debug output when ADMIN_LOG_CHANNEL_ID is set but unavailable.
 
-Required env‑vars: DISCORD_TOKEN, COC_API_TOKEN, CLAN_TAG, VERIFIED_ROLE_ID
-Optional: ADMIN_LOG_CHANNEL_ID (numeric).
+Required env‑vars: DISCORD_TOKEN, COC_EMAIL, COC_PASSWORD, CLAN_TAG,
+VERIFIED_ROLE_ID, DDB_TABLE_NAME
+Optional: ADMIN_LOG_CHANNEL_ID (numeric), AWS_REGION
 """
 import asyncio
 import logging
 import os
 from typing import Final, Optional
 
-import aiohttp
+import boto3
+import coc
 import discord
 from discord import app_commands
+from discord.ext import tasks
 
 # ---------- Environment ----------
 DISCORD_TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
-COC_API_TOKEN: Final[str | None] = os.getenv("COC_API_TOKEN")
+COC_EMAIL: Final[str | None] = os.getenv("COC_EMAIL")
+COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")
 VERIFIED_ROLE_ID: Final[int] = int(os.getenv("VERIFIED_ROLE_ID", "0"))
 ADMIN_LOG_CHANNEL_ID: Final[int] = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
+DDB_TABLE_NAME: Final[str | None] = os.getenv("DDB_TABLE_NAME")
+AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
-    "COC_API_TOKEN",
+    "COC_EMAIL",
+    "COC_PASSWORD",
     "CLAN_TAG",
     "VERIFIED_ROLE_ID",
+    "DDB_TABLE_NAME",
 )
 
 # ---------- Discord client ----------
@@ -40,6 +48,12 @@ intents.members = True
 
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
+
+# ---------- AWS / CoC clients ----------
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+table = dynamodb.Table(DDB_TABLE_NAME) if DDB_TABLE_NAME else None
+
+coc_client = coc.Client()
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -70,21 +84,25 @@ async def resolve_log_channel(guild: discord.Guild) -> Optional[discord.TextChan
 
 
 # ---------- Clash API ----------
-COC_API_BASE = "https://api.clashofclans.com/v1"
-HEADERS = {"Authorization": f"Bearer {COC_API_TOKEN}"}
+
+async def get_player(player_tag: str) -> coc.Player | None:
+    """Return player object or None on API error."""
+    try:
+        player = await coc_client.get_player(player_tag)
+    except coc.NotFound:
+        log.warning("Player %s not found", player_tag)
+        return None
+    except coc.HTTPException as exc:
+        log.error("CoC API error: %s", exc)
+        return None
+    return player
 
 
 async def is_member_of_clan(player_tag: str) -> bool:
-    enc_tag = player_tag.upper().replace("#", "%23")
-    url = f"{COC_API_BASE}/players/{enc_tag}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=HEADERS, timeout=10) as resp:
-            if resp.status != 200:
-                log.error("CoC API %s for %s", resp.status, player_tag)
-                return False
-            data = await resp.json()
-    clan = data.get("clan")
-    return bool(clan) and clan.get("tag", "").upper() == CLAN_TAG.upper()
+    player = await get_player(player_tag)
+    if not player or not player.clan:
+        return False
+    return player.clan.tag.upper() == CLAN_TAG.upper()
 
 
 # ---------- /verify command ----------
@@ -97,8 +115,12 @@ async def verify(interaction: discord.Interaction, player_tag: str):
     if not player_tag.startswith("#"):
         player_tag = "#" + player_tag
 
-    if not await is_member_of_clan(player_tag):
-        await interaction.followup.send("❌ Verification failed – you are not listed in the clan.", ephemeral=True)
+    player = await get_player(player_tag)
+    if player is None or not player.clan or player.clan.tag.upper() != CLAN_TAG.upper():
+        await interaction.followup.send(
+            "❌ Verification failed – you are not listed in the clan.",
+            ephemeral=True,
+        )
         return
 
     role = interaction.guild.get_role(VERIFIED_ROLE_ID)
@@ -121,6 +143,19 @@ async def verify(interaction: discord.Interaction, player_tag: str):
         log.exception("HTTPException adding role: %s", exc)
         return
 
+    if table is not None:
+        try:
+            table.put_item(
+                Item={
+                    "discord_id": str(interaction.user.id),
+                    "discord_name": interaction.user.name,
+                    "player_tag": player.tag,
+                    "player_name": player.name,
+                }
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to store verification: %s", exc)
+
     await interaction.followup.send("✅ Success! You now have access.", ephemeral=True)
 
     if (log_chan := await resolve_log_channel(interaction.guild)):
@@ -132,20 +167,79 @@ async def verify(interaction: discord.Interaction, player_tag: str):
             log.exception("Failed to log verification: %s", exc)
 
 
+# ---------- /whois command ----------
+@tree.command(name="whois", description="Get the clan player name for a Discord user")
+@app_commands.describe(member="Member to look up")
+async def whois(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+
+    if table is None:
+        await interaction.followup.send("Database not configured.", ephemeral=True)
+        return
+
+    try:
+        resp = table.get_item(Key={"discord_id": str(member.id)})
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("DynamoDB get_item failed: %s", exc)
+        await interaction.followup.send("Lookup failed.", ephemeral=True)
+        return
+
+    item = resp.get("Item")
+    if not item:
+        await interaction.followup.send("No record found.", ephemeral=True)
+        return
+
+    await interaction.followup.send(f"{member.display_name} is {item['player_name']}", ephemeral=True)
+
+
+# ---------- Clan membership check ----------
+@tasks.loop(minutes=5)
+async def membership_check() -> None:
+    log.info("Membership check started...")
+    if table is None or not bot.guilds:
+        return
+    guild = bot.guilds[0]
+    try:
+        data = table.scan()
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to scan table: %s", exc)
+        return
+
+    for item in data.get("Items", []):
+        discord_id = int(item["discord_id"])
+        member = guild.get_member(discord_id)
+        if member is None:
+            continue
+        player = await get_player(item["player_tag"])
+        if player is None or not player.clan or player.clan.tag.upper() != CLAN_TAG.upper():
+            try:
+                await member.kick(reason="Left clan")
+            except discord.Forbidden:
+                log.warning("Forbidden kicking %s", member)
+            except discord.HTTPException as exc:
+                log.exception("Failed to kick %s: %s", member, exc)
+            try:
+                table.delete_item(Key={"discord_id": item["discord_id"]})
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception("Failed to delete record for %s: %s", member, exc)
+
 # ---------- Lifecycle ----------
 @bot.event
 async def on_ready():
     await tree.sync()
+    await coc_client.login(COC_EMAIL, COC_PASSWORD)
+    membership_check.start()
     log.info("Bot ready as %s (%s)", bot.user, bot.user.id)
 
 
-def main() -> None:
+async def main() -> None:
     missing = [v for v in REQUIRED_VARS if not os.getenv(v)]
     if missing:
         raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
 
-    bot.run(DISCORD_TOKEN)  # type: ignore[arg-type]
+    async with bot:
+        await bot.start(DISCORD_TOKEN)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

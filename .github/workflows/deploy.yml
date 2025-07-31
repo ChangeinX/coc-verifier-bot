@@ -1,0 +1,49 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY: coc-verifier-bot
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v1
+        id: login
+
+      - name: Build and push
+        run: |
+          docker build -t $ECR_REPOSITORY:$GITHUB_SHA .
+          docker tag $ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA
+          docker push ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA
+          echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
+
+      - uses: opentofu/setup-opentofu@v1
+
+      - name: Deploy infrastructure
+        run: |
+          cd infra
+          tofu init
+          tofu apply -auto-approve \
+            -var bot_image=$IMAGE \
+            -var discord_token=${{ secrets.DISCORD_TOKEN }} \
+            -var coc_email=${{ secrets.COC_EMAIL }} \
+            -var coc_password=${{ secrets.COC_PASSWORD }} \
+            -var clan_tag=${{ secrets.CLAN_TAG }} \
+            -var verified_role_id=${{ secrets.VERIFIED_ROLE_ID }} \
+            -var admin_log_channel_id=${{ secrets.ADMIN_LOG_CHANNEL_ID }} \
+            -var subnets=${{ secrets.SUBNETS }} \
+            -var vpc_id=${{ secrets.VPC_ID }}
