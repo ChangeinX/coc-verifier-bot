@@ -28,7 +28,10 @@ async def membership_check() -> None:
         if member is None:
             continue
         player = await get_player(item["player_tag"])
-        if player is None or not player.clan or player.clan.tag.upper() != CLAN_TAG.upper():
+        if player is None:
+            log.warning("Skipping member %s due to failed player lookup", member)
+            continue
+        if not player.clan or player.clan.tag.upper() != CLAN_TAG.upper():
             try:
                 await member.kick(reason="Left clan")
             except discord.Forbidden:
