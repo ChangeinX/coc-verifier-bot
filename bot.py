@@ -193,8 +193,9 @@ async def whois(interaction: discord.Interaction, member: discord.Member):
 
 
 # ---------- Clan membership check ----------
-@tasks.loop(hours=1)
+@tasks.loop(minutes=5)
 async def membership_check() -> None:
+    log.info("Membership check started...")
     if table is None or not bot.guilds:
         return
     guild = bot.guilds[0]
