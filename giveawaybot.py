@@ -124,19 +124,26 @@ class GiveawayView(discord.ui.View):
 async def create_giveaway(
     giveaway_id: str, title: str, description: str, draw_time: datetime.datetime
 ) -> None:
+    """Create and announce a giveaway message."""
     if table is None or not bot.guilds:
         return
     if TEST_MODE:
-        draw_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=1)
+        draw_time = (
+            datetime.datetime.now(tz=datetime.timezone.utc)
+            + datetime.timedelta(minutes=1)
+        )
     channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
         log.warning("Giveaway channel not found or not text")
         return
     run_id = uuid.uuid4().hex
     view = GiveawayView(giveaway_id, run_id)
-    embed = discord.Embed(
-        title=title, description=description, timestamp=datetime.datetime.utcnow()
+    draw_time = (
+        draw_time if draw_time.tzinfo else draw_time.replace(tzinfo=datetime.timezone.utc)
     )
+    ts = int(draw_time.timestamp())
+    embed = discord.Embed(title=title, description=description, timestamp=draw_time)
+    embed.add_field(name="Draw Time", value=f"<t:{ts}:F> (<t:{ts}:R>)", inline=False)
     embed.set_footer(text="0 entries")
     msg = await channel.send(embed=embed, view=view)
     try:
@@ -174,7 +181,8 @@ async def schedule_check() -> None:
                 gid,
                 "🏆 Gold Pass Giveaway",
                 "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
-                datetime.datetime.utcnow() + datetime.timedelta(days=1),
+                datetime.datetime.now(tz=datetime.timezone.utc)
+                + datetime.timedelta(days=1),
             )
 
     # Gift card every Thursday
@@ -291,7 +299,23 @@ async def finish_giveaway(gid: str) -> None:
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to update message: %s", exc)
 
-        mention = " ".join(f"<@{w}>" for w in winners) if winners else "No valid entries"
+        winner_parts: list[str] = []
+        for w in winners:
+            name: str | None = None
+            if ver_table is not None:
+                try:
+                    resp = ver_table.get_item(Key={"discord_id": w})
+                    item = resp.get("Item")
+                    if item:
+                        name = item.get("player_name")
+                except Exception as exc:  # pylint: disable=broad-except
+                    log.exception("Failed to fetch player name for %s: %s", w, exc)
+            if name:
+                winner_parts.append(f"<@{w}> ({name})")
+            else:
+                winner_parts.append(f"<@{w}>")
+
+        mention = " ".join(winner_parts) if winners else "No valid entries"
         await channel.send(f"🎉 Giveaway **{gid}** winners: {mention}")
 
     try:
@@ -313,7 +337,7 @@ async def draw_check() -> None:
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Scan failed: %s", exc)
         return
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
     for item in resp.get("Items", []):
         if item.get("drawn"):
             continue
@@ -324,8 +348,53 @@ async def draw_check() -> None:
             draw_time = datetime.datetime.fromisoformat(draw_time_str)
         except ValueError:
             continue
+        if draw_time.tzinfo is None:
+            draw_time = draw_time.replace(tzinfo=datetime.timezone.utc)
         if now >= draw_time:
             await finish_giveaway(item["giveaway_id"])
+
+
+async def _table_is_empty() -> bool:
+    """Return True if the giveaway table has no items."""
+    if table is None:
+        return False
+    try:
+        resp = table.scan(Limit=1)
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Table scan failed: %s", exc)
+        return False
+    return not resp.get("Items")
+
+
+async def seed_initial_giveaways() -> None:
+    """Create giveaways on first run if the table is empty."""
+    if not await _table_is_empty():
+        return
+    log.info("Giveaway table empty – creating initial giveaways")
+    today = datetime.date.today()
+
+    # Gold pass giveaway drawn in 1 day
+    await create_giveaway(
+        month_end_giveaway_id(today),
+        "\U0001F3C6 Gold Pass Giveaway",
+        "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
+        datetime.datetime.now(tz=datetime.timezone.utc)
+        + datetime.timedelta(days=1),
+    )
+
+    # Gift card giveaway drawn on the upcoming Sunday at 18:00 Central
+    sunday = today + datetime.timedelta(days=(6 - today.weekday()))
+    draw_time = datetime.datetime.combine(
+        sunday,
+        datetime.time(hour=18, tzinfo=ZoneInfo("America/Chicago")),
+    ).astimezone(datetime.timezone.utc)
+    await create_giveaway(
+        weekly_giveaway_id(today),
+        "\U0001F381 $10 Gift Card Giveaway",
+        "If you used all your attacks in raid weekend: "
+        "Enter for a chance to win a $10 gift card! Up to 3 winners.",
+        draw_time,
+    )
 
 
 @bot.event
@@ -334,19 +403,24 @@ async def on_ready() -> None:
     await coc_client.login(COC_EMAIL, COC_PASSWORD)
     schedule_check.start()
     draw_check.start()
+    await seed_initial_giveaways()
+    await schedule_check()
+    await draw_check()
     log.info("Giveaway bot ready as %s", bot.user)
     if TEST_MODE:
         await create_giveaway(
             month_end_giveaway_id(datetime.date.today()),
             "🏆 Gold Pass Giveaway (Test)",
             "Test mode giveaway! Click to enter.",
-            datetime.datetime.utcnow() + datetime.timedelta(minutes=1),
+            datetime.datetime.now(tz=datetime.timezone.utc)
+            + datetime.timedelta(minutes=1),
         )
         await create_giveaway(
             weekly_giveaway_id(datetime.date.today()),
             "🎁 $10 Gift Card Giveaway (Test)",
-            "Test mode gift card giveaway!", 
-            datetime.datetime.utcnow() + datetime.timedelta(minutes=1),
+            "Test mode gift card giveaway!",
+            datetime.datetime.now(tz=datetime.timezone.utc)
+            + datetime.timedelta(minutes=1),
         )
 
 
