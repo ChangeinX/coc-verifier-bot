@@ -211,9 +211,11 @@ async def membership_check() -> None:
         if member is None:
             continue
         player = await get_player(item["player_tag"])
+        log.info("Player %s (%s) in clan %s", player, item["player_tag"], player.clan.tag if player and player.clan else "None")
         if player is None or not player.clan or player.clan.tag.upper() != CLAN_TAG.upper():
             try:
-                await member.kick(reason="Left clan")
+                # await member.kick(reason="Left clan")
+                log.warning("TEST MODE: Would kick %s for leaving clan", member)
             except discord.Forbidden:
                 log.warning("Forbidden kicking %s", member)
             except discord.HTTPException as exc:
