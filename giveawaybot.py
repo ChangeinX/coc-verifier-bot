@@ -224,8 +224,14 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
         entry = raid_log[0]
         log.info(f"entry: {entry}")
         member = entry.get_member(tag)
-        log.info("Attack count:", member.attack_count if member else "None")
-        log.info("Attack limit:", member.attack_limit if member else "None")
+        log.info(
+            "Attack count: %s",
+            member.attack_count if member else "None",
+        )
+        log.info(
+            "Attack limit: %s",
+            member.attack_limit if member else "None",
+        )
         return member.attack_count >= member.attack_limit
     try:
         resp = ver_table.get_item(Key={"discord_id": discord_id})
