@@ -97,7 +97,7 @@ resource "aws_iam_role" "task" {
 
 data "aws_iam_policy_document" "ddb_access" {
   statement {
-    actions   = [
+    actions = [
       "dynamodb:GetItem",
       "dynamodb:PutItem",
       "dynamodb:DeleteItem",
