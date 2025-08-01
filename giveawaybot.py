@@ -128,13 +128,19 @@ async def create_giveaway(
     if table is None or not bot.guilds:
         return
     if TEST_MODE:
-        draw_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=1)
+        draw_time = (
+            datetime.datetime.now(tz=datetime.timezone.utc)
+            + datetime.timedelta(minutes=1)
+        )
     channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
         log.warning("Giveaway channel not found or not text")
         return
     run_id = uuid.uuid4().hex
     view = GiveawayView(giveaway_id, run_id)
+    draw_time = (
+        draw_time if draw_time.tzinfo else draw_time.replace(tzinfo=datetime.timezone.utc)
+    )
     ts = int(draw_time.timestamp())
     embed = discord.Embed(title=title, description=description, timestamp=draw_time)
     embed.add_field(name="Draw Time", value=f"<t:{ts}:F> (<t:{ts}:R>)", inline=False)
@@ -175,7 +181,8 @@ async def schedule_check() -> None:
                 gid,
                 "🏆 Gold Pass Giveaway",
                 "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
-                datetime.datetime.utcnow() + datetime.timedelta(days=1),
+                datetime.datetime.now(tz=datetime.timezone.utc)
+                + datetime.timedelta(days=1),
             )
 
     # Gift card every Thursday
@@ -330,7 +337,7 @@ async def draw_check() -> None:
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Scan failed: %s", exc)
         return
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
     for item in resp.get("Items", []):
         if item.get("drawn"):
             continue
@@ -341,6 +348,8 @@ async def draw_check() -> None:
             draw_time = datetime.datetime.fromisoformat(draw_time_str)
         except ValueError:
             continue
+        if draw_time.tzinfo is None:
+            draw_time = draw_time.replace(tzinfo=datetime.timezone.utc)
         if now >= draw_time:
             await finish_giveaway(item["giveaway_id"])
 
@@ -369,7 +378,8 @@ async def seed_initial_giveaways() -> None:
         month_end_giveaway_id(today),
         "\U0001F3C6 Gold Pass Giveaway",
         "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
-        datetime.datetime.utcnow() + datetime.timedelta(days=1),
+        datetime.datetime.now(tz=datetime.timezone.utc)
+        + datetime.timedelta(days=1),
     )
 
     # Gift card giveaway drawn on the upcoming Sunday at 18:00 Central
@@ -402,13 +412,15 @@ async def on_ready() -> None:
             month_end_giveaway_id(datetime.date.today()),
             "🏆 Gold Pass Giveaway (Test)",
             "Test mode giveaway! Click to enter.",
-            datetime.datetime.utcnow() + datetime.timedelta(minutes=1),
+            datetime.datetime.now(tz=datetime.timezone.utc)
+            + datetime.timedelta(minutes=1),
         )
         await create_giveaway(
             weekly_giveaway_id(datetime.date.today()),
             "🎁 $10 Gift Card Giveaway (Test)",
-            "Test mode gift card giveaway!", 
-            datetime.datetime.utcnow() + datetime.timedelta(minutes=1),
+            "Test mode gift card giveaway!",
+            datetime.datetime.now(tz=datetime.timezone.utc)
+            + datetime.timedelta(minutes=1),
         )
 
 
