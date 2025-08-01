@@ -10,9 +10,10 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    env:
-      AWS_REGION: us-east-1
-      ECR_REPOSITORY: coc-verifier-bot
+  env:
+    AWS_REGION: us-east-1
+    ECR_REPOSITORY: coc-verifier-bot
+    NEWS_ECR_REPOSITORY: coc-news-bot
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +31,10 @@ jobs:
           docker tag $ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA
           docker push ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA
           echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
+          docker build -t $NEWS_ECR_REPOSITORY:$GITHUB_SHA -f Dockerfile.news .
+          docker tag $NEWS_ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
+          docker push ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
+          echo "NEWS_IMAGE=${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
 
       - uses: opentofu/setup-opentofu@v1
 
@@ -39,7 +44,11 @@ jobs:
           tofu init
           tofu apply -auto-approve \
             -var bot_image=$IMAGE \
+            -var news_bot_image=$NEWS_IMAGE \
             -var discord_token=${{ secrets.DISCORD_TOKEN }} \
+            -var news_discord_token=${{ secrets.NEWS_DISCORD_TOKEN }} \
+            -var news_channel_id=${{ secrets.NEWS_CHANNEL_ID }} \
+            -var openai_api_key=${{ secrets.OPENAI_API_KEY }} \
             -var coc_email=${{ secrets.COC_EMAIL }} \
             -var coc_password=${{ secrets.COC_PASSWORD }} \
             -var clan_tag=${{ secrets.CLAN_TAG }} \

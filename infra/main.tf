@@ -22,6 +22,10 @@ variable "ddb_table_name" {
 
 variable "bot_image" {}
 variable "discord_token" {}
+variable "news_bot_image" {}
+variable "news_discord_token" {}
+variable "news_channel_id" {}
+variable "openai_api_key" {}
 variable "coc_email" {}
 variable "coc_password" {}
 variable "clan_tag" {}
@@ -32,6 +36,11 @@ variable "vpc_id" {}
 
 resource "aws_cloudwatch_log_group" "bot" {
   name              = "/ecs/coc-verifier-bot"
+  retention_in_days = 7
+}
+
+resource "aws_cloudwatch_log_group" "news" {
+  name              = "/ecs/coc-news-bot"
   retention_in_days = 7
 }
 
@@ -50,7 +59,7 @@ data "aws_iam_policy_document" "ecs_task_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
-      type = "Service"
+      type        = "Service"
       identifiers = ["ecs-tasks.amazonaws.com"]
     }
   }
@@ -63,7 +72,7 @@ resource "aws_iam_role" "task" {
 
 data "aws_iam_policy_document" "ddb_access" {
   statement {
-    actions = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan", "dynamodb:UpdateItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.verifications.arn]
   }
 }
@@ -89,7 +98,10 @@ data "aws_iam_policy_document" "task_extra" {
       "logs:CreateLogStream",
       "logs:PutLogEvents"
     ]
-    resources = ["${aws_cloudwatch_log_group.bot.arn}:*"]
+    resources = [
+      "${aws_cloudwatch_log_group.bot.arn}:*",
+      "${aws_cloudwatch_log_group.news.arn}:*"
+    ]
   }
 }
 
@@ -102,6 +114,10 @@ resource "aws_ecr_repository" "bot" {
   name = "coc-verifier-bot"
 }
 
+resource "aws_ecr_repository" "news" {
+  name = "coc-news-bot"
+}
+
 resource "aws_ecs_cluster" "bot" {
   name = "coc-verifier-cluster"
 }
@@ -111,19 +127,19 @@ resource "aws_security_group" "bot" {
   vpc_id = var.vpc_id
 
   egress {
-    from_port = 0
-    to_port   = 0
-    protocol  = "-1"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
 resource "aws_ecs_task_definition" "bot" {
-  family       = "coc-bot"
+  family                   = "coc-bot"
   requires_compatibilities = ["FARGATE"]
-  network_mode = "awsvpc"
-  cpu          = "256"
-  memory       = "512"
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
   runtime_platform {
     cpu_architecture        = "ARM64"
     operating_system_family = "LINUX"
@@ -158,6 +174,42 @@ resource "aws_ecs_task_definition" "bot" {
   ])
 }
 
+resource "aws_ecs_task_definition" "news_bot" {
+  family                   = "coc-news-bot"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  runtime_platform {
+    cpu_architecture        = "ARM64"
+    operating_system_family = "LINUX"
+  }
+  execution_role_arn = aws_iam_role.task.arn
+  task_role_arn      = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "news"
+      image     = var.news_bot_image
+      essential = true
+      environment = [
+        { name = "DISCORD_TOKEN", value = var.news_discord_token },
+        { name = "NEWS_CHANNEL_ID", value = var.news_channel_id },
+        { name = "OPENAI_API_KEY", value = var.openai_api_key },
+        { name = "AWS_REGION", value = var.aws_region }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.news.name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = "news"
+        }
+      }
+    }
+  ])
+}
+
 resource "aws_ecs_service" "bot" {
   name            = "coc-bot"
   cluster         = aws_ecs_cluster.bot.id
@@ -167,7 +219,21 @@ resource "aws_ecs_service" "bot" {
 
   network_configuration {
     subnets          = var.subnets
-    security_groups = [aws_security_group.bot.id]
+    security_groups  = [aws_security_group.bot.id]
+    assign_public_ip = true
+  }
+}
+
+resource "aws_ecs_service" "news_bot" {
+  name            = "coc-news-bot"
+  cluster         = aws_ecs_cluster.bot.id
+  task_definition = aws_ecs_task_definition.news_bot.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.subnets
+    security_groups  = [aws_security_group.bot.id]
     assign_public_ip = true
   }
 }
