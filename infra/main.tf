@@ -35,6 +35,7 @@ variable "giveaway_bot_image" {}
 variable "giveaway_discord_token" {}
 variable "giveaway_channel_id" {}
 variable "giveaway_table_name" { default = "coc-giveaways" }
+variable "giveaway_test" {}
 variable "subnets" { type = list(string) }
 variable "vpc_id" {}
 
@@ -96,7 +97,14 @@ resource "aws_iam_role" "task" {
 
 data "aws_iam_policy_document" "ddb_access" {
   statement {
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Scan", "dynamodb:UpdateItem"]
+    actions   = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Scan",
+      "dynamodb:UpdateItem",
+      "dynamodb:Query"
+    ]
     resources = [aws_dynamodb_table.verifications.arn, aws_dynamodb_table.giveaways.arn]
   }
 }
@@ -124,7 +132,7 @@ data "aws_iam_policy_document" "task_extra" {
     ]
     resources = [
       "${aws_cloudwatch_log_group.bot.arn}:*",
-      "${aws_cloudwatch_log_group.news.arn}:*"
+      "${aws_cloudwatch_log_group.news.arn}:*",
       "${aws_cloudwatch_log_group.giveaway.arn}:*"
     ]
   }
@@ -264,7 +272,8 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
         { name = "COC_EMAIL", value = var.coc_email },
         { name = "COC_PASSWORD", value = var.coc_password },
         { name = "CLAN_TAG", value = var.clan_tag },
-        { name = "AWS_REGION", value = var.aws_region }
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "GIVEAWAY_TEST", value = var.giveaway_test }
       ]
       logConfiguration = {
         logDriver = "awslogs"

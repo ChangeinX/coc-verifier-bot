@@ -3,6 +3,7 @@ import calendar
 import datetime
 import logging
 import os
+import uuid
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -15,10 +16,10 @@ from discord import app_commands
 from discord.ext import tasks
 
 TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
-GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID", "0"))
+GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID"))
 GIVEAWAY_TABLE_NAME: Final[str | None] = os.getenv("GIVEAWAY_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
-TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST", "").lower() in {"1", "true", "yes"}
+TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST").lower() in {"1", "true", "yes"}
 COC_EMAIL: Final[str | None] = os.getenv("COC_EMAIL")
 COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")
@@ -49,9 +50,13 @@ log = logging.getLogger("giveaway-bot")
 
 
 class GiveawayView(discord.ui.View):
-    def __init__(self, giveaway_id: str) -> None:
+    def __init__(self, giveaway_id: str, run_id: str) -> None:
         super().__init__(timeout=None)
         self.giveaway_id = giveaway_id
+        self.run_id = run_id
+
+        if hasattr(self, "enter"):
+            self.enter.custom_id = f"enter-{giveaway_id}-{run_id}"
 
     async def _update_entry_count(self) -> int:
         """Update the embed footer with the current entry count."""
@@ -59,20 +64,19 @@ class GiveawayView(discord.ui.View):
             return 0
         try:
             resp = table.query(
-                KeyConditionExpression=conditions.Key("giveaway_id").eq(
-                    self.giveaway_id
-                )
+                KeyConditionExpression=
+                conditions.Key("giveaway_id").eq(self.giveaway_id)
+                & conditions.Key("user_id").begins_with(f"{self.run_id}#")
             )
             users = {
-                it["user_id"]
+                it["user_id"].split("#", 1)[1]
                 for it in resp.get("Items", [])
-                if it["user_id"] != "META"
+                if it.get("user_id", "").startswith(f"{self.run_id}#")
             }
             count = len(users)
-            meta = next(
-                (it for it in resp.get("Items", []) if it["user_id"] == "META"),
-                None,
-            )
+            meta = table.get_item(
+                Key={"giveaway_id": self.giveaway_id, "user_id": "META"}
+            ).get("Item")
             if meta and meta.get("message_id"):
                 channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
                 if isinstance(channel, discord.TextChannel):
@@ -95,7 +99,10 @@ class GiveawayView(discord.ui.View):
             return
         try:
             table.put_item(
-                Item={"giveaway_id": self.giveaway_id, "user_id": str(interaction.user.id)},
+                Item={
+                    "giveaway_id": self.giveaway_id,
+                    "user_id": f"{self.run_id}#{interaction.user.id}",
+                },
                 ConditionExpression="attribute_not_exists(user_id)",
             )
             count = await self._update_entry_count()
@@ -125,7 +132,8 @@ async def create_giveaway(
     if not isinstance(channel, discord.TextChannel):
         log.warning("Giveaway channel not found or not text")
         return
-    view = GiveawayView(giveaway_id)
+    run_id = uuid.uuid4().hex
+    view = GiveawayView(giveaway_id, run_id)
     embed = discord.Embed(
         title=title, description=description, timestamp=datetime.datetime.utcnow()
     )
@@ -138,6 +146,7 @@ async def create_giveaway(
                 "user_id": "META",
                 "message_id": str(msg.id),
                 "draw_time": draw_time.isoformat(),
+                "run_id": run_id,
             }
         )
     except Exception as exc:  # pylint: disable=broad-except
@@ -164,7 +173,7 @@ async def schedule_check() -> None:
             await create_giveaway(
                 gid,
                 "🏆 Gold Pass Giveaway",
-                "Click the button to enter for a Clash of Clans Gold Pass!",
+                "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
                 datetime.datetime.utcnow() + datetime.timedelta(days=1),
             )
 
@@ -180,6 +189,7 @@ async def schedule_check() -> None:
             await create_giveaway(
                 gid,
                 "🎁 $10 Gift Card Giveaway",
+                "If you used all your attacks in raid weekend: "
                 "Enter for a chance to win a $10 gift card! Up to 3 winners.",
                 draw_time,
             )
@@ -192,12 +202,23 @@ async def giveaway_exists(giveaway_id: str) -> bool:
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("get_item failed: %s", exc)
         return False
-    return "Item" in resp
+    item = resp.get("Item")
+    return bool(item and not item.get("drawn"))
 
 
 async def eligible_for_giftcard(discord_id: str) -> bool:
     if TEST_MODE or ver_table is None or not CLAN_TAG:
-        return True
+        resp = ver_table.get_item(Key={"discord_id": discord_id})
+        item = resp.get("Item")
+        tag = item.get("player_tag")
+        log.info(f"TEST_MODE: {TEST_MODE}, tag: {tag}")
+        raid_log = await coc_client.get_raid_log(CLAN_TAG, limit=1)
+        entry = raid_log[0]
+        log.info(f"entry: {entry}")
+        member = entry.get_member(tag)
+        log.info("Attack count:", member.attack_count if member else "None")
+        log.info("Attack limit:", member.attack_limit if member else "None")
+        return member.attack_count >= member.attack_limit
     try:
         resp = ver_table.get_item(Key={"discord_id": discord_id})
     except Exception as exc:  # pylint: disable=broad-except
@@ -230,11 +251,16 @@ async def finish_giveaway(gid: str) -> None:
         meta = table.get_item(Key={"giveaway_id": gid, "user_id": "META"}).get("Item")
         if not meta or meta.get("drawn"):
             return
-        resp = table.query(KeyConditionExpression=conditions.Key("giveaway_id").eq(gid))
+        run_id = meta.get("run_id", "")
+        resp = table.query(
+            KeyConditionExpression=
+            conditions.Key("giveaway_id").eq(gid)
+            & conditions.Key("user_id").begins_with(f"{run_id}#")
+        )
         entries = {
-            it["user_id"]
+            it["user_id"].split("#", 1)[1]
             for it in resp.get("Items", [])
-            if it["user_id"] != "META"
+            if it.get("user_id", "").startswith(f"{run_id}#")
         }
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Failed to query giveaway %s: %s", gid, exc)
