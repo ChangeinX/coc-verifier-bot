@@ -53,6 +53,41 @@ class GiveawayView(discord.ui.View):
         super().__init__(timeout=None)
         self.giveaway_id = giveaway_id
 
+    async def _update_entry_count(self) -> int:
+        """Update the embed footer with the current entry count."""
+        if table is None:
+            return 0
+        try:
+            resp = table.query(
+                KeyConditionExpression=conditions.Key("giveaway_id").eq(
+                    self.giveaway_id
+                )
+            )
+            users = {
+                it["user_id"]
+                for it in resp.get("Items", [])
+                if it["user_id"] != "META"
+            }
+            count = len(users)
+            meta = next(
+                (it for it in resp.get("Items", []) if it["user_id"] == "META"),
+                None,
+            )
+            if meta and meta.get("message_id"):
+                channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
+                if isinstance(channel, discord.TextChannel):
+                    try:
+                        msg = await channel.fetch_message(int(meta["message_id"]))
+                        embed = msg.embeds[0] if msg.embeds else discord.Embed()
+                        embed.set_footer(text=f"{count} entries")
+                        await msg.edit(embed=embed)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        log.exception("Failed to update entry count: %s", exc)
+            return count
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to query entry count: %s", exc)
+            return 0
+
     @discord.ui.button(label="Enter Giveaway", style=discord.ButtonStyle.green)
     async def enter(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:  # pylint: disable=unused-argument
         if table is None:
@@ -63,9 +98,17 @@ class GiveawayView(discord.ui.View):
                 Item={"giveaway_id": self.giveaway_id, "user_id": str(interaction.user.id)},
                 ConditionExpression="attribute_not_exists(user_id)",
             )
-            await interaction.response.send_message("You're entered!", ephemeral=True)
+            count = await self._update_entry_count()
+            await interaction.response.send_message(
+                f"You're entered! ({count} entries)",
+                ephemeral=True,
+            )
         except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:  # type: ignore[attr-defined]
-            await interaction.response.send_message("You're already entered!", ephemeral=True)
+            count = await self._update_entry_count()
+            await interaction.response.send_message(
+                f"You're already entered! ({count} entries)",
+                ephemeral=True,
+            )
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to record entry: %s", exc)
             await interaction.response.send_message("Entry failed", ephemeral=True)
@@ -76,6 +119,8 @@ async def create_giveaway(
 ) -> None:
     if table is None or not bot.guilds:
         return
+    if TEST_MODE:
+        draw_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=1)
     channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
         log.warning("Giveaway channel not found or not text")
@@ -84,6 +129,7 @@ async def create_giveaway(
     embed = discord.Embed(
         title=title, description=description, timestamp=datetime.datetime.utcnow()
     )
+    embed.set_footer(text="0 entries")
     msg = await channel.send(embed=embed, view=view)
     try:
         table.put_item(
@@ -185,7 +231,11 @@ async def finish_giveaway(gid: str) -> None:
         if not meta or meta.get("drawn"):
             return
         resp = table.query(KeyConditionExpression=conditions.Key("giveaway_id").eq(gid))
-        entries = [it["user_id"] for it in resp.get("Items", []) if it["user_id"] != "META"]
+        entries = {
+            it["user_id"]
+            for it in resp.get("Items", [])
+            if it["user_id"] != "META"
+        }
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Failed to query giveaway %s: %s", gid, exc)
         return
@@ -194,6 +244,7 @@ async def finish_giveaway(gid: str) -> None:
         entries = [e for e in entries if await eligible_for_giftcard(e)]
         winners_needed = 3
     else:
+        entries = list(entries)
         winners_needed = 1
 
     if not entries:
@@ -227,7 +278,7 @@ async def finish_giveaway(gid: str) -> None:
         log.exception("Failed to mark giveaway drawn: %s", exc)
 
 
-@tasks.loop(minutes=10)
+@tasks.loop(minutes=1 if TEST_MODE else 10)
 async def draw_check() -> None:
     if table is None:
         return
