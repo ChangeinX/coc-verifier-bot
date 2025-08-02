@@ -293,9 +293,33 @@ async def finish_giveaway(gid: str) -> None:
             msg = await channel.fetch_message(int(meta["message_id"]))
             view = discord.ui.View()
             view.add_item(
-                discord.ui.Button(label="Giveaway Closed", style=discord.ButtonStyle.grey, disabled=True)
+                discord.ui.Button(
+                    label="Giveaway Closed",
+                    style=discord.ButtonStyle.grey,
+                    disabled=True,
+                )
             )
-            await msg.edit(view=view)
+
+            embed = msg.embeds[0] if msg.embeds else discord.Embed()
+            draw_time_str = meta.get("draw_time")
+            if draw_time_str:
+                try:
+                    draw_time = datetime.datetime.fromisoformat(draw_time_str)
+                    ts = int(draw_time.timestamp())
+                    for idx, field in enumerate(embed.fields):
+                        if field.name == "Draw Time":
+                            embed.set_field_at(
+                                idx,
+                                name="Draw Time",
+                                value=f"<t:{ts}:F>",
+                                inline=field.inline,
+                            )
+                            break
+                except Exception as exc:  # pylint: disable=broad-except
+                    log.exception("Failed to update draw time field: %s", exc)
+            embed.timestamp = None
+
+            await msg.edit(embed=embed, view=view)
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to update message: %s", exc)
 
