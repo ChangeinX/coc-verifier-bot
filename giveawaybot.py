@@ -197,8 +197,12 @@ async def schedule_check() -> None:
             await create_giveaway(
                 gid,
                 "🎁 $10 Gift Card Giveaway",
-                "If you used all your attacks in raid weekend: "
-                "Enter for a chance to win a $10 gift card! Up to 3 winners.",
+                (
+                    "If you earned at least 23,000 capital raid loot: "
+                    "Enter for a chance to win a $10 gift card! Up to 3 winners.\n"
+                    "Some regions can't receive gift cards; we'll try PayPal, "
+                    "or Gold Passes if PayPal isn't available."
+                ),
                 draw_time,
             )
 
@@ -224,9 +228,13 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
         entry = raid_log[0]
         log.info(f"entry: {entry}")
         member = entry.get_member(tag)
-        log.info("Attack count: %s", member.attack_count if member else "None")
-        log.info("Attack limit: %s", member.attack_limit if member else "None")
-        return member.attack_count >= member.attack_limit
+        log.info(
+            "Capital loot: %s",
+            member.capital_resources_looted if member else "None",
+        )
+        if member is None:
+            return False
+        return member.capital_resources_looted >= 23_000
     try:
         resp = ver_table.get_item(Key={"discord_id": discord_id})
     except Exception as exc:  # pylint: disable=broad-except
@@ -246,7 +254,7 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
         member = entry.get_member(tag)
         if member is None:
             return False
-        return member.attack_count >= member.attack_limit
+        return member.capital_resources_looted >= 23_000
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Raid log check failed: %s", exc)
     return False
@@ -415,7 +423,7 @@ async def seed_initial_giveaways() -> None:
     await create_giveaway(
         weekly_giveaway_id(today),
         "\U0001F381 $10 Gift Card Giveaway",
-        "If you used all your attacks in raid weekend: "
+        "If you earned at least 23,000 capital raid loot: "
         "Enter for a chance to win a $10 gift card! Up to 3 winners.",
         draw_time,
     )
