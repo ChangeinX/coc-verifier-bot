@@ -134,7 +134,9 @@ class GiveawayView(discord.ui.View):
                     handled = True
             if not handled:
                 try:
-                    _typed = dynamodb.meta.client.exceptions.ConditionalCheckFailedException  # type: ignore[attr-defined]
+                    _typed = (
+                        dynamodb.meta.client.exceptions.ConditionalCheckFailedException
+                    )  # type: ignore[attr-defined]
                 except Exception:
                     _typed = None  # type: ignore
                 if _typed is not None and isinstance(exc, _typed):
