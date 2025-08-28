@@ -35,24 +35,3 @@ jobs:
           docker tag $NEWS_ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
           docker push ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
           echo "NEWS_IMAGE=${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
-
-      - uses: opentofu/setup-opentofu@v1
-
-      - name: Deploy infrastructure
-        run: |
-          cd infra
-          tofu init
-          tofu apply -auto-approve \
-            -var bot_image=$IMAGE \
-            -var news_bot_image=$NEWS_IMAGE \
-            -var discord_token=${{ secrets.DISCORD_TOKEN }} \
-            -var news_discord_token=${{ secrets.NEWS_DISCORD_TOKEN }} \
-            -var news_channel_id=${{ secrets.NEWS_CHANNEL_ID }} \
-            -var openai_api_key=${{ secrets.OPENAI_API_KEY }} \
-            -var coc_email=${{ secrets.COC_EMAIL }} \
-            -var coc_password=${{ secrets.COC_PASSWORD }} \
-            -var clan_tag=${{ secrets.CLAN_TAG }} \
-            -var verified_role_id=${{ secrets.VERIFIED_ROLE_ID }} \
-            -var admin_log_channel_id=${{ secrets.ADMIN_LOG_CHANNEL_ID }} \
-            -var subnets=${{ secrets.SUBNETS }} \
-            -var vpc_id=${{ secrets.VPC_ID }}
