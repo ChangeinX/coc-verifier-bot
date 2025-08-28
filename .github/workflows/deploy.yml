@@ -10,10 +10,10 @@ jobs:
     permissions:
       id-token: write
       contents: read
-  env:
-    AWS_REGION: us-east-1
-    ECR_REPOSITORY: coc-verifier-bot
-    NEWS_ECR_REPOSITORY: coc-news-bot
+    env:
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY: coc-verifier-bot
+      NEWS_ECR_REPOSITORY: coc-news-bot
     steps:
       - uses: actions/checkout@v4
 
