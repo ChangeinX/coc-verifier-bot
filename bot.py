@@ -11,10 +11,11 @@ Required env‑vars: DISCORD_TOKEN, COC_EMAIL, COC_PASSWORD, CLAN_TAG,
 VERIFIED_ROLE_ID, DDB_TABLE_NAME
 Optional: ADMIN_LOG_CHANNEL_ID (numeric), AWS_REGION
 """
+
 import asyncio
 import logging
 import os
-from typing import Final, Optional
+from typing import Final
 
 import boto3
 import coc
@@ -63,18 +64,23 @@ logging.basicConfig(
 log = logging.getLogger("coc-gateway")
 
 
-async def resolve_log_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+async def resolve_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
     """Return a TextChannel object or None if unavailable."""
     if not ADMIN_LOG_CHANNEL_ID:
         return None
 
     # First try guild cache -> global cache -> REST fetch
-    channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID) or bot.get_channel(ADMIN_LOG_CHANNEL_ID)
+    channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID) or bot.get_channel(
+        ADMIN_LOG_CHANNEL_ID
+    )
     if channel is None:
         try:
             channel = await bot.fetch_channel(ADMIN_LOG_CHANNEL_ID)
         except discord.HTTPException:
-            log.warning("Cannot fetch channel %s – invalid ID or not accessible", ADMIN_LOG_CHANNEL_ID)
+            log.warning(
+                "Cannot fetch channel %s – invalid ID or not accessible",
+                ADMIN_LOG_CHANNEL_ID,
+            )
             return None
 
     if isinstance(channel, discord.TextChannel):
@@ -84,6 +90,7 @@ async def resolve_log_channel(guild: discord.Guild) -> Optional[discord.TextChan
 
 
 # ---------- Clash API ----------
+
 
 async def get_player(player_tag: str) -> coc.Player | None:
     """Return player object or None on API error."""
@@ -106,7 +113,10 @@ async def is_member_of_clan(player_tag: str) -> bool:
 
 
 # ---------- /verify command ----------
-@tree.command(name="verify", description="Verify yourself as a clan member by providing your player tag.")
+@tree.command(
+    name="verify",
+    description="Verify yourself as a clan member by providing your player tag.",
+)
 @app_commands.describe(player_tag="Your Clash of Clans player tag, e.g. #ABCD123")
 async def verify(interaction: discord.Interaction, player_tag: str):
     await interaction.response.defer(ephemeral=True)
@@ -125,8 +135,14 @@ async def verify(interaction: discord.Interaction, player_tag: str):
 
     role = interaction.guild.get_role(VERIFIED_ROLE_ID)
     if role is None:
-        await interaction.followup.send("Setup error: verified role not found – contact an admin.", ephemeral=True)
-        log.error("Verified role ID %s not found in guild %s", VERIFIED_ROLE_ID, interaction.guild.id)
+        await interaction.followup.send(
+            "Setup error: verified role not found – contact an admin.", ephemeral=True
+        )
+        log.error(
+            "Verified role ID %s not found in guild %s",
+            VERIFIED_ROLE_ID,
+            interaction.guild.id,
+        )
         return
 
     try:
@@ -139,7 +155,9 @@ async def verify(interaction: discord.Interaction, player_tag: str):
         log.warning("Forbidden when adding role to %s", interaction.user)
         return
     except discord.HTTPException as exc:
-        await interaction.followup.send("Unexpected Discord error – try again later.", ephemeral=True)
+        await interaction.followup.send(
+            "Unexpected Discord error – try again later.", ephemeral=True
+        )
         log.exception("HTTPException adding role: %s", exc)
         return
 
@@ -158,9 +176,11 @@ async def verify(interaction: discord.Interaction, player_tag: str):
 
     await interaction.followup.send("✅ Success! You now have access.", ephemeral=True)
 
-    if (log_chan := await resolve_log_channel(interaction.guild)):
+    if log_chan := await resolve_log_channel(interaction.guild):
         try:
-            await log_chan.send(f"{interaction.user.mention} verified with tag {player_tag}.")
+            await log_chan.send(
+                f"{interaction.user.mention} verified with tag {player_tag}."
+            )
         except discord.Forbidden:
             log.warning("No send permission in log channel %s", log_chan.id)
         except discord.HTTPException as exc:
@@ -189,7 +209,9 @@ async def whois(interaction: discord.Interaction, member: discord.Member):
         await interaction.followup.send("No record found.", ephemeral=True)
         return
 
-    await interaction.followup.send(f"{member.display_name} is {item['player_name']}", ephemeral=True)
+    await interaction.followup.send(
+        f"{member.display_name} is {item['player_name']}", ephemeral=True
+    )
 
 
 # ---------- Clan membership check ----------
@@ -211,8 +233,17 @@ async def membership_check() -> None:
         if member is None:
             continue
         player = await get_player(item["player_tag"])
-        log.info("Player %s (%s) in clan %s", player, item["player_tag"], player.clan.tag if player and player.clan else "None")
-        if player is None or not player.clan or player.clan.tag.upper() != CLAN_TAG.upper():
+        log.info(
+            "Player %s (%s) in clan %s",
+            player,
+            item["player_tag"],
+            player.clan.tag if player and player.clan else "None",
+        )
+        if (
+            player is None
+            or not player.clan
+            or player.clan.tag.upper() != CLAN_TAG.upper()
+        ):
             try:
                 # await member.kick(reason="Left clan")
                 log.warning("TEST MODE: Would kick %s for leaving clan", member)
@@ -224,6 +255,7 @@ async def membership_check() -> None:
                 table.delete_item(Key={"discord_id": item["discord_id"]})
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Failed to delete record for %s: %s", member, exc)
+
 
 # ---------- Lifecycle ----------
 @bot.event

@@ -3,15 +3,15 @@ import calendar
 import datetime
 import logging
 import os
+import random
 import uuid
 from typing import Final
 from zoneinfo import ZoneInfo
 
 import boto3
-from boto3.dynamodb import conditions
 import coc
-import random
 import discord
+from boto3.dynamodb import conditions
 from discord import app_commands
 from discord.ext import tasks
 
@@ -64,8 +64,9 @@ class GiveawayView(discord.ui.View):
             return 0
         try:
             resp = table.query(
-                KeyConditionExpression=
-                conditions.Key("giveaway_id").eq(self.giveaway_id)
+                KeyConditionExpression=conditions.Key("giveaway_id").eq(
+                    self.giveaway_id
+                )
                 & conditions.Key("user_id").begins_with(f"{self.run_id}#")
             )
             users = {
@@ -93,9 +94,13 @@ class GiveawayView(discord.ui.View):
             return 0
 
     @discord.ui.button(label="Enter Giveaway", style=discord.ButtonStyle.green)
-    async def enter(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:  # pylint: disable=unused-argument
+    async def enter(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:  # pylint: disable=unused-argument
         if table is None:
-            await interaction.response.send_message("Database not configured", ephemeral=True)
+            await interaction.response.send_message(
+                "Database not configured", ephemeral=True
+            )
             return
         try:
             table.put_item(
@@ -110,15 +115,40 @@ class GiveawayView(discord.ui.View):
                 f"You're entered! ({count} entries)",
                 ephemeral=True,
             )
-        except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:  # type: ignore[attr-defined]
-            count = await self._update_entry_count()
-            await interaction.response.send_message(
-                f"You're already entered! ({count} entries)",
-                ephemeral=True,
-            )
         except Exception as exc:  # pylint: disable=broad-except
-            log.exception("Failed to record entry: %s", exc)
-            await interaction.response.send_message("Entry failed", ephemeral=True)
+            # Handle conditional check failure (already entered) and generic errors
+            handled = False
+            try:
+                from botocore.exceptions import ClientError  # type: ignore
+            except Exception:  # pragma: no cover
+                ClientError = None  # type: ignore
+
+            if ClientError is not None and isinstance(exc, ClientError):
+                code = exc.response.get("Error", {}).get("Code")
+                if code == "ConditionalCheckFailedException":
+                    count = await self._update_entry_count()
+                    await interaction.response.send_message(
+                        f"You're already entered! ({count} entries)",
+                        ephemeral=True,
+                    )
+                    handled = True
+            if not handled:
+                try:
+                    _typed = (
+                        dynamodb.meta.client.exceptions.ConditionalCheckFailedException
+                    )  # type: ignore[attr-defined]
+                except Exception:
+                    _typed = None  # type: ignore
+                if _typed is not None and isinstance(exc, _typed):
+                    count = await self._update_entry_count()
+                    await interaction.response.send_message(
+                        f"You're already entered! ({count} entries)",
+                        ephemeral=True,
+                    )
+                    handled = True
+            if not handled:
+                log.exception("Failed to record entry: %s", exc)
+                await interaction.response.send_message("Entry failed", ephemeral=True)
 
 
 async def create_giveaway(
@@ -128,9 +158,8 @@ async def create_giveaway(
     if table is None or not bot.guilds:
         return
     if TEST_MODE:
-        draw_time = (
-            datetime.datetime.now(tz=datetime.timezone.utc)
-            + datetime.timedelta(minutes=1)
+        draw_time = datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(
+            minutes=1
         )
     channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
     if not isinstance(channel, discord.TextChannel):
@@ -139,7 +168,7 @@ async def create_giveaway(
     run_id = uuid.uuid4().hex
     view = GiveawayView(giveaway_id, run_id)
     draw_time = (
-        draw_time if draw_time.tzinfo else draw_time.replace(tzinfo=datetime.timezone.utc)
+        draw_time if draw_time.tzinfo else draw_time.replace(tzinfo=datetime.UTC)
     )
     ts = int(draw_time.timestamp())
     embed = discord.Embed(title=title, description=description, timestamp=draw_time)
@@ -163,6 +192,7 @@ async def create_giveaway(
 def month_end_giveaway_id(date: datetime.date) -> str:
     return f"goldpass-{date:%Y-%m}"
 
+
 def weekly_giveaway_id(date: datetime.date) -> str:
     return f"giftcard-{date:%Y-%m-%d}"
 
@@ -173,7 +203,9 @@ async def schedule_check() -> None:
 
     # Gold pass 5 days before month end
     last_day = calendar.monthrange(today.year, today.month)[1]
-    target = datetime.date(today.year, today.month, last_day) - datetime.timedelta(days=5)
+    target = datetime.date(today.year, today.month, last_day) - datetime.timedelta(
+        days=5
+    )
     if today == target:
         gid = month_end_giveaway_id(today)
         if not await giveaway_exists(gid):
@@ -181,8 +213,7 @@ async def schedule_check() -> None:
                 gid,
                 "🏆 Gold Pass Giveaway",
                 "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
-                datetime.datetime.now(tz=datetime.timezone.utc)
-                + datetime.timedelta(days=1),
+                datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=1),
             )
 
     # Gift card every Thursday
@@ -193,7 +224,7 @@ async def schedule_check() -> None:
             draw_time = datetime.datetime.combine(
                 sunday,
                 datetime.time(hour=18, tzinfo=ZoneInfo("America/Chicago")),
-            ).astimezone(datetime.timezone.utc)
+            ).astimezone(datetime.UTC)
             await create_giveaway(
                 gid,
                 "🎁 $10 Gift Card Giveaway",
@@ -205,6 +236,7 @@ async def schedule_check() -> None:
                 ),
                 draw_time,
             )
+
 
 async def giveaway_exists(giveaway_id: str) -> bool:
     if table is None:
@@ -269,8 +301,7 @@ async def finish_giveaway(gid: str) -> None:
             return
         run_id = meta.get("run_id", "")
         resp = table.query(
-            KeyConditionExpression=
-            conditions.Key("giveaway_id").eq(gid)
+            KeyConditionExpression=conditions.Key("giveaway_id").eq(gid)
             & conditions.Key("user_id").begins_with(f"{run_id}#")
         )
         entries = {
@@ -369,7 +400,7 @@ async def draw_check() -> None:
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Scan failed: %s", exc)
         return
-    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    now = datetime.datetime.now(tz=datetime.UTC)
     for item in resp.get("Items", []):
         if item.get("drawn"):
             continue
@@ -381,7 +412,7 @@ async def draw_check() -> None:
         except ValueError:
             continue
         if draw_time.tzinfo is None:
-            draw_time = draw_time.replace(tzinfo=datetime.timezone.utc)
+            draw_time = draw_time.replace(tzinfo=datetime.UTC)
         if now >= draw_time:
             await finish_giveaway(item["giveaway_id"])
 
@@ -408,10 +439,9 @@ async def seed_initial_giveaways() -> None:
     # Gold pass giveaway drawn in 1 day
     await create_giveaway(
         month_end_giveaway_id(today),
-        "\U0001F3C6 Gold Pass Giveaway",
+        "\U0001f3c6 Gold Pass Giveaway",
         "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
-        datetime.datetime.now(tz=datetime.timezone.utc)
-        + datetime.timedelta(days=1),
+        datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=1),
     )
 
     # Gift card giveaway drawn on the upcoming Sunday at 18:00 Central
@@ -419,10 +449,10 @@ async def seed_initial_giveaways() -> None:
     draw_time = datetime.datetime.combine(
         sunday,
         datetime.time(hour=18, tzinfo=ZoneInfo("America/Chicago")),
-    ).astimezone(datetime.timezone.utc)
+    ).astimezone(datetime.UTC)
     await create_giveaway(
         weekly_giveaway_id(today),
-        "\U0001F381 $10 Gift Card Giveaway",
+        "\U0001f381 $10 Gift Card Giveaway",
         "If you earned at least 23,000 capital raid loot: "
         "Enter for a chance to win a $10 gift card! Up to 3 winners.",
         draw_time,
@@ -444,15 +474,13 @@ async def on_ready() -> None:
             month_end_giveaway_id(datetime.date.today()),
             "🏆 Gold Pass Giveaway (Test)",
             "Test mode giveaway! Click to enter.",
-            datetime.datetime.now(tz=datetime.timezone.utc)
-            + datetime.timedelta(minutes=1),
+            datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(minutes=1),
         )
         await create_giveaway(
             weekly_giveaway_id(datetime.date.today()),
             "🎁 $10 Gift Card Giveaway (Test)",
             "Test mode gift card giveaway!",
-            datetime.datetime.now(tz=datetime.timezone.utc)
-            + datetime.timedelta(minutes=1),
+            datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(minutes=1),
         )
 
 
