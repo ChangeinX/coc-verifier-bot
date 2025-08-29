@@ -14,9 +14,11 @@ jobs:
       AWS_REGION: us-east-1
       ECR_REPOSITORY: coc-verifier-bot
       NEWS_ECR_REPOSITORY: coc-news-bot
+      GIVEAWAY_ECR_REPOSITORY: coc-giveaway-bot
       ECS_CLUSTER: coc-verifier-cluster
       BOT_SERVICE: coc-bot
       NEWS_SERVICE: coc-news-bot
+      GIVEAWAY_SERVICE: coc-giveaway-bot
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +40,10 @@ jobs:
           docker tag $NEWS_ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
           docker push ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
           echo "NEWS_IMAGE=${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
+          docker build -t $GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA -f Dockerfile.giveaway .
+          docker tag $GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA
+          docker push ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA
+          echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
 
       - name: Register new task definitions and deploy to ECS
         run: |
@@ -107,8 +113,40 @@ jobs:
             --force-new-deployment \
             --region "$AWS_REGION"
 
+          echo "Preparing updated task definition for coc-giveaway-bot..."
+          aws ecs describe-task-definition \
+            --task-definition coc-giveaway-bot \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition' \
+            --output json > td-giveaway.json
+
+          cat td-giveaway.json \
+            | jq '{
+                family,
+                taskRoleArn,
+                executionRoleArn,
+                networkMode,
+                containerDefinitions,
+                requiresCompatibilities,
+                cpu,
+                memory,
+                runtimePlatform
+              }' \
+            | jq ".containerDefinitions |= map(if .name==\"giveaway\" then (.image=env.GIVEAWAY_IMAGE) else . end)" \
+            > giveaway-taskdef.json
+
+          aws ecs register-task-definition \
+            --cli-input-json file://giveaway-taskdef.json \
+            --region "$AWS_REGION" >/dev/null
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$GIVEAWAY_SERVICE" \
+            --force-new-deployment \
+            --region "$AWS_REGION"
+
           echo "Waiting for services to stabilize..."
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
-            --services "$BOT_SERVICE" "$NEWS_SERVICE" \
+            --services "$BOT_SERVICE" "$NEWS_SERVICE" "$GIVEAWAY_SERVICE" \
             --region "$AWS_REGION"
