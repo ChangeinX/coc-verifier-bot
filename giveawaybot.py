@@ -23,7 +23,11 @@ GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID"))
 GIVEAWAY_TABLE_NAME: Final[str | None] = os.getenv("GIVEAWAY_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
 TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST").lower() in {"1", "true", "yes"}
-USE_FAIRNESS_SYSTEM: Final[bool] = os.getenv("USE_FAIRNESS_SYSTEM", "true").lower() in {"1", "true", "yes"}
+USE_FAIRNESS_SYSTEM: Final[bool] = os.getenv("USE_FAIRNESS_SYSTEM", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 COC_EMAIL: Final[str | None] = os.getenv("COC_EMAIL")
 COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")
@@ -332,14 +336,20 @@ async def finish_giveaway(gid: str) -> None:
         if USE_FAIRNESS_SYSTEM:
             try:
                 # Use fairness system for winner selection
-                winners = await select_fair_winners(table, entries, giveaway_type, winners_needed)
-                log.info(f"Selected {len(winners)} winners using fairness system for {gid}")
+                winners = await select_fair_winners(
+                    table, entries, giveaway_type, winners_needed
+                )
+                log.info(
+                    f"Selected {len(winners)} winners using fairness system for {gid}"
+                )
 
                 # Update statistics for all participants and winners
                 await update_giveaway_stats(table, winners, entries, gid, giveaway_type)
 
             except Exception as exc:
-                log.exception(f"Fairness system failed for {gid}, falling back to random: {exc}")
+                log.exception(
+                    f"Fairness system failed for {gid}, falling back to random: {exc}"
+                )
                 # Fallback to original random selection
                 random.shuffle(entries)
                 winners = entries[: min(winners_needed, len(entries))]
@@ -347,7 +357,9 @@ async def finish_giveaway(gid: str) -> None:
             # Original random selection (backward compatibility)
             random.shuffle(entries)
             winners = entries[: min(winners_needed, len(entries))]
-            log.info(f"Selected {len(winners)} winners using random selection for {gid}")
+            log.info(
+                f"Selected {len(winners)} winners using random selection for {gid}"
+            )
 
     channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
     if isinstance(channel, discord.TextChannel) and meta.get("message_id"):
@@ -448,6 +460,7 @@ async def fairness_maintenance() -> None:
 
     try:
         from giveaway_fairness import GiveawayFairness
+
         fairness = GiveawayFairness(table)
 
         # Apply time-based pity decay for inactive users
@@ -459,7 +472,9 @@ async def fairness_maintenance() -> None:
 
         if fairness.should_reset_population_pity(avg_pity):
             await fairness.apply_population_pity_reset(0.6)
-            log.info(f"Automatic population pity reset applied (avg pity was {avg_pity:.2f})")
+            log.info(
+                f"Automatic population pity reset applied (avg pity was {avg_pity:.2f})"
+            )
 
         log.debug("Daily fairness maintenance completed")
 
@@ -515,63 +530,109 @@ async def seed_initial_giveaways() -> None:
     )
 
 
-@tree.command(name="fairness_stats", description="Show giveaway fairness statistics (Admin only)")
+@tree.command(
+    name="fairness_stats", description="Show giveaway fairness statistics (Admin only)"
+)
 async def fairness_stats(interaction: discord.Interaction) -> None:
     """Show fairness system statistics."""
     if not USE_FAIRNESS_SYSTEM:
-        await interaction.response.send_message("Fairness system is disabled.", ephemeral=True)
+        await interaction.response.send_message(
+            "Fairness system is disabled.", ephemeral=True
+        )
         return
 
     try:
         from giveaway_fairness import GiveawayFairness
+
         fairness = GiveawayFairness(table)
         analytics = await fairness.get_fairness_analytics()
 
         if "error" in analytics:
-            await interaction.response.send_message(f"Error retrieving stats: {analytics['error']}", ephemeral=True)
+            await interaction.response.send_message(
+                f"Error retrieving stats: {analytics['error']}", ephemeral=True
+            )
             return
 
-        embed = discord.Embed(title="🎯 Giveaway Fairness Statistics", color=0x00ff00)
+        embed = discord.Embed(title="🎯 Giveaway Fairness Statistics", color=0x00FF00)
 
         if "message" in analytics:
             embed.add_field(name="Status", value=analytics["message"], inline=False)
         else:
-            embed.add_field(name="Total Users", value=analytics.get("total_users", 0), inline=True)
-            embed.add_field(name="Average Pity", value=f"{analytics.get('average_pity', 0):.2f}", inline=True)
-            embed.add_field(name="Average Wins", value=f"{analytics.get('average_wins', 0):.2f}", inline=True)
-            embed.add_field(name="Average Entries", value=f"{analytics.get('average_entries', 0):.2f}", inline=True)
-            embed.add_field(name="High Pity Users", value=analytics.get("high_pity_count", 0), inline=True)
-            embed.add_field(name="Never Won Users", value=analytics.get("never_won_count", 0), inline=True)
+            embed.add_field(
+                name="Total Users", value=analytics.get("total_users", 0), inline=True
+            )
+            embed.add_field(
+                name="Average Pity",
+                value=f"{analytics.get('average_pity', 0):.2f}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Average Wins",
+                value=f"{analytics.get('average_wins', 0):.2f}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Average Entries",
+                value=f"{analytics.get('average_entries', 0):.2f}",
+                inline=True,
+            )
+            embed.add_field(
+                name="High Pity Users",
+                value=analytics.get("high_pity_count", 0),
+                inline=True,
+            )
+            embed.add_field(
+                name="Never Won Users",
+                value=analytics.get("never_won_count", 0),
+                inline=True,
+            )
 
             health = analytics.get("system_health", "unknown")
             health_emoji = "🟢" if health == "good" else "🟡"
-            embed.add_field(name="System Health", value=f"{health_emoji} {health.title()}", inline=False)
+            embed.add_field(
+                name="System Health",
+                value=f"{health_emoji} {health.title()}",
+                inline=False,
+            )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     except Exception as exc:
         log.exception(f"Failed to get fairness stats: {exc}")
-        await interaction.response.send_message("Failed to retrieve fairness statistics.", ephemeral=True)
+        await interaction.response.send_message(
+            "Failed to retrieve fairness statistics.", ephemeral=True
+        )
 
 
-@tree.command(name="reset_population_pity", description="Reset pity for all users (Admin only)")
-async def reset_population_pity(interaction: discord.Interaction, factor: float = 0.5) -> None:
+@tree.command(
+    name="reset_population_pity", description="Reset pity for all users (Admin only)"
+)
+async def reset_population_pity(
+    interaction: discord.Interaction, factor: float = 0.5
+) -> None:
     """Reset pity levels for all users."""
     if not USE_FAIRNESS_SYSTEM:
-        await interaction.response.send_message("Fairness system is disabled.", ephemeral=True)
+        await interaction.response.send_message(
+            "Fairness system is disabled.", ephemeral=True
+        )
         return
 
     # Simple admin check - you might want to make this more sophisticated
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("This command requires administrator permissions.", ephemeral=True)
+        await interaction.response.send_message(
+            "This command requires administrator permissions.", ephemeral=True
+        )
         return
 
     if factor <= 0 or factor > 1:
-        await interaction.response.send_message("Reset factor must be between 0 and 1.", ephemeral=True)
+        await interaction.response.send_message(
+            "Reset factor must be between 0 and 1.", ephemeral=True
+        )
         return
 
     try:
         from giveaway_fairness import GiveawayFairness
+
         fairness = GiveawayFairness(table)
 
         await interaction.response.defer(ephemeral=True)
@@ -581,36 +642,49 @@ async def reset_population_pity(interaction: discord.Interaction, factor: float 
         await interaction.followup.send(
             f"✅ Applied population pity reset with factor {factor}. "
             f"All user pity values have been multiplied by {factor}.",
-            ephemeral=True
+            ephemeral=True,
         )
 
-        log.info(f"Population pity reset applied by {interaction.user} with factor {factor}")
+        log.info(
+            f"Population pity reset applied by {interaction.user} with factor {factor}"
+        )
 
     except Exception as exc:
         log.exception(f"Failed to apply population pity reset: {exc}")
-        await interaction.followup.send("Failed to apply population pity reset.", ephemeral=True)
+        await interaction.followup.send(
+            "Failed to apply population pity reset.", ephemeral=True
+        )
 
 
-@tree.command(name="fairness_decay", description="Apply time-based pity decay (Admin only)")
+@tree.command(
+    name="fairness_decay", description="Apply time-based pity decay (Admin only)"
+)
 async def apply_fairness_decay(interaction: discord.Interaction) -> None:
     """Apply time-based pity decay for inactive users."""
     if not USE_FAIRNESS_SYSTEM:
-        await interaction.response.send_message("Fairness system is disabled.", ephemeral=True)
+        await interaction.response.send_message(
+            "Fairness system is disabled.", ephemeral=True
+        )
         return
 
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("This command requires administrator permissions.", ephemeral=True)
+        await interaction.response.send_message(
+            "This command requires administrator permissions.", ephemeral=True
+        )
         return
 
     try:
         from giveaway_fairness import GiveawayFairness
+
         fairness = GiveawayFairness(table)
 
         await interaction.response.defer(ephemeral=True)
 
         await fairness.apply_time_based_decay()
 
-        await interaction.followup.send("✅ Applied time-based pity decay for inactive users.", ephemeral=True)
+        await interaction.followup.send(
+            "✅ Applied time-based pity decay for inactive users.", ephemeral=True
+        )
         log.info(f"Time-based pity decay applied by {interaction.user}")
 
     except Exception as exc:
@@ -635,7 +709,9 @@ async def on_ready() -> None:
 
     # Log fairness system status
     fairness_status = "enabled" if USE_FAIRNESS_SYSTEM else "disabled"
-    log.info("Giveaway bot ready as %s (Fairness system: %s)", bot.user, fairness_status)
+    log.info(
+        "Giveaway bot ready as %s (Fairness system: %s)", bot.user, fairness_status
+    )
 
     if TEST_MODE:
         await create_giveaway(

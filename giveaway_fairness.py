@@ -28,6 +28,7 @@ log = logging.getLogger("giveaway-fairness")
 @dataclass
 class UserStats:
     """User statistics for giveaway fairness calculations."""
+
     discord_id: str
     total_entries: int = 0
     total_wins: int = 0
@@ -37,7 +38,9 @@ class UserStats:
     participation_streak: int = 0
     goldpass_wins: int = 0
     giftcard_wins: int = 0
-    created_date: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(tz=datetime.UTC))
+    created_date: datetime.datetime = field(
+        default_factory=lambda: datetime.datetime.now(tz=datetime.UTC)
+    )
     last_entry_date: datetime.datetime | None = None
 
     def to_dynamodb_item(self) -> dict:
@@ -78,11 +81,15 @@ class UserStats:
         if "last_win_date" in item:
             stats.last_win_date = datetime.datetime.fromisoformat(item["last_win_date"])
         if "last_reset_date" in item:
-            stats.last_reset_date = datetime.datetime.fromisoformat(item["last_reset_date"])
+            stats.last_reset_date = datetime.datetime.fromisoformat(
+                item["last_reset_date"]
+            )
         if "created_date" in item:
             stats.created_date = datetime.datetime.fromisoformat(item["created_date"])
         if "last_entry_date" in item:
-            stats.last_entry_date = datetime.datetime.fromisoformat(item["last_entry_date"])
+            stats.last_entry_date = datetime.datetime.fromisoformat(
+                item["last_entry_date"]
+            )
 
         return stats
 
@@ -90,29 +97,30 @@ class UserStats:
 @dataclass
 class FairnessConfig:
     """Configuration for fairness algorithm."""
+
     # Pity system parameters
     base_pity_increment: float = 0.25  # Increase per consecutive loss
-    max_pity_multiplier: float = 4.0   # Maximum pity multiplier
-    pity_decay_rate: float = 0.05      # Monthly pity decay when inactive
+    max_pity_multiplier: float = 4.0  # Maximum pity multiplier
+    pity_decay_rate: float = 0.05  # Monthly pity decay when inactive
 
     # Participation bonuses
     participation_bonus_cap: float = 1.5  # Max bonus for consistent participation
-    participation_threshold: int = 5      # Entries needed for participation bonus
+    participation_threshold: int = 5  # Entries needed for participation bonus
 
     # Cooldown system
-    major_win_cooldown_days: int = 14     # Cooldown after Gold Pass wins
-    minor_win_cooldown_days: int = 7      # Cooldown after Gift Card wins
+    major_win_cooldown_days: int = 14  # Cooldown after Gold Pass wins
+    minor_win_cooldown_days: int = 7  # Cooldown after Gift Card wins
     cooldown_weight_reduction: float = 0.3  # Weight reduction during cooldown
 
     # Reset logic
-    major_win_pity_reset: float = 1.0     # Reset pity to base after major win
+    major_win_pity_reset: float = 1.0  # Reset pity to base after major win
     minor_win_pity_reduction: float = 0.5  # Reduce pity by this factor after minor win
-    monthly_pity_decay: float = 0.1       # Monthly natural pity decay
+    monthly_pity_decay: float = 0.1  # Monthly natural pity decay
 
     # Edge case handling
-    small_pool_threshold: int = 8         # Pool size considered "small"
-    new_user_pity_boost: float = 1.5      # Initial pity for new users
-    inactive_user_days: int = 30          # Days before user considered inactive
+    small_pool_threshold: int = 8  # Pool size considered "small"
+    new_user_pity_boost: float = 1.5  # Initial pity for new users
+    inactive_user_days: int = 30  # Days before user considered inactive
 
 
 class GiveawayFairness:
@@ -155,11 +163,12 @@ class GiveawayFairness:
             else:
                 # Create new user stats with new user boost
                 stats = UserStats(
-                    discord_id=discord_id,
-                    current_pity=self.config.new_user_pity_boost
+                    discord_id=discord_id, current_pity=self.config.new_user_pity_boost
                 )
                 await self._save_user_stats(stats)
-                log.info(f"Created new user stats for {discord_id} with pity boost {self.config.new_user_pity_boost}")
+                log.info(
+                    f"Created new user stats for {discord_id} with pity boost {self.config.new_user_pity_boost}"
+                )
                 return stats
 
         except Exception as exc:
@@ -176,7 +185,7 @@ class GiveawayFairness:
             item = {
                 "giveaway_id": "USER_STATS",
                 "user_id": f"STATS#{stats.discord_id}",
-                **stats.to_dynamodb_item()
+                **stats.to_dynamodb_item(),
             }
 
             self.table.put_item(Item=item)
@@ -185,8 +194,9 @@ class GiveawayFairness:
         except Exception as exc:
             log.exception(f"Failed to save user stats for {stats.discord_id}: {exc}")
 
-    def calculate_selection_weight(self, discord_id: str, stats: UserStats,
-                                 giveaway_type: str, pool_size: int) -> float:
+    def calculate_selection_weight(
+        self, discord_id: str, stats: UserStats, giveaway_type: str, pool_size: int
+    ) -> float:
         """
         Calculate selection weight for a user based on multiple factors.
 
@@ -210,7 +220,7 @@ class GiveawayFairness:
         if stats.total_entries >= self.config.participation_threshold:
             participation_bonus = min(
                 1.0 + (stats.total_entries * 0.02),  # 2% bonus per entry
-                self.config.participation_bonus_cap
+                self.config.participation_bonus_cap,
             )
 
         # 3. Recency factor (recent participation gets slight bonus)
@@ -227,9 +237,15 @@ class GiveawayFairness:
         if stats.last_win_date:
             days_since_win = (now - stats.last_win_date).days
 
-            if giveaway_type == "goldpass" and days_since_win < self.config.major_win_cooldown_days:
+            if (
+                giveaway_type == "goldpass"
+                and days_since_win < self.config.major_win_cooldown_days
+            ):
                 cooldown_factor = self.config.cooldown_weight_reduction
-            elif giveaway_type == "giftcard" and days_since_win < self.config.minor_win_cooldown_days:
+            elif (
+                giveaway_type == "giftcard"
+                and days_since_win < self.config.minor_win_cooldown_days
+            ):
                 cooldown_factor = self.config.cooldown_weight_reduction
 
         # 5. Small pool adjustments (reduce extreme weights for small pools)
@@ -240,18 +256,27 @@ class GiveawayFairness:
             log.debug(f"Small pool detected ({pool_size}), reducing pity impact")
 
         # Calculate final weight
-        final_weight = (base_weight * pity_weight * participation_bonus *
-                       recency_factor * cooldown_factor * pool_adjustment)
+        final_weight = (
+            base_weight
+            * pity_weight
+            * participation_bonus
+            * recency_factor
+            * cooldown_factor
+            * pool_adjustment
+        )
 
-        log.debug(f"Weight calculation for {discord_id}: "
-                 f"base={base_weight:.2f}, pity={pity_weight:.2f}, "
-                 f"participation={participation_bonus:.2f}, recency={recency_factor:.2f}, "
-                 f"cooldown={cooldown_factor:.2f}, final={final_weight:.2f}")
+        log.debug(
+            f"Weight calculation for {discord_id}: "
+            f"base={base_weight:.2f}, pity={pity_weight:.2f}, "
+            f"participation={participation_bonus:.2f}, recency={recency_factor:.2f}, "
+            f"cooldown={cooldown_factor:.2f}, final={final_weight:.2f}"
+        )
 
         return max(final_weight, 0.1)  # Ensure minimum weight
 
-    async def select_winners_fairly(self, entries: list[str], giveaway_type: str,
-                                  count: int) -> list[str]:
+    async def select_winners_fairly(
+        self, entries: list[str], giveaway_type: str, count: int
+    ) -> list[str]:
         """
         Select winners using the fairness algorithm.
 
@@ -267,7 +292,9 @@ class GiveawayFairness:
             return []
 
         pool_size = len(entries)
-        log.info(f"Selecting {count} winners from {pool_size} entries for {giveaway_type} giveaway")
+        log.info(
+            f"Selecting {count} winners from {pool_size} entries for {giveaway_type} giveaway"
+        )
 
         # Get user stats and calculate weights
         user_weights = {}
@@ -275,7 +302,9 @@ class GiveawayFairness:
 
         for discord_id in entries:
             stats = await self.get_user_stats(discord_id)
-            weight = self.calculate_selection_weight(discord_id, stats, giveaway_type, pool_size)
+            weight = self.calculate_selection_weight(
+                discord_id, stats, giveaway_type, pool_size
+            )
             user_weights[discord_id] = weight
             total_weight += weight
 
@@ -307,19 +336,22 @@ class GiveawayFairness:
             # Fallback selection if something goes wrong
             if selected_user is None:
                 selected_user = random.choice(remaining_entries)
-                log.warning(f"Fallback random selection used for winner {i+1}")
+                log.warning(f"Fallback random selection used for winner {i + 1}")
 
             winners.append(selected_user)
             remaining_entries.remove(selected_user)
             del remaining_weights[selected_user]
 
-            log.info(f"Selected winner {i+1}/{actual_count}: {selected_user} "
-                    f"(weight: {user_weights[selected_user]:.2f})")
+            log.info(
+                f"Selected winner {i + 1}/{actual_count}: {selected_user} "
+                f"(weight: {user_weights[selected_user]:.2f})"
+            )
 
         return winners
 
-    async def update_winner_stats(self, winners: list[str], giveaway_id: str,
-                                giveaway_type: str) -> None:
+    async def update_winner_stats(
+        self, winners: list[str], giveaway_id: str, giveaway_type: str
+    ) -> None:
         """
         Update statistics for winners and participants.
 
@@ -344,16 +376,19 @@ class GiveawayFairness:
                     # Major win: reset pity completely
                     stats.current_pity = self.config.major_win_pity_reset
                     stats.last_reset_date = now
-                    log.info(f"Major win for {discord_id}, pity reset to {stats.current_pity}")
+                    log.info(
+                        f"Major win for {discord_id}, pity reset to {stats.current_pity}"
+                    )
 
                 elif giveaway_type == "giftcard":
                     stats.giftcard_wins += 1
                     # Minor win: reduce pity but don't reset completely
                     stats.current_pity = max(
-                        1.0,
-                        stats.current_pity * self.config.minor_win_pity_reduction
+                        1.0, stats.current_pity * self.config.minor_win_pity_reduction
                     )
-                    log.info(f"Minor win for {discord_id}, pity reduced to {stats.current_pity:.2f}")
+                    log.info(
+                        f"Minor win for {discord_id}, pity reduced to {stats.current_pity:.2f}"
+                    )
 
                 await self._save_user_stats(stats)
 
@@ -363,8 +398,9 @@ class GiveawayFairness:
             except Exception as exc:
                 log.exception(f"Failed to update winner stats for {discord_id}: {exc}")
 
-    async def _log_winner_selection(self, discord_id: str, giveaway_id: str,
-                                  giveaway_type: str) -> None:
+    async def _log_winner_selection(
+        self, discord_id: str, giveaway_id: str, giveaway_type: str
+    ) -> None:
         """Log winner selection for analytics and transparency."""
         if self.table is None:
             return
@@ -376,7 +412,9 @@ class GiveawayFairness:
                 "winner_discord_id": discord_id,
                 "original_giveaway_id": giveaway_id,
                 "giveaway_type": giveaway_type,
-                "selection_timestamp": datetime.datetime.now(tz=datetime.UTC).isoformat(),
+                "selection_timestamp": datetime.datetime.now(
+                    tz=datetime.UTC
+                ).isoformat(),
             }
 
             self.table.put_item(Item=item)
@@ -385,8 +423,9 @@ class GiveawayFairness:
         except Exception as exc:
             log.exception(f"Failed to log winner selection: {exc}")
 
-    async def update_participation_stats(self, participants: list[str],
-                                       giveaway_id: str) -> None:
+    async def update_participation_stats(
+        self, participants: list[str], giveaway_id: str
+    ) -> None:
         """
         Update participation statistics for all entrants.
 
@@ -411,13 +450,15 @@ class GiveawayFairness:
                 if stats.current_pity < self.config.max_pity_multiplier:
                     stats.current_pity = min(
                         stats.current_pity + self.config.base_pity_increment,
-                        self.config.max_pity_multiplier
+                        self.config.max_pity_multiplier,
                     )
 
                 await self._save_user_stats(stats)
 
             except Exception as exc:
-                log.exception(f"Failed to update participation stats for {discord_id}: {exc}")
+                log.exception(
+                    f"Failed to update participation stats for {discord_id}: {exc}"
+                )
 
     async def apply_time_based_decay(self) -> None:
         """
@@ -449,13 +490,17 @@ class GiveawayFairness:
                             decay_factor = self.config.pity_decay_rate * months_inactive
 
                             old_pity = stats.current_pity
-                            stats.current_pity = max(1.0, stats.current_pity - decay_factor)
+                            stats.current_pity = max(
+                                1.0, stats.current_pity - decay_factor
+                            )
 
                             if old_pity != stats.current_pity:
                                 await self._save_user_stats(stats)
                                 decay_count += 1
-                                log.debug(f"Applied pity decay to {stats.discord_id}: "
-                                         f"{old_pity:.2f} -> {stats.current_pity:.2f}")
+                                log.debug(
+                                    f"Applied pity decay to {stats.discord_id}: "
+                                    f"{old_pity:.2f} -> {stats.current_pity:.2f}"
+                                )
 
                 except Exception as exc:
                     log.exception(f"Failed to apply decay to user stats: {exc}")
@@ -506,7 +551,9 @@ class GiveawayFairness:
 
             # Find users with extreme pity values
             high_pity_users = [u for u in users if u.current_pity > 3.0]
-            never_won_users = [u for u in users if u.total_wins == 0 and u.total_entries > 5]
+            never_won_users = [
+                u for u in users if u.total_wins == 0 and u.total_entries > 5
+            ]
 
             return {
                 "total_users": user_count,
@@ -515,7 +562,7 @@ class GiveawayFairness:
                 "average_entries": round(avg_entries, 2),
                 "high_pity_count": len(high_pity_users),
                 "never_won_count": len(never_won_users),
-                "system_health": "good" if avg_pity < 2.5 else "needs_attention"
+                "system_health": "good" if avg_pity < 2.5 else "needs_attention",
             }
 
         except Exception as exc:
@@ -565,22 +612,27 @@ class GiveawayFairness:
                     await self._save_user_stats(stats)
                     reset_count += 1
 
-                    log.debug(f"Population reset for {stats.discord_id}: "
-                             f"{old_pity:.2f} -> {stats.current_pity:.2f}")
+                    log.debug(
+                        f"Population reset for {stats.discord_id}: "
+                        f"{old_pity:.2f} -> {stats.current_pity:.2f}"
+                    )
 
                 except Exception as exc:
                     log.exception(f"Failed to reset user pity: {exc}")
 
-            log.info(f"Applied population pity reset to {reset_count} users "
-                    f"with factor {reset_factor}")
+            log.info(
+                f"Applied population pity reset to {reset_count} users "
+                f"with factor {reset_factor}"
+            )
 
         except Exception as exc:
             log.exception(f"Failed to apply population pity reset: {exc}")
 
 
 # Convenience function for easy integration
-async def select_fair_winners(table, entries: list[str], giveaway_type: str,
-                            count: int) -> list[str]:
+async def select_fair_winners(
+    table, entries: list[str], giveaway_type: str, count: int
+) -> list[str]:
     """
     Convenience function for fair winner selection.
 
@@ -598,8 +650,13 @@ async def select_fair_winners(table, entries: list[str], giveaway_type: str,
 
 
 # Convenience function for updating stats after winner selection
-async def update_giveaway_stats(table, winners: list[str], participants: list[str],
-                              giveaway_id: str, giveaway_type: str) -> None:
+async def update_giveaway_stats(
+    table,
+    winners: list[str],
+    participants: list[str],
+    giveaway_id: str,
+    giveaway_type: str,
+) -> None:
     """
     Convenience function for updating all giveaway statistics.
 

@@ -57,7 +57,7 @@ class TestUserStats(unittest.TestCase):
             "current_pity": "3.0",
             "last_win_date": "2023-01-15T00:00:00+00:00",
             "goldpass_wins": 1,
-            "giftcard_wins": 1
+            "giftcard_wins": 1,
         }
 
         stats = UserStats.from_dynamodb_item(item)
@@ -86,9 +86,7 @@ class TestFairnessConfig(unittest.TestCase):
     def test_custom_config(self):
         """Test configuration with custom values."""
         config = FairnessConfig(
-            base_pity_increment=0.5,
-            max_pity_multiplier=5.0,
-            new_user_pity_boost=2.0
+            base_pity_increment=0.5, max_pity_multiplier=5.0, new_user_pity_boost=2.0
         )
 
         self.assertEqual(config.base_pity_increment, 0.5)
@@ -124,7 +122,7 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
             "discord_id": self.user_id,
             "total_entries": 5,
             "current_pity": "2.5",
-            "total_wins": 1
+            "total_wins": 1,
         }
         self.mock_table.get_item.return_value = {"Item": mock_item}
 
@@ -167,11 +165,11 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
 
     def test_calculate_selection_weight_recent_winner(self):
         """Test weight calculation for recent winner."""
-        recent_date = datetime.datetime.now(tz=datetime.UTC) - datetime.timedelta(days=5)
+        recent_date = datetime.datetime.now(tz=datetime.UTC) - datetime.timedelta(
+            days=5
+        )
         stats = UserStats(
-            discord_id=self.user_id,
-            last_win_date=recent_date,
-            total_wins=1
+            discord_id=self.user_id, last_win_date=recent_date, total_wins=1
         )
 
         weight = self.fairness.calculate_selection_weight(
@@ -185,7 +183,10 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
         stats = UserStats(discord_id=self.user_id, current_pity=4.0)
 
         weight = self.fairness.calculate_selection_weight(
-            self.user_id, stats, "goldpass", 5  # Small pool
+            self.user_id,
+            stats,
+            "goldpass",
+            5,  # Small pool
         )
 
         # Should be less than max pity due to small pool adjustment
@@ -197,7 +198,7 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
         stats = UserStats(
             discord_id=self.user_id,
             total_entries=10,  # Above threshold
-            current_pity=1.0
+            current_pity=1.0,
         )
 
         weight = self.fairness.calculate_selection_weight(
@@ -269,16 +270,13 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
         winners = [self.user_id]
 
         # Mock existing stats
-        mock_stats = UserStats(
-            discord_id=self.user_id,
-            current_pity=3.0,
-            total_wins=0
-        )
+        mock_stats = UserStats(discord_id=self.user_id, current_pity=3.0, total_wins=0)
 
         async def mock_get_stats(user_id):
             return mock_stats
 
         saved_stats = []
+
         async def mock_save_stats(stats):
             saved_stats.append(stats)
 
@@ -299,16 +297,13 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
         """Test winner stats update for Gift Card win."""
         winners = [self.user_id]
 
-        mock_stats = UserStats(
-            discord_id=self.user_id,
-            current_pity=3.0,
-            total_wins=0
-        )
+        mock_stats = UserStats(discord_id=self.user_id, current_pity=3.0, total_wins=0)
 
         async def mock_get_stats(user_id):
             return mock_stats
 
         saved_stats = []
+
         async def mock_save_stats(stats):
             saved_stats.append(stats)
 
@@ -335,6 +330,7 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
             return stats
 
         saved_stats = []
+
         async def mock_save_stats(stats):
             saved_stats.append(stats)
 
@@ -357,18 +353,19 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
             {
                 "discord_id": "active_user",
                 "current_pity": "2.0",
-                "last_entry_date": datetime.datetime.now(tz=datetime.UTC).isoformat()
+                "last_entry_date": datetime.datetime.now(tz=datetime.UTC).isoformat(),
             },
             {
                 "discord_id": "inactive_user",
                 "current_pity": "3.0",
-                "last_entry_date": old_date.isoformat()
-            }
+                "last_entry_date": old_date.isoformat(),
+            },
         ]
 
         self.mock_table.query.return_value = {"Items": mock_items}
 
         saved_stats = []
+
         async def mock_save_stats(stats):
             saved_stats.append(stats)
 
@@ -389,14 +386,14 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
                 "discord_id": "user1",
                 "total_entries": "10",
                 "total_wins": "1",
-                "current_pity": "2.0"
+                "current_pity": "2.0",
             },
             {
                 "discord_id": "user2",
                 "total_entries": "8",
                 "total_wins": "0",
-                "current_pity": "3.5"
-            }
+                "current_pity": "3.5",
+            },
         ]
 
         self.mock_table.query.return_value = {"Items": mock_items}
@@ -417,12 +414,13 @@ class TestGiveawayFairness(unittest.IsolatedAsyncioTestCase):
         """Test population-wide pity reset."""
         mock_items = [
             {"discord_id": "user1", "current_pity": "4.0"},
-            {"discord_id": "user2", "current_pity": "3.0"}
+            {"discord_id": "user2", "current_pity": "3.0"},
         ]
 
         self.mock_table.query.return_value = {"Items": mock_items}
 
         saved_stats = []
+
         async def mock_save_stats(stats):
             saved_stats.append(stats)
 
@@ -441,7 +439,7 @@ class TestConvenienceFunctions(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.mock_table = MagicMock()
 
-    @patch('giveaway_fairness.GiveawayFairness')
+    @patch("giveaway_fairness.GiveawayFairness")
     async def test_select_fair_winners(self, mock_fairness_class):
         """Test convenience function for winner selection."""
         mock_fairness = AsyncMock()
@@ -457,7 +455,7 @@ class TestConvenienceFunctions(unittest.IsolatedAsyncioTestCase):
             ["user1", "user2", "user3"], "goldpass", 2
         )
 
-    @patch('giveaway_fairness.GiveawayFairness')
+    @patch("giveaway_fairness.GiveawayFairness")
     async def test_update_giveaway_stats(self, mock_fairness_class):
         """Test convenience function for stats update."""
         mock_fairness = AsyncMock()
@@ -501,7 +499,9 @@ class TestEdgeCases(unittest.IsolatedAsyncioTestCase):
         # Very high pity
         stats = UserStats(discord_id="test", current_pity=100.0)
         weight = self.fairness.calculate_selection_weight("test", stats, "goldpass", 10)
-        self.assertEqual(weight, self.fairness.config.max_pity_multiplier)  # Should be capped
+        self.assertEqual(
+            weight, self.fairness.config.max_pity_multiplier
+        )  # Should be capped
 
         # Very old win date (should not affect calculation much)
         old_date = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
@@ -511,16 +511,21 @@ class TestEdgeCases(unittest.IsolatedAsyncioTestCase):
 
     async def test_select_winners_single_participant(self):
         """Test winner selection with only one participant."""
+
         async def mock_get_stats(user_id):
             return UserStats(discord_id=user_id)
 
         self.fairness.get_user_stats = mock_get_stats
 
-        winners = await self.fairness.select_winners_fairly(["only_user"], "goldpass", 1)
+        winners = await self.fairness.select_winners_fairly(
+            ["only_user"], "goldpass", 1
+        )
         self.assertEqual(winners, ["only_user"])
 
         # Request more winners than participants
-        winners = await self.fairness.select_winners_fairly(["only_user"], "goldpass", 3)
+        winners = await self.fairness.select_winners_fairly(
+            ["only_user"], "goldpass", 3
+        )
         self.assertEqual(winners, ["only_user"])
 
 
