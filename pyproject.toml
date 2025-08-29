@@ -45,6 +45,8 @@ markers = [
 source = ["."]
 omit = [
     "tests/*",
+    "test_*.py",
+    "*_test.py",
     "venv/*",
     ".venv/*",
     "*/site-packages/*",
@@ -52,6 +54,8 @@ omit = [
     "infra/*",
     "htmlcov/*",
     ".nox/*",
+    "fairness_simulation.py",
+    "noxfile.py",
 ]
 
 [tool.coverage.report]
