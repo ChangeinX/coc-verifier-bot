@@ -14,6 +14,9 @@ jobs:
       AWS_REGION: us-east-1
       ECR_REPOSITORY: coc-verifier-bot
       NEWS_ECR_REPOSITORY: coc-news-bot
+      ECS_CLUSTER: coc-verifier-cluster
+      BOT_SERVICE: coc-bot
+      NEWS_SERVICE: coc-news-bot
     steps:
       - uses: actions/checkout@v4
 
@@ -35,3 +38,77 @@ jobs:
           docker tag $NEWS_ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
           docker push ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
           echo "NEWS_IMAGE=${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
+
+      - name: Register new task definitions and deploy to ECS
+        run: |
+          set -euo pipefail
+
+          echo "Preparing updated task definition for coc-bot..."
+          aws ecs describe-task-definition \
+            --task-definition coc-bot \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition' \
+            --output json > td-bot.json
+
+          cat td-bot.json \
+            | jq '{
+                family,
+                taskRoleArn,
+                executionRoleArn,
+                networkMode,
+                containerDefinitions,
+                requiresCompatibilities,
+                cpu,
+                memory,
+                runtimePlatform
+              }' \
+            | jq ".containerDefinitions |= map(if .name==\"bot\" then (.image=env.IMAGE) else . end)" \
+            > bot-taskdef.json
+
+          aws ecs register-task-definition \
+            --cli-input-json file://bot-taskdef.json \
+            --region "$AWS_REGION" >/dev/null
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$BOT_SERVICE" \
+            --force-new-deployment \
+            --region "$AWS_REGION"
+
+          echo "Preparing updated task definition for coc-news-bot..."
+          aws ecs describe-task-definition \
+            --task-definition coc-news-bot \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition' \
+            --output json > td-news.json
+
+          cat td-news.json \
+            | jq '{
+                family,
+                taskRoleArn,
+                executionRoleArn,
+                networkMode,
+                containerDefinitions,
+                requiresCompatibilities,
+                cpu,
+                memory,
+                runtimePlatform
+              }' \
+            | jq ".containerDefinitions |= map(if .name==\"news\" then (.image=env.NEWS_IMAGE) else . end)" \
+            > news-taskdef.json
+
+          aws ecs register-task-definition \
+            --cli-input-json file://news-taskdef.json \
+            --region "$AWS_REGION" >/dev/null
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$NEWS_SERVICE" \
+            --force-new-deployment \
+            --region "$AWS_REGION"
+
+          echo "Waiting for services to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$BOT_SERVICE" "$NEWS_SERVICE" \
+            --region "$AWS_REGION"

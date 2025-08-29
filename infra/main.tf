@@ -273,7 +273,8 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
         { name = "COC_PASSWORD", value = var.coc_password },
         { name = "CLAN_TAG", value = var.clan_tag },
         { name = "AWS_REGION", value = var.aws_region },
-        { name = "GIVEAWAY_TEST", value = var.giveaway_test }
+        { name = "GIVEAWAY_TEST", value = var.giveaway_test },
+        { name = "USE_FAIRNESS_SYSTEM", value = "true" }
       ]
       logConfiguration = {
         logDriver = "awslogs"
