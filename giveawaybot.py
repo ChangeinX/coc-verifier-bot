@@ -22,7 +22,7 @@ TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
 GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID"))
 GIVEAWAY_TABLE_NAME: Final[str | None] = os.getenv("GIVEAWAY_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
-TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST").lower() in {"1", "true", "yes"}
+TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST", "false").lower() in {"1", "true", "yes"}
 USE_FAIRNESS_SYSTEM: Final[bool] = os.getenv("USE_FAIRNESS_SYSTEM", "true").lower() in {
     "1",
     "true",
