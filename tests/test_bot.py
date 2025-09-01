@@ -625,10 +625,8 @@ class TestMembershipCheck:
         ):
             await bot.membership_check()
 
-            # Verify deletion attempt
-            mock_table.delete_item.assert_called_once_with(
-                Key={"discord_id": "123456789"}
-            )
+            # Verify deletion is NOT called (log-only mode)
+            mock_table.delete_item.assert_not_called()
 
 
 class TestMainFunction:
