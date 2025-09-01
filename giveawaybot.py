@@ -22,7 +22,11 @@ TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
 GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID"))
 GIVEAWAY_TABLE_NAME: Final[str | None] = os.getenv("GIVEAWAY_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
-TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST", "false").lower() in {"1", "true", "yes"}
+TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 USE_FAIRNESS_SYSTEM: Final[bool] = os.getenv("USE_FAIRNESS_SYSTEM", "true").lower() in {
     "1",
     "true",
@@ -31,6 +35,7 @@ USE_FAIRNESS_SYSTEM: Final[bool] = os.getenv("USE_FAIRNESS_SYSTEM", "true").lowe
 COC_EMAIL: Final[str | None] = os.getenv("COC_EMAIL")
 COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")
+FEEDER_CLAN_TAG: Final[str | None] = os.getenv("FEEDER_CLAN_TAG")
 DDB_TABLE_NAME: Final[str | None] = os.getenv("DDB_TABLE_NAME")
 
 REQUIRED_VARS = (
@@ -263,8 +268,9 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
         resp = ver_table.get_item(Key={"discord_id": discord_id})
         item = resp.get("Item")
         tag = item.get("player_tag")
-        log.info(f"TEST_MODE: {TEST_MODE}, tag: {tag}")
-        raid_log = await coc_client.get_raid_log(CLAN_TAG, limit=1)
+        clan_tag = item.get("clan_tag", CLAN_TAG)
+        log.info(f"TEST_MODE: {TEST_MODE}, tag: {tag}, clan_tag: {clan_tag}")
+        raid_log = await coc_client.get_raid_log(clan_tag, limit=1)
         entry = raid_log[0]
         log.info(f"entry: {entry}")
         member = entry.get_member(tag)
@@ -286,8 +292,13 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
     tag = item.get("player_tag")
     if not tag:
         return False
+
+    clan_tag = item.get("clan_tag")
+    if not clan_tag:
+        clan_tag = CLAN_TAG
+
     try:
-        raid_log = await coc_client.get_raid_log(CLAN_TAG, limit=1)
+        raid_log = await coc_client.get_raid_log(clan_tag, limit=1)
         if not raid_log:
             return False
         entry = raid_log[0]
@@ -296,7 +307,7 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
             return False
         return member.capital_resources_looted >= 23_000
     except Exception as exc:  # pylint: disable=broad-except
-        log.exception("Raid log check failed: %s", exc)
+        log.exception("Raid log check failed for clan %s: %s", clan_tag, exc)
     return False
 
 

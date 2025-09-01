@@ -232,3 +232,4 @@ infra/.terraform.lock.hcl
 
 # Claude Code
 .claude/
+scripts/

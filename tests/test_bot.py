@@ -205,6 +205,70 @@ class TestClashAPIFunctions:
             assert result is False
 
     @pytest.mark.asyncio
+    async def test_is_member_of_feeder_clan_true(self):
+        """Test player is member of feeder clan."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_clan = MagicMock()
+        mock_clan.tag = "#FEEDERCLAN"
+        mock_player.clan = mock_clan
+
+        with (
+            patch.object(bot, "get_player", return_value=mock_player),
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "FEEDER_CLAN_TAG", "#FEEDERCLAN"),
+        ):
+            result = await bot.is_member_of_clan("#PLAYER1")
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_get_player_clan_tag_main_clan(self):
+        """Test get_player_clan_tag returns main clan tag."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_clan = MagicMock()
+        mock_clan.tag = "#TESTCLAN"
+        mock_player.clan = mock_clan
+
+        with (
+            patch.object(bot, "get_player", return_value=mock_player),
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "FEEDER_CLAN_TAG", "#FEEDERCLAN"),
+        ):
+            result = await bot.get_player_clan_tag("#PLAYER1")
+            assert result == "#TESTCLAN"
+
+    @pytest.mark.asyncio
+    async def test_get_player_clan_tag_feeder_clan(self):
+        """Test get_player_clan_tag returns feeder clan tag."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_clan = MagicMock()
+        mock_clan.tag = "#FEEDERCLAN"
+        mock_player.clan = mock_clan
+
+        with (
+            patch.object(bot, "get_player", return_value=mock_player),
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "FEEDER_CLAN_TAG", "#FEEDERCLAN"),
+        ):
+            result = await bot.get_player_clan_tag("#PLAYER1")
+            assert result == "#FEEDERCLAN"
+
+    @pytest.mark.asyncio
+    async def test_get_player_clan_tag_no_match(self):
+        """Test get_player_clan_tag returns None for non-member."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_clan = MagicMock()
+        mock_clan.tag = "#OTHERCLAN"
+        mock_player.clan = mock_clan
+
+        with (
+            patch.object(bot, "get_player", return_value=mock_player),
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "FEEDER_CLAN_TAG", "#FEEDERCLAN"),
+        ):
+            result = await bot.get_player_clan_tag("#PLAYER1")
+            assert result is None
+
+    @pytest.mark.asyncio
     async def test_is_member_of_clan_false_no_clan(self):
         """Test player has no clan."""
         mock_player = MagicMock(spec=coc.Player)
@@ -314,6 +378,43 @@ class TestVerifyCommand:
             get_player_mock.assert_called_with("#PLAYER1")
 
     @pytest.mark.asyncio
+    async def test_verify_feeder_clan_success(self, mock_interaction, mock_role):
+        """Test successful verification for feeder clan member."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_player.tag = "#PLAYER1"
+        mock_player.name = "TestPlayer"
+        mock_clan = MagicMock()
+        mock_clan.tag = "#FEEDERCLAN"
+        mock_player.clan = mock_clan
+
+        mock_interaction.guild.get_role.return_value = mock_role
+        mock_table = MagicMock()
+
+        with (
+            patch.object(bot, "get_player") as get_player_mock,
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "FEEDER_CLAN_TAG", "#FEEDERCLAN"),
+            patch.object(bot, "table", mock_table),
+            patch.object(bot, "resolve_log_channel", return_value=None),
+        ):
+            get_player_mock.return_value = mock_player
+
+            await bot.verify.callback(mock_interaction, "#PLAYER1")
+
+            mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+            mock_interaction.followup.send.assert_called_once_with(
+                "✅ Success! You now have access.", ephemeral=True
+            )
+            mock_interaction.user.add_roles.assert_called_once_with(
+                mock_role, reason="Passed CoC verification"
+            )
+
+            # Verify database storage includes clan_tag
+            mock_table.put_item.assert_called_once()
+            stored_item = mock_table.put_item.call_args[1]["Item"]
+            assert stored_item["clan_tag"] == "#FEEDERCLAN"
+
+    @pytest.mark.asyncio
     async def test_verify_not_clan_member(self, mock_interaction):
         """Test verification fails when player is not in clan."""
         with patch.object(bot, "get_player", return_value=None):
@@ -321,7 +422,7 @@ class TestVerifyCommand:
 
             mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
             mock_interaction.followup.send.assert_called_once_with(
-                "❌ Verification failed – you are not listed in the clan.",
+                "❌ Verification failed – you are not listed in any of our clans.",
                 ephemeral=True,
             )
 

@@ -28,6 +28,7 @@ DISCORD_TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
 COC_EMAIL: Final[str | None] = os.getenv("COC_EMAIL")
 COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")
+FEEDER_CLAN_TAG: Final[str | None] = os.getenv("FEEDER_CLAN_TAG")
 VERIFIED_ROLE_ID: Final[int] = int(os.getenv("VERIFIED_ROLE_ID", "0"))
 ADMIN_LOG_CHANNEL_ID: Final[int] = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
 DDB_TABLE_NAME: Final[str | None] = os.getenv("DDB_TABLE_NAME")
@@ -109,7 +110,25 @@ async def is_member_of_clan(player_tag: str) -> bool:
     player = await get_player(player_tag)
     if not player or not player.clan:
         return False
-    return player.clan.tag.upper() == CLAN_TAG.upper()
+    player_clan_tag = player.clan.tag.upper()
+    if CLAN_TAG and player_clan_tag == CLAN_TAG.upper():
+        return True
+    if FEEDER_CLAN_TAG and player_clan_tag == FEEDER_CLAN_TAG.upper():
+        return True
+    return False
+
+
+async def get_player_clan_tag(player_tag: str) -> str | None:
+    """Return the clan tag the player belongs to (main or feeder), or None if not a member."""
+    player = await get_player(player_tag)
+    if not player or not player.clan:
+        return None
+    player_clan_tag = player.clan.tag.upper()
+    if CLAN_TAG and player_clan_tag == CLAN_TAG.upper():
+        return CLAN_TAG.upper()
+    if FEEDER_CLAN_TAG and player_clan_tag == FEEDER_CLAN_TAG.upper():
+        return FEEDER_CLAN_TAG.upper()
+    return None
 
 
 # ---------- /verify command ----------
@@ -125,13 +144,15 @@ async def verify(interaction: discord.Interaction, player_tag: str):
     if not player_tag.startswith("#"):
         player_tag = "#" + player_tag
 
-    player = await get_player(player_tag)
-    if player is None or not player.clan or player.clan.tag.upper() != CLAN_TAG.upper():
+    player_clan_tag = await get_player_clan_tag(player_tag)
+    if player_clan_tag is None:
         await interaction.followup.send(
-            "❌ Verification failed – you are not listed in the clan.",
+            "❌ Verification failed – you are not listed in any of our clans.",
             ephemeral=True,
         )
         return
+
+    player = await get_player(player_tag)
 
     role = interaction.guild.get_role(VERIFIED_ROLE_ID)
     if role is None:
@@ -169,6 +190,7 @@ async def verify(interaction: discord.Interaction, player_tag: str):
                     "discord_name": interaction.user.name,
                     "player_tag": player.tag,
                     "player_name": player.name,
+                    "clan_tag": player_clan_tag,
                 }
             )
         except Exception as exc:  # pylint: disable=broad-except
@@ -239,11 +261,10 @@ async def membership_check() -> None:
             item["player_tag"],
             player.clan.tag if player and player.clan else "None",
         )
-        if (
-            player is None
-            or not player.clan
-            or player.clan.tag.upper() != CLAN_TAG.upper()
-        ):
+        current_clan_tag = await get_player_clan_tag(item["player_tag"])
+        stored_clan_tag = item.get("clan_tag")
+
+        if current_clan_tag is None:
             try:
                 # await member.kick(reason="Left clan")
                 log.warning("TEST MODE: Would kick %s for leaving clan", member)
@@ -255,6 +276,21 @@ async def membership_check() -> None:
                 table.delete_item(Key={"discord_id": item["discord_id"]})
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Failed to delete record for %s: %s", member, exc)
+        elif stored_clan_tag and current_clan_tag != stored_clan_tag:
+            try:
+                table.update_item(
+                    Key={"discord_id": item["discord_id"]},
+                    UpdateExpression="SET clan_tag = :new_clan_tag",
+                    ExpressionAttributeValues={":new_clan_tag": current_clan_tag},
+                )
+                log.info(
+                    "Updated clan tag for %s from %s to %s",
+                    member,
+                    stored_clan_tag,
+                    current_clan_tag,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception("Failed to update clan tag for %s: %s", member, exc)
 
 
 # ---------- Lifecycle ----------
