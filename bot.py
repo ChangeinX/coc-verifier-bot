@@ -274,7 +274,11 @@ async def membership_check() -> None:
                 log.exception("Failed to kick %s: %s", member, exc)
             try:
                 # table.delete_item(Key={"discord_id": item["discord_id"]})
-                log.warning("TEST MODE: Would delete record for %s (Discord ID: %s)", member, item["discord_id"])
+                log.warning(
+                    "TEST MODE: Would delete record for %s (Discord ID: %s)",
+                    member,
+                    item["discord_id"],
+                )
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Failed to delete record for %s: %s", member, exc)
         elif stored_clan_tag and current_clan_tag != stored_clan_tag:
