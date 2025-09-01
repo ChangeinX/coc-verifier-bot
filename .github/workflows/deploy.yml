@@ -146,4 +146,5 @@ jobs:
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
             --services "$BOT_SERVICE" "$NEWS_SERVICE" "$GIVEAWAY_SERVICE" \
-            --region "$AWS_REGION"
+            --region "$AWS_REGION" \
+            --cli-read-timeout 300
