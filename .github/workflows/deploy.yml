@@ -30,19 +30,16 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v1
         id: login
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push
         run: |
-          docker build -t $ECR_REPOSITORY:$GITHUB_SHA .
-          docker tag $ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA
-          docker push ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA
+          docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA --push .
           echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
-          docker build -t $NEWS_ECR_REPOSITORY:$GITHUB_SHA -f Dockerfile.news .
-          docker tag $NEWS_ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
-          docker push ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA
+          docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA --push -f Dockerfile.news .
           echo "NEWS_IMAGE=${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
-          docker build -t $GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA -f Dockerfile.giveaway .
-          docker tag $GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA
-          docker push ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA
+          docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA --push -f Dockerfile.giveaway .
           echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
 
       - name: Register new task definitions and deploy to ECS
