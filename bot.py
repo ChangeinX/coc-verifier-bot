@@ -281,11 +281,13 @@ async def membership_check() -> None:
                 table.update_item(
                     Key={"discord_id": item["discord_id"]},
                     UpdateExpression="SET clan_tag = :new_clan_tag",
-                    ExpressionAttributeValues={":new_clan_tag": current_clan_tag}
+                    ExpressionAttributeValues={":new_clan_tag": current_clan_tag},
                 )
                 log.info(
                     "Updated clan tag for %s from %s to %s",
-                    member, stored_clan_tag, current_clan_tag
+                    member,
+                    stored_clan_tag,
+                    current_clan_tag,
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Failed to update clan tag for %s: %s", member, exc)
