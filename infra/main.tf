@@ -29,6 +29,7 @@ variable "openai_api_key" {}
 variable "coc_email" {}
 variable "coc_password" {}
 variable "clan_tag" {}
+variable "feeder_clan_tag" { default = "" }
 variable "verified_role_id" {}
 variable "admin_log_channel_id" { default = "" }
 variable "giveaway_bot_image" {}
@@ -194,6 +195,7 @@ resource "aws_ecs_task_definition" "bot" {
         { name = "COC_EMAIL", value = var.coc_email },
         { name = "COC_PASSWORD", value = var.coc_password },
         { name = "CLAN_TAG", value = var.clan_tag },
+        { name = "FEEDER_CLAN_TAG", value = var.feeder_clan_tag },
         { name = "VERIFIED_ROLE_ID", value = var.verified_role_id },
         { name = "ADMIN_LOG_CHANNEL_ID", value = var.admin_log_channel_id },
         { name = "DDB_TABLE_NAME", value = aws_dynamodb_table.verifications.name },
@@ -272,6 +274,7 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
         { name = "COC_EMAIL", value = var.coc_email },
         { name = "COC_PASSWORD", value = var.coc_password },
         { name = "CLAN_TAG", value = var.clan_tag },
+        { name = "FEEDER_CLAN_TAG", value = var.feeder_clan_tag },
         { name = "AWS_REGION", value = var.aws_region },
         { name = "GIVEAWAY_TEST", value = var.giveaway_test },
         { name = "USE_FAIRNESS_SYSTEM", value = "true" }
