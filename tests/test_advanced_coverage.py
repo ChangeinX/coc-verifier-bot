@@ -2,7 +2,7 @@
 
 import datetime
 import os
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import discord
 import pytest
@@ -115,7 +115,6 @@ class TestAdvancedGiveawaybotCoverage:
         """Test test mode configuration."""
         assert hasattr(giveawaybot, "TEST_MODE")
         assert giveawaybot.TEST_MODE is False
-
 
 
 class TestCodeIntegration:
