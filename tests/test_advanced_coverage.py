@@ -2,7 +2,7 @@
 
 import datetime
 import os
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import discord
 import pytest
@@ -22,13 +22,10 @@ with patch.dict(
         "GIVEAWAY_CHANNEL_ID": "123456",
         "GIVEAWAY_TABLE_NAME": "test_giveaway_table",
         "GIVEAWAY_TEST": "false",
-        "NEWS_CHANNEL_ID": "123456",
-        "OPENAI_API_KEY": "fake_openai_key",
     },
 ):
     import bot
     import giveawaybot
-    import newsbot
 
 
 class TestAdvancedBotCoverage:
@@ -120,128 +117,6 @@ class TestAdvancedGiveawaybotCoverage:
         assert giveawaybot.TEST_MODE is False
 
 
-class TestAdvancedNewsbotCoverage:
-    """Advanced news bot coverage."""
-
-    def test_parse_town_hall_edge_cases(self):
-        """Test town hall parsing edge cases."""
-        # Test various formats
-        test_cases = [
-            ("TH 16", 16),
-            ("townhall17", 17),
-            ("TOWN HALL 11", 11),
-            (" th12 ", 12),
-            ("14", 14),
-            ("th", None),
-            ("", None),
-            ("invalid text", None),
-            ("th 100", 100),  # Edge case high number
-        ]
-
-        for input_text, expected in test_cases:
-            result = newsbot.parse_town_hall(input_text)
-            assert result == expected, f"Failed for input '{input_text}'"
-
-    def test_search_youtube_videos_complex(self):
-        """Test YouTube search with complex scenarios."""
-        test_queries = [
-            "th16 attack strategy",
-            "clash of clans update",
-            "best troops 2024",
-            "",  # Empty query
-            "special characters !@#$%",
-        ]
-
-        for query in test_queries:
-            with patch("requests.get") as mock_get:
-                mock_response = Mock()
-                mock_response.status_code = 404
-                mock_get.return_value = mock_response
-
-                videos = newsbot.search_youtube_videos(query)
-                # Should always return at least fallback videos
-                assert len(videos) >= 1
-
-    def test_generate_video_summary_edge_cases(self):
-        """Test video summary generation edge cases."""
-        test_videos = [
-            {},  # Empty video
-            {"title": ""},  # Empty title
-            {"title": "Test", "description": ""},  # Empty description
-        ]
-
-        for video in test_videos:
-            with patch.object(newsbot, "ai_summary", return_value=None):
-                result = newsbot.generate_video_summary(video)
-                # Should return original video when no AI response
-                assert result == video
-
-        # Test case where title key is missing - this tests a bug in the actual code
-        # The function assumes 'title' key exists but doesn't check for it
-        video_no_title = {"description": "No title"}
-        try:
-            with patch.object(newsbot, "ai_summary", return_value=None):
-                result = newsbot.generate_video_summary(video_no_title)
-                # If we get here, the function was fixed
-                assert result == video_no_title
-        except KeyError:
-            # This is the current behavior - function has a bug
-            # We can't fix the bug in our test, so we expect the exception
-            pass
-
-    def test_ai_summary_parsing(self):
-        """Test AI summary parsing with various formats."""
-        test_responses = [
-            "TITLE: Test Title\nSUMMARY: Test summary",
-            "Some random text\nTITLE: Another Title\nSUMMARY: Another summary",
-            "TITLE: Very Long Title That Exceeds Sixty Character Limit And Should Be Rejected",
-            "TITLE: Good Title\nSUMMARY:",  # Empty summary
-            "TITLE:\nSUMMARY: Good Summary",  # Empty title
-            "No valid format",  # No matching format
-        ]
-
-        video = {"title": "Original", "description": "Original desc"}
-
-        for response in test_responses:
-            with patch.object(newsbot, "ai_summary", return_value=response):
-                result = newsbot.generate_video_summary(video)
-                # Should handle various formats gracefully
-                assert "title" in result
-
-    @pytest.mark.asyncio
-    async def test_news_loop_hour_boundaries(self):
-        """Test news loop at hour boundaries."""
-        test_hours = [0, 1, 2, 3, 4, 5, 6, 7, 8, 23]  # Various hours including night
-
-        for hour in test_hours:
-            with (
-                patch("datetime.datetime") as mock_datetime,
-                patch.object(newsbot, "search_youtube_videos", return_value=[]),
-                patch("asyncio.sleep", new_callable=AsyncMock),
-            ):
-                mock_now = Mock()
-                mock_now.hour = hour
-                mock_datetime.now.return_value = mock_now
-
-                # Should handle all hours without exception
-                await newsbot.news_loop()
-
-    def test_openai_client_configuration(self):
-        """Test OpenAI client is properly configured."""
-        assert hasattr(newsbot, "client")
-        assert newsbot.client is not None
-        assert hasattr(newsbot.client, "chat")
-        assert hasattr(newsbot.client.chat, "completions")
-
-    def test_discord_configuration(self):
-        """Test Discord bot configuration."""
-        assert hasattr(newsbot, "bot")
-        assert hasattr(newsbot, "tree")
-        assert hasattr(newsbot, "TOKEN")
-        assert hasattr(newsbot, "NEWS_CHANNEL_ID")
-        assert newsbot.NEWS_CHANNEL_ID == 123456
-
-
 class TestCodeIntegration:
     """Test code integration patterns."""
 
@@ -265,13 +140,12 @@ class TestCodeIntegration:
         # Bot modules should have Discord clients
         assert hasattr(bot, "bot")
         assert hasattr(giveawaybot, "bot")
-        assert hasattr(newsbot, "bot")
 
     def test_logging_consistency(self):
         """Test logging is consistently configured."""
         # All modules should have logging
         assert hasattr(bot, "log")
-        # giveawaybot and newsbot use different logging patterns
+        # giveawaybot uses different logging patterns
         # but should have logging functionality available
 
     def test_environment_variable_patterns(self):

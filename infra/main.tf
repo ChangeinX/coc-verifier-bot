@@ -22,10 +22,6 @@ variable "ddb_table_name" {
 
 variable "bot_image" {}
 variable "discord_token" {}
-variable "news_bot_image" {}
-variable "news_discord_token" {}
-variable "news_channel_id" {}
-variable "openai_api_key" {}
 variable "coc_email" {}
 variable "coc_password" {}
 variable "clan_tag" {}
@@ -45,10 +41,6 @@ resource "aws_cloudwatch_log_group" "bot" {
   retention_in_days = 7
 }
 
-resource "aws_cloudwatch_log_group" "news" {
-  name              = "/ecs/coc-news-bot"
-  retention_in_days = 7
-}
 resource "aws_cloudwatch_log_group" "giveaway" {
   name              = "/ecs/coc-giveaway-bot"
   retention_in_days = 7
@@ -133,7 +125,6 @@ data "aws_iam_policy_document" "task_extra" {
     ]
     resources = [
       "${aws_cloudwatch_log_group.bot.arn}:*",
-      "${aws_cloudwatch_log_group.news.arn}:*",
       "${aws_cloudwatch_log_group.giveaway.arn}:*"
     ]
   }
@@ -148,9 +139,6 @@ resource "aws_ecr_repository" "bot" {
   name = "coc-verifier-bot"
 }
 
-resource "aws_ecr_repository" "news" {
-  name = "coc-news-bot"
-}
 
 resource "aws_ecr_repository" "giveaway" {
   name = "coc-giveaway-bot"
@@ -213,41 +201,6 @@ resource "aws_ecs_task_definition" "bot" {
   ])
 }
 
-resource "aws_ecs_task_definition" "news_bot" {
-  family                   = "coc-news-bot"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = "256"
-  memory                   = "512"
-  runtime_platform {
-    cpu_architecture        = "ARM64"
-    operating_system_family = "LINUX"
-  }
-  execution_role_arn = aws_iam_role.task.arn
-  task_role_arn      = aws_iam_role.task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "news"
-      image     = var.news_bot_image
-      essential = true
-      environment = [
-        { name = "DISCORD_TOKEN", value = var.news_discord_token },
-        { name = "NEWS_CHANNEL_ID", value = var.news_channel_id },
-        { name = "OPENAI_API_KEY", value = var.openai_api_key },
-        { name = "AWS_REGION", value = var.aws_region }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.news.name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "news"
-        }
-      }
-    }
-  ])
-}
 resource "aws_ecs_task_definition" "giveaway_bot" {
   family                   = "coc-giveaway-bot"
   requires_compatibilities = ["FARGATE"]
@@ -306,19 +259,6 @@ resource "aws_ecs_service" "bot" {
   }
 }
 
-resource "aws_ecs_service" "news_bot" {
-  name            = "coc-news-bot"
-  cluster         = aws_ecs_cluster.bot.id
-  task_definition = aws_ecs_task_definition.news_bot.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = var.subnets
-    security_groups  = [aws_security_group.bot.id]
-    assign_public_ip = true
-  }
-}
 resource "aws_ecs_service" "giveaway_bot" {
   name            = "coc-giveaway-bot"
   cluster         = aws_ecs_cluster.bot.id
