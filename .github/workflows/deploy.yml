@@ -13,11 +13,9 @@ jobs:
     env:
       AWS_REGION: us-east-1
       ECR_REPOSITORY: coc-verifier-bot
-      NEWS_ECR_REPOSITORY: coc-news-bot
       GIVEAWAY_ECR_REPOSITORY: coc-giveaway-bot
       ECS_CLUSTER: coc-verifier-cluster
       BOT_SERVICE: coc-bot
-      NEWS_SERVICE: coc-news-bot
       GIVEAWAY_SERVICE: coc-giveaway-bot
     steps:
       - uses: actions/checkout@v4
@@ -37,8 +35,6 @@ jobs:
         run: |
           docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA --push .
           echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
-          docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA --push -f Dockerfile.news .
-          echo "NEWS_IMAGE=${{ steps.login.outputs.registry }}/$NEWS_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
           docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA --push -f Dockerfile.giveaway .
           echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
 
@@ -78,37 +74,6 @@ jobs:
             --force-new-deployment \
             --region "$AWS_REGION"
 
-          echo "Preparing updated task definition for coc-news-bot..."
-          aws ecs describe-task-definition \
-            --task-definition coc-news-bot \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition' \
-            --output json > td-news.json
-
-          cat td-news.json \
-            | jq '{
-                family,
-                taskRoleArn,
-                executionRoleArn,
-                networkMode,
-                containerDefinitions,
-                requiresCompatibilities,
-                cpu,
-                memory,
-                runtimePlatform
-              }' \
-            | jq ".containerDefinitions |= map(if .name==\"news\" then (.image=env.NEWS_IMAGE) else . end)" \
-            > news-taskdef.json
-
-          aws ecs register-task-definition \
-            --cli-input-json file://news-taskdef.json \
-            --region "$AWS_REGION" >/dev/null
-
-          aws ecs update-service \
-            --cluster "$ECS_CLUSTER" \
-            --service "$NEWS_SERVICE" \
-            --force-new-deployment \
-            --region "$AWS_REGION"
 
           echo "Preparing updated task definition for coc-giveaway-bot..."
           aws ecs describe-task-definition \
@@ -145,6 +110,6 @@ jobs:
           echo "Waiting for services to stabilize..."
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
-            --services "$BOT_SERVICE" "$NEWS_SERVICE" "$GIVEAWAY_SERVICE" \
+            --services "$BOT_SERVICE" "$GIVEAWAY_SERVICE" \
             --region "$AWS_REGION" \
             --cli-read-timeout 300

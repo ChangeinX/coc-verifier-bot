@@ -4,11 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a multi-bot Discord application system for Clash of Clans communities with three main bots:
+This is a multi-bot Discord application system for Clash of Clans communities with two main bots:
 
 1. **Verification Bot** (`bot.py`) - Links Discord users to their Clash of Clans accounts
-2. **Giveaway Bot** (`giveawaybot.py`) - Manages automated giveaways with CoC integration  
-3. **News Bot** (`newsbot.py`) - Fetches and posts Clash of Clans related content
+2. **Giveaway Bot** (`giveawaybot.py`) - Manages automated giveaways with CoC integration
 
 ## Architecture
 
@@ -34,8 +33,7 @@ pip install -r requirements.txt
 
 # Run individual bots locally
 python bot.py          # Verification bot
-python giveawaybot.py  # Giveaway bot  
-python newsbot.py      # News bot
+python giveawaybot.py  # Giveaway bot
 ```
 
 ### Docker Development
@@ -43,7 +41,6 @@ python newsbot.py      # News bot
 # Build containers
 docker build -t coc-verifier-bot .
 docker build -t coc-giveaway-bot -f Dockerfile.giveaway .
-docker build -t coc-news-bot -f Dockerfile.news .
 
 # Run containers with environment variables
 docker run --env-file .env coc-verifier-bot
@@ -77,9 +74,6 @@ tofu apply
 - `GIVEAWAY_TABLE_NAME` - DynamoDB table for giveaway data
 - `GIVEAWAY_TEST` - Enable test mode (`true`/`false`)
 
-**News Bot:**
-- `NEWS_CHANNEL_ID` - Channel for news posts
-- `OPENAI_API_KEY` - OpenAI API key for content processing
 
 ## Key Implementation Details
 
