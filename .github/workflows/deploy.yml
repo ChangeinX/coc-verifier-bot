@@ -19,6 +19,26 @@ jobs:
       GIVEAWAY_SERVICE: coc-giveaway-bot
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect file changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            bot:
+              - 'bot.py'
+              - 'Dockerfile'
+              - 'requirements.txt'
+            giveaway:
+              - 'giveawaybot.py'
+              - 'giveaway_fairness.py'
+              - 'Dockerfile.giveaway'
+              - 'requirements.txt'
+            infrastructure:
+              - '.github/workflows/deploy.yml'
+              - 'infra/**'
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -31,18 +51,72 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Determine build strategy
+        id: strategy
         run: |
+          echo "🔍 Build Strategy Analysis:"
+          echo "Bot files changed: ${{ steps.changes.outputs.bot }}"
+          echo "Giveaway files changed: ${{ steps.changes.outputs.giveaway }}"
+          echo "Infrastructure changed: ${{ steps.changes.outputs.infrastructure }}"
+          
+          # Force rebuild all if infrastructure or requirements.txt changed
+          if [[ "${{ steps.changes.outputs.infrastructure }}" == "true" ]]; then
+            echo "🏗️ Infrastructure changed - rebuilding all components"
+            echo "REBUILD_BOT=true" >> $GITHUB_ENV
+            echo "REBUILD_GIVEAWAY=true" >> $GITHUB_ENV
+          else
+            echo "REBUILD_BOT=${{ steps.changes.outputs.bot }}" >> $GITHUB_ENV
+            echo "REBUILD_GIVEAWAY=${{ steps.changes.outputs.giveaway }}" >> $GITHUB_ENV
+          fi
+
+      - name: Build verification bot (conditional)
+        if: env.REBUILD_BOT == 'true'
+        run: |
+          echo "🔨 Building verification bot..."
           docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA --push .
           echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
+          echo "BOT_IMAGE_BUILT=true" >> $GITHUB_ENV
+
+      - name: Reuse existing verification bot image
+        if: env.REBUILD_BOT != 'true'
+        run: |
+          echo "♻️ Reusing existing verification bot image..."
+          # Get the latest image tag from ECR
+          LATEST_TAG=$(aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --region $AWS_REGION \
+            --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
+            --output text)
+          echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$LATEST_TAG" >> $GITHUB_ENV
+          echo "BOT_IMAGE_BUILT=false" >> $GITHUB_ENV
+
+      - name: Build giveaway bot (conditional)
+        if: env.REBUILD_GIVEAWAY == 'true'
+        run: |
+          echo "🔨 Building giveaway bot..."
           docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA --push -f Dockerfile.giveaway .
           echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
+          echo "GIVEAWAY_IMAGE_BUILT=true" >> $GITHUB_ENV
 
-      - name: Register new task definitions and deploy to ECS
+      - name: Reuse existing giveaway bot image
+        if: env.REBUILD_GIVEAWAY != 'true'
+        run: |
+          echo "♻️ Reusing existing giveaway bot image..."
+          # Get the latest image tag from ECR
+          LATEST_TAG=$(aws ecr describe-images \
+            --repository-name $GIVEAWAY_ECR_REPOSITORY \
+            --region $AWS_REGION \
+            --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
+            --output text)
+          echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$LATEST_TAG" >> $GITHUB_ENV
+          echo "GIVEAWAY_IMAGE_BUILT=false" >> $GITHUB_ENV
+
+      - name: Deploy verification bot (conditional)
+        if: env.BOT_IMAGE_BUILT == 'true'
         run: |
           set -euo pipefail
-
-          echo "Preparing updated task definition for coc-bot..."
+          
+          echo "🚀 Deploying verification bot with new image..."
           aws ecs describe-task-definition \
             --task-definition coc-bot \
             --region "$AWS_REGION" \
@@ -68,14 +142,34 @@ jobs:
             --cli-input-json file://bot-taskdef.json \
             --region "$AWS_REGION" >/dev/null
 
+          echo "Getting latest task definition ARN for bot service..."
+          LATEST_BOT_TD_ARN=$(aws ecs describe-task-definition \
+            --task-definition coc-bot \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "Updating bot service to use task definition: $LATEST_BOT_TD_ARN"
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$BOT_SERVICE" \
-            --force-new-deployment \
+            --task-definition "$LATEST_BOT_TD_ARN" \
             --region "$AWS_REGION"
+          
+          echo "BOT_DEPLOYED=true" >> $GITHUB_ENV
 
+      - name: Skip verification bot deployment
+        if: env.BOT_IMAGE_BUILT != 'true'
+        run: |
+          echo "⏭️ Skipping verification bot deployment (no changes)"
+          echo "BOT_DEPLOYED=false" >> $GITHUB_ENV
 
-          echo "Preparing updated task definition for coc-giveaway-bot..."
+      - name: Deploy giveaway bot (conditional)
+        if: env.GIVEAWAY_IMAGE_BUILT == 'true'
+        run: |
+          set -euo pipefail
+          
+          echo "🚀 Deploying giveaway bot with new image..."
           aws ecs describe-task-definition \
             --task-definition coc-giveaway-bot \
             --region "$AWS_REGION" \
@@ -101,15 +195,74 @@ jobs:
             --cli-input-json file://giveaway-taskdef.json \
             --region "$AWS_REGION" >/dev/null
 
+          echo "Getting latest task definition ARN for giveaway service..."
+          LATEST_GIVEAWAY_TD_ARN=$(aws ecs describe-task-definition \
+            --task-definition coc-giveaway-bot \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "Updating giveaway service to use task definition: $LATEST_GIVEAWAY_TD_ARN"
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$GIVEAWAY_SERVICE" \
-            --force-new-deployment \
+            --task-definition "$LATEST_GIVEAWAY_TD_ARN" \
             --region "$AWS_REGION"
+          
+          echo "GIVEAWAY_DEPLOYED=true" >> $GITHUB_ENV
 
-          echo "Waiting for services to stabilize..."
-          aws ecs wait services-stable \
+      - name: Skip giveaway bot deployment
+        if: env.GIVEAWAY_IMAGE_BUILT != 'true'
+        run: |
+          echo "⏭️ Skipping giveaway bot deployment (no changes)"
+          echo "GIVEAWAY_DEPLOYED=false" >> $GITHUB_ENV
+
+      - name: Wait for deployed services to stabilize
+        run: |
+          set -euo pipefail
+          
+          # Build list of services that were actually deployed
+          DEPLOYED_SERVICES=""
+          if [[ "$BOT_DEPLOYED" == "true" ]]; then
+            DEPLOYED_SERVICES="$DEPLOYED_SERVICES $BOT_SERVICE"
+          fi
+          if [[ "$GIVEAWAY_DEPLOYED" == "true" ]]; then
+            DEPLOYED_SERVICES="$DEPLOYED_SERVICES $GIVEAWAY_SERVICE"
+          fi
+          
+          if [[ -z "$DEPLOYED_SERVICES" ]]; then
+            echo "📋 No services were deployed - all images were reused"
+            echo "✅ Deployment complete (no changes required)"
+          else
+            echo "⏳ Waiting for deployed services to stabilize:$DEPLOYED_SERVICES"
+            
+            if aws ecs wait services-stable \
+              --cluster "$ECS_CLUSTER" \
+              --services $DEPLOYED_SERVICES \
+              --region "$AWS_REGION" \
+              --cli-read-timeout 600; then
+              echo "✅ Deployment successful! Services are stable."
+            else
+              echo "❌ Deployment failed or timed out."
+              exit 1
+            fi
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "📊 Deployment Summary:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔨 Bot image built: $BOT_IMAGE_BUILT"
+          echo "🚀 Bot deployed: $BOT_DEPLOYED"
+          echo "🔨 Giveaway image built: $GIVEAWAY_IMAGE_BUILT"
+          echo "🚀 Giveaway deployed: $GIVEAWAY_DEPLOYED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          echo "📋 Final service status:"
+          aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$BOT_SERVICE" "$GIVEAWAY_SERVICE" \
             --region "$AWS_REGION" \
-            --cli-read-timeout 300
+            --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount,TaskDefinition:taskDefinition}' \
+            --output table
