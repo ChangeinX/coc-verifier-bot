@@ -257,6 +257,10 @@ resource "aws_ecs_service" "bot" {
     security_groups  = [aws_security_group.bot.id]
     assign_public_ip = true
   }
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 }
 
 resource "aws_ecs_service" "giveaway_bot" {
@@ -270,6 +274,10 @@ resource "aws_ecs_service" "giveaway_bot" {
     subnets          = var.subnets
     security_groups  = [aws_security_group.bot.id]
     assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [task_definition]
   }
 }
 

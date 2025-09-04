@@ -68,10 +68,18 @@ jobs:
             --cli-input-json file://bot-taskdef.json \
             --region "$AWS_REGION" >/dev/null
 
+          echo "Getting latest task definition ARN for bot service..."
+          LATEST_BOT_TD_ARN=$(aws ecs describe-task-definition \
+            --task-definition coc-bot \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "Updating bot service to use task definition: $LATEST_BOT_TD_ARN"
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$BOT_SERVICE" \
-            --force-new-deployment \
+            --task-definition "$LATEST_BOT_TD_ARN" \
             --region "$AWS_REGION"
 
 
@@ -101,15 +109,49 @@ jobs:
             --cli-input-json file://giveaway-taskdef.json \
             --region "$AWS_REGION" >/dev/null
 
+          echo "Getting latest task definition ARN for giveaway service..."
+          LATEST_GIVEAWAY_TD_ARN=$(aws ecs describe-task-definition \
+            --task-definition coc-giveaway-bot \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "Updating giveaway service to use task definition: $LATEST_GIVEAWAY_TD_ARN"
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$GIVEAWAY_SERVICE" \
-            --force-new-deployment \
+            --task-definition "$LATEST_GIVEAWAY_TD_ARN" \
             --region "$AWS_REGION"
 
           echo "Waiting for services to stabilize..."
-          aws ecs wait services-stable \
+          if aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
             --services "$BOT_SERVICE" "$GIVEAWAY_SERVICE" \
             --region "$AWS_REGION" \
-            --cli-read-timeout 300
+            --cli-read-timeout 600; then
+            echo "✅ Deployment successful! Services are stable."
+            
+            echo "Verifying deployment status..."
+            aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" \
+              --services "$BOT_SERVICE" "$GIVEAWAY_SERVICE" \
+              --region "$AWS_REGION" \
+              --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount,TaskDefinition:taskDefinition}' \
+              --output table
+          else
+            echo "❌ Deployment failed or timed out. Checking service status..."
+            aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" \
+              --services "$BOT_SERVICE" "$GIVEAWAY_SERVICE" \
+              --region "$AWS_REGION" \
+              --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount,TaskDefinition:taskDefinition}' \
+              --output table
+            echo "Recent service events:"
+            aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" \
+              --services "$BOT_SERVICE" "$GIVEAWAY_SERVICE" \
+              --region "$AWS_REGION" \
+              --query 'services[*].events[0:5].{Service:serviceName,Time:createdAt,Message:message}' \
+              --output table
+            exit 1
+          fi
