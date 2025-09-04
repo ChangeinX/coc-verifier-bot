@@ -4,21 +4,24 @@ on:
   push:
     branches: [main]
 
+env:
+  AWS_REGION: us-east-1
+  ECS_CLUSTER: coc-verifier-cluster
+
 jobs:
-  deploy:
+  setup:
+    name: Setup and Change Detection
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
-    env:
-      AWS_REGION: us-east-1
-      ECR_REPOSITORY: coc-verifier-bot
-      GIVEAWAY_ECR_REPOSITORY: coc-giveaway-bot
-      ECS_CLUSTER: coc-verifier-cluster
-      BOT_SERVICE: coc-bot
-      GIVEAWAY_SERVICE: coc-giveaway-bot
+    outputs:
+      rebuild_bot: ${{ steps.strategy.outputs.rebuild_bot }}
+      rebuild_giveaway: ${{ steps.strategy.outputs.rebuild_giveaway }}
+      ecr_registry: ${{ steps.login.outputs.registry }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
@@ -40,13 +43,72 @@ jobs:
               - '.github/workflows/deploy.yml'
               - 'infra/**'
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: aws-actions/amazon-ecr-login@v1
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
         id: login
+
+      - name: Determine build strategy
+        id: strategy
+        run: |
+          echo "🔍 Build Strategy Analysis:"
+          echo "Bot files changed: ${{ steps.changes.outputs.bot }}"
+          echo "Giveaway files changed: ${{ steps.changes.outputs.giveaway }}"
+          echo "Infrastructure changed: ${{ steps.changes.outputs.infrastructure }}"
+          
+          # Force rebuild all if infrastructure changed
+          if [[ "${{ steps.changes.outputs.infrastructure }}" == "true" ]]; then
+            echo "🏗️ Infrastructure changed - rebuilding all components"
+            echo "rebuild_bot=true" >> $GITHUB_OUTPUT
+            echo "rebuild_giveaway=true" >> $GITHUB_OUTPUT
+          else
+            echo "rebuild_bot=${{ steps.changes.outputs.bot }}" >> $GITHUB_OUTPUT
+            echo "rebuild_giveaway=${{ steps.changes.outputs.giveaway }}" >> $GITHUB_OUTPUT
+          fi
+
+  build-deploy:
+    name: Build & Deploy (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: setup
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - service: bot
+            dockerfile: Dockerfile
+            ecr_repository: coc-verifier-bot
+            ecs_service: coc-bot
+            task_definition: coc-bot
+            rebuild_condition: ${{ needs.setup.outputs.rebuild_bot }}
+            cache_scope: bot
+            container_name: bot
+          - service: giveaway
+            dockerfile: Dockerfile.giveaway
+            ecr_repository: coc-giveaway-bot
+            ecs_service: coc-giveaway-bot
+            task_definition: coc-giveaway-bot
+            rebuild_condition: ${{ needs.setup.outputs.rebuild_giveaway }}
+            cache_scope: giveaway
+            container_name: giveaway
+    outputs:
+      bot_deployed: ${{ steps.deploy.outputs.bot_deployed }}
+      giveaway_deployed: ${{ steps.deploy.outputs.giveaway_deployed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -60,218 +122,133 @@ jobs:
 
       - name: Cache Python dependencies
         run: |
-          echo "📦 Pre-caching Python dependencies..."
+          echo "📦 Pre-caching Python dependencies for ${{ matrix.service }}..."
           pip install --user -r requirements.txt
 
-      - name: Determine build strategy
-        id: strategy
+      - name: Build ${{ matrix.service }} (conditional)
+        if: matrix.rebuild_condition == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./${{ matrix.dockerfile }}
+          platforms: linux/arm64
+          push: true
+          tags: ${{ needs.setup.outputs.ecr_registry }}/${{ matrix.ecr_repository }}:${{ github.sha }}
+          cache-from: |
+            type=gha,scope=${{ matrix.cache_scope }}-deps
+            type=gha,scope=${{ matrix.cache_scope }}-runtime
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.cache_scope }}-deps
+            type=gha,mode=max,scope=${{ matrix.cache_scope }}-runtime
+          target: runtime
+
+      - name: Set ${{ matrix.service }} image (conditional)
+        if: matrix.rebuild_condition == 'true'
         run: |
-          echo "🔍 Build Strategy Analysis:"
-          echo "Bot files changed: ${{ steps.changes.outputs.bot }}"
-          echo "Giveaway files changed: ${{ steps.changes.outputs.giveaway }}"
-          echo "Infrastructure changed: ${{ steps.changes.outputs.infrastructure }}"
+          echo "🔨 Built ${{ matrix.service }} with caching"
+          echo "IMAGE=${{ needs.setup.outputs.ecr_registry }}/${{ matrix.ecr_repository }}:${{ github.sha }}" >> $GITHUB_ENV
+          echo "IMAGE_BUILT=true" >> $GITHUB_ENV
+
+      - name: Reuse existing ${{ matrix.service }} image
+        if: matrix.rebuild_condition != 'true'
+        run: |
+          echo "♻️ Reusing existing ${{ matrix.service }} image..."
+          # Get the latest image tag from ECR
+          LATEST_TAG=$(aws ecr describe-images \
+            --repository-name ${{ matrix.ecr_repository }} \
+            --region $AWS_REGION \
+            --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
+            --output text)
+          echo "IMAGE=${{ needs.setup.outputs.ecr_registry }}/${{ matrix.ecr_repository }}:$LATEST_TAG" >> $GITHUB_ENV
+          echo "IMAGE_BUILT=false" >> $GITHUB_ENV
+
+      - name: Deploy ${{ matrix.service }} (conditional)
+        id: deploy
+        run: |
+          set -euo pipefail
           
-          # Force rebuild all if infrastructure or requirements.txt changed
-          if [[ "${{ steps.changes.outputs.infrastructure }}" == "true" ]]; then
-            echo "🏗️ Infrastructure changed - rebuilding all components"
-            echo "REBUILD_BOT=true" >> $GITHUB_ENV
-            echo "REBUILD_GIVEAWAY=true" >> $GITHUB_ENV
+          if [[ "$IMAGE_BUILT" == "true" ]]; then
+            echo "🚀 Deploying ${{ matrix.service }} with new image..."
+            
+            # Get current task definition
+            aws ecs describe-task-definition \
+              --task-definition ${{ matrix.task_definition }} \
+              --region "$AWS_REGION" \
+              --query 'taskDefinition' \
+              --output json > td-${{ matrix.service }}.json
+
+            # Update task definition with new image
+            cat td-${{ matrix.service }}.json \
+              | jq '{
+                  family,
+                  taskRoleArn,
+                  executionRoleArn,
+                  networkMode,
+                  containerDefinitions,
+                  requiresCompatibilities,
+                  cpu,
+                  memory,
+                  runtimePlatform
+                }' \
+              | jq ".containerDefinitions |= map(if .name==\"${{ matrix.container_name }}\" then (.image=env.IMAGE) else . end)" \
+              > ${{ matrix.service }}-taskdef.json
+
+            # Register new task definition
+            aws ecs register-task-definition \
+              --cli-input-json file://${{ matrix.service }}-taskdef.json \
+              --region "$AWS_REGION" >/dev/null
+
+            # Get latest task definition ARN
+            LATEST_TD_ARN=$(aws ecs describe-task-definition \
+              --task-definition ${{ matrix.task_definition }} \
+              --region "$AWS_REGION" \
+              --query 'taskDefinition.taskDefinitionArn' \
+              --output text)
+            
+            echo "Updating ${{ matrix.service }} service to use task definition: $LATEST_TD_ARN"
+            aws ecs update-service \
+              --cluster "$ECS_CLUSTER" \
+              --service "${{ matrix.ecs_service }}" \
+              --task-definition "$LATEST_TD_ARN" \
+              --region "$AWS_REGION"
+            
+            echo "✅ ${{ matrix.service }} deployed successfully"
+            echo "${{ matrix.service }}_deployed=true" >> $GITHUB_OUTPUT
           else
-            echo "REBUILD_BOT=${{ steps.changes.outputs.bot }}" >> $GITHUB_ENV
-            echo "REBUILD_GIVEAWAY=${{ steps.changes.outputs.giveaway }}" >> $GITHUB_ENV
+            echo "⏭️ Skipping ${{ matrix.service }} deployment (no changes)"
+            echo "${{ matrix.service }}_deployed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build verification bot (conditional)
-        if: env.REBUILD_BOT == 'true'
-        uses: docker/build-push-action@v5
+  finalize:
+    name: Finalize Deployment
+    runs-on: ubuntu-latest
+    needs: [setup, build-deploy]
+    if: always()
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/arm64
-          push: true
-          tags: ${{ steps.login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          cache-from: |
-            type=gha,scope=bot-deps
-            type=gha,scope=bot-runtime
-          cache-to: |
-            type=gha,mode=max,scope=bot-deps
-            type=gha,mode=max,scope=bot-runtime
-          target: runtime
-
-      - name: Set bot image environment (conditional)
-        if: env.REBUILD_BOT == 'true'
-        run: |
-          echo "🔨 Built verification bot with caching"
-          echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
-          echo "BOT_IMAGE_BUILT=true" >> $GITHUB_ENV
-
-      - name: Reuse existing verification bot image
-        if: env.REBUILD_BOT != 'true'
-        run: |
-          echo "♻️ Reusing existing verification bot image..."
-          # Get the latest image tag from ECR
-          LATEST_TAG=$(aws ecr describe-images \
-            --repository-name $ECR_REPOSITORY \
-            --region $AWS_REGION \
-            --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
-            --output text)
-          echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$LATEST_TAG" >> $GITHUB_ENV
-          echo "BOT_IMAGE_BUILT=false" >> $GITHUB_ENV
-
-      - name: Build giveaway bot (conditional)
-        if: env.REBUILD_GIVEAWAY == 'true'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.giveaway
-          platforms: linux/arm64
-          push: true
-          tags: ${{ steps.login.outputs.registry }}/${{ env.GIVEAWAY_ECR_REPOSITORY }}:${{ github.sha }}
-          cache-from: |
-            type=gha,scope=giveaway-deps
-            type=gha,scope=giveaway-runtime
-          cache-to: |
-            type=gha,mode=max,scope=giveaway-deps
-            type=gha,mode=max,scope=giveaway-runtime
-          target: runtime
-
-      - name: Set giveaway image environment (conditional)
-        if: env.REBUILD_GIVEAWAY == 'true'
-        run: |
-          echo "🔨 Built giveaway bot with caching"
-          echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
-          echo "GIVEAWAY_IMAGE_BUILT=true" >> $GITHUB_ENV
-
-      - name: Reuse existing giveaway bot image
-        if: env.REBUILD_GIVEAWAY != 'true'
-        run: |
-          echo "♻️ Reusing existing giveaway bot image..."
-          # Get the latest image tag from ECR
-          LATEST_TAG=$(aws ecr describe-images \
-            --repository-name $GIVEAWAY_ECR_REPOSITORY \
-            --region $AWS_REGION \
-            --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags[0]' \
-            --output text)
-          echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$LATEST_TAG" >> $GITHUB_ENV
-          echo "GIVEAWAY_IMAGE_BUILT=false" >> $GITHUB_ENV
-
-      - name: Deploy verification bot (conditional)
-        if: env.BOT_IMAGE_BUILT == 'true'
-        run: |
-          set -euo pipefail
-          
-          echo "🚀 Deploying verification bot with new image..."
-          aws ecs describe-task-definition \
-            --task-definition coc-bot \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition' \
-            --output json > td-bot.json
-
-          cat td-bot.json \
-            | jq '{
-                family,
-                taskRoleArn,
-                executionRoleArn,
-                networkMode,
-                containerDefinitions,
-                requiresCompatibilities,
-                cpu,
-                memory,
-                runtimePlatform
-              }' \
-            | jq ".containerDefinitions |= map(if .name==\"bot\" then (.image=env.IMAGE) else . end)" \
-            > bot-taskdef.json
-
-          aws ecs register-task-definition \
-            --cli-input-json file://bot-taskdef.json \
-            --region "$AWS_REGION" >/dev/null
-
-          echo "Getting latest task definition ARN for bot service..."
-          LATEST_BOT_TD_ARN=$(aws ecs describe-task-definition \
-            --task-definition coc-bot \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-          
-          echo "Updating bot service to use task definition: $LATEST_BOT_TD_ARN"
-          aws ecs update-service \
-            --cluster "$ECS_CLUSTER" \
-            --service "$BOT_SERVICE" \
-            --task-definition "$LATEST_BOT_TD_ARN" \
-            --region "$AWS_REGION"
-          
-          echo "BOT_DEPLOYED=true" >> $GITHUB_ENV
-
-      - name: Skip verification bot deployment
-        if: env.BOT_IMAGE_BUILT != 'true'
-        run: |
-          echo "⏭️ Skipping verification bot deployment (no changes)"
-          echo "BOT_DEPLOYED=false" >> $GITHUB_ENV
-
-      - name: Deploy giveaway bot (conditional)
-        if: env.GIVEAWAY_IMAGE_BUILT == 'true'
-        run: |
-          set -euo pipefail
-          
-          echo "🚀 Deploying giveaway bot with new image..."
-          aws ecs describe-task-definition \
-            --task-definition coc-giveaway-bot \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition' \
-            --output json > td-giveaway.json
-
-          cat td-giveaway.json \
-            | jq '{
-                family,
-                taskRoleArn,
-                executionRoleArn,
-                networkMode,
-                containerDefinitions,
-                requiresCompatibilities,
-                cpu,
-                memory,
-                runtimePlatform
-              }' \
-            | jq ".containerDefinitions |= map(if .name==\"giveaway\" then (.image=env.GIVEAWAY_IMAGE) else . end)" \
-            > giveaway-taskdef.json
-
-          aws ecs register-task-definition \
-            --cli-input-json file://giveaway-taskdef.json \
-            --region "$AWS_REGION" >/dev/null
-
-          echo "Getting latest task definition ARN for giveaway service..."
-          LATEST_GIVEAWAY_TD_ARN=$(aws ecs describe-task-definition \
-            --task-definition coc-giveaway-bot \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-          
-          echo "Updating giveaway service to use task definition: $LATEST_GIVEAWAY_TD_ARN"
-          aws ecs update-service \
-            --cluster "$ECS_CLUSTER" \
-            --service "$GIVEAWAY_SERVICE" \
-            --task-definition "$LATEST_GIVEAWAY_TD_ARN" \
-            --region "$AWS_REGION"
-          
-          echo "GIVEAWAY_DEPLOYED=true" >> $GITHUB_ENV
-
-      - name: Skip giveaway bot deployment
-        if: env.GIVEAWAY_IMAGE_BUILT != 'true'
-        run: |
-          echo "⏭️ Skipping giveaway bot deployment (no changes)"
-          echo "GIVEAWAY_DEPLOYED=false" >> $GITHUB_ENV
+          role-to-assume: ${{ secrets.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Wait for deployed services to stabilize
         run: |
           set -euo pipefail
           
+          # Extract deployment results from matrix job outputs
+          BOT_DEPLOYED="${{ needs.build-deploy.outputs.bot_deployed }}"
+          GIVEAWAY_DEPLOYED="${{ needs.build-deploy.outputs.giveaway_deployed }}"
+          
           # Build list of services that were actually deployed
           DEPLOYED_SERVICES=""
           if [[ "$BOT_DEPLOYED" == "true" ]]; then
-            DEPLOYED_SERVICES="$DEPLOYED_SERVICES $BOT_SERVICE"
+            DEPLOYED_SERVICES="$DEPLOYED_SERVICES coc-bot"
           fi
           if [[ "$GIVEAWAY_DEPLOYED" == "true" ]]; then
-            DEPLOYED_SERVICES="$DEPLOYED_SERVICES $GIVEAWAY_SERVICE"
+            DEPLOYED_SERVICES="$DEPLOYED_SERVICES coc-giveaway-bot"
           fi
           
           if [[ -z "$DEPLOYED_SERVICES" ]]; then
@@ -295,18 +272,24 @@ jobs:
       - name: Deployment summary
         if: always()
         run: |
+          # Extract results from previous jobs
+          BOT_REBUILT="${{ needs.setup.outputs.rebuild_bot }}"
+          GIVEAWAY_REBUILT="${{ needs.setup.outputs.rebuild_giveaway }}"
+          BOT_DEPLOYED="${{ needs.build-deploy.outputs.bot_deployed }}"
+          GIVEAWAY_DEPLOYED="${{ needs.build-deploy.outputs.giveaway_deployed }}"
+          
           echo "📊 Deployment Summary:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🔨 Bot image built: $BOT_IMAGE_BUILT"
-          echo "🚀 Bot deployed: $BOT_DEPLOYED"
-          echo "🔨 Giveaway image built: $GIVEAWAY_IMAGE_BUILT"
-          echo "🚀 Giveaway deployed: $GIVEAWAY_DEPLOYED"
+          echo "🔨 Bot image built: $BOT_REBUILT"
+          echo "🚀 Bot deployed: ${BOT_DEPLOYED:-false}"
+          echo "🔨 Giveaway image built: $GIVEAWAY_REBUILT"
+          echo "🚀 Giveaway deployed: ${GIVEAWAY_DEPLOYED:-false}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           echo "📋 Final service status:"
           aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
-            --services "$BOT_SERVICE" "$GIVEAWAY_SERVICE" \
+            --services "coc-bot" "coc-giveaway-bot" \
             --region "$AWS_REGION" \
             --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount,TaskDefinition:taskDefinition}' \
             --output table
