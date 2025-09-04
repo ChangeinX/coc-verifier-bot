@@ -692,3 +692,646 @@ class TestBotEvents:
                 bot.COC_EMAIL, bot.COC_PASSWORD
             )
             start_mock.assert_called_once()
+
+
+class TestMemberRemovalView:
+    """Test the member removal approval system."""
+
+    @pytest.mark.asyncio
+    async def test_member_removal_view_init(self):
+        """Test MemberRemovalView initialization."""
+        view = bot.MemberRemovalView(
+            "removal123", "discord123", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        assert view.removal_id == "removal123"
+        assert view.discord_id == "discord123"
+        assert view.player_tag == "#PLAYER123"
+        assert view.player_name == "TestPlayer"
+        assert view.reason == "Left clan"
+        assert view.timeout == 86400  # 24 hours
+
+    @pytest.mark.asyncio
+    async def test_store_pending_removal_success(self):
+        """Test successful storage of pending removal in DynamoDB."""
+        mock_table = MagicMock()
+        view = bot.MemberRemovalView(
+            "removal123", "discord123", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        with patch.object(bot, "table", mock_table):
+            await view.store_pending_removal()
+
+            mock_table.put_item.assert_called_once()
+            call_args = mock_table.put_item.call_args[1]["Item"]
+            assert call_args["discord_id"] == "PENDING_REMOVAL_removal123"
+            assert call_args["removal_id"] == "removal123"
+            assert call_args["target_discord_id"] == "discord123"
+            assert call_args["player_tag"] == "#PLAYER123"
+            assert call_args["player_name"] == "TestPlayer"
+            assert call_args["reason"] == "Left clan"
+            assert call_args["status"] == "PENDING"
+
+    @pytest.mark.asyncio
+    async def test_store_pending_removal_no_table(self):
+        """Test store_pending_removal when table is None."""
+        view = bot.MemberRemovalView(
+            "removal123", "discord123", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        with patch.object(bot, "table", None):
+            await view.store_pending_removal()
+            # Should not raise an exception
+
+    @pytest.mark.asyncio
+    async def test_store_pending_removal_exception(self):
+        """Test store_pending_removal handling DynamoDB exceptions."""
+        mock_table = MagicMock()
+        mock_table.put_item.side_effect = Exception("DynamoDB error")
+        view = bot.MemberRemovalView(
+            "removal123", "discord123", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        with patch.object(bot, "table", mock_table):
+            await view.store_pending_removal()
+            mock_table.put_item.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_remove_pending_removal_success(self):
+        """Test successful removal of pending removal from DynamoDB."""
+        mock_table = MagicMock()
+        view = bot.MemberRemovalView(
+            "removal123", "discord123", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        with patch.object(bot, "table", mock_table):
+            await view.remove_pending_removal()
+
+            mock_table.delete_item.assert_called_once_with(
+                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            )
+
+    @pytest.mark.asyncio
+    async def test_remove_pending_removal_no_table(self):
+        """Test remove_pending_removal when table is None."""
+        view = bot.MemberRemovalView(
+            "removal123", "discord123", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        with patch.object(bot, "table", None):
+            await view.remove_pending_removal()
+            # Should not raise an exception
+
+    @pytest.mark.asyncio
+    async def test_remove_pending_removal_exception(self):
+        """Test remove_pending_removal handling DynamoDB exceptions."""
+        mock_table = MagicMock()
+        mock_table.delete_item.side_effect = Exception("DynamoDB error")
+        view = bot.MemberRemovalView(
+            "removal123", "discord123", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        with patch.object(bot, "table", mock_table):
+            await view.remove_pending_removal()
+            mock_table.delete_item.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_approve_removal_success(self):
+        """Test successful approval and member removal."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_user = MagicMock()
+        mock_user.name = "admin"
+        mock_user.mention = "@admin"
+
+        mock_interaction.guild = mock_guild
+        mock_interaction.user = mock_user
+        mock_guild.get_member.return_value = mock_member
+        mock_member.mention = "@testuser"
+        mock_member.kick = AsyncMock()
+
+        # Mock message editing
+        mock_embed = MagicMock()
+        mock_embed.add_field = MagicMock()
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            # Call the original method bypassing the button decorator
+            from bot import MemberRemovalView
+
+            # Get the original unbound method
+            approve_func = MemberRemovalView.__dict__["approve_removal"]
+            # Call it with view as self
+            await approve_func(view, mock_interaction, mock_button)
+
+            # Verify member was kicked
+            mock_member.kick.assert_called_once()
+
+            # Verify database operations
+            mock_table.delete_item.assert_any_call(Key={"discord_id": "987654321"})
+            mock_table.delete_item.assert_any_call(
+                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            )
+
+            # Verify interaction response
+            mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+            mock_interaction.followup.send.assert_called_once()
+
+            # Verify embed was updated
+            mock_embed.add_field.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_approve_removal_member_not_found(self):
+        """Test approval when member is not found in server."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_guild = MagicMock()
+        mock_user = MagicMock()
+        mock_user.mention = "@admin"
+
+        mock_interaction.guild = mock_guild
+        mock_interaction.user = mock_user
+        mock_guild.get_member.return_value = None  # Member not found
+
+        # Mock message editing
+        mock_embed = MagicMock()
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            from bot import MemberRemovalView
+
+            approve_func = MemberRemovalView.__dict__["approve_removal"]
+            await approve_func(view, mock_interaction, mock_button)
+
+            # Verify pending removal was cleaned up
+            mock_table.delete_item.assert_called_once_with(
+                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            )
+
+            # Verify appropriate response was sent
+            mock_interaction.followup.send.assert_called_once()
+            call_args = mock_interaction.followup.send.call_args[0][0]
+            assert "❌ Member 987654321 not found" in call_args
+
+    @pytest.mark.asyncio
+    async def test_approve_removal_no_guild(self):
+        """Test approval when guild is None."""
+        mock_interaction = AsyncMock()
+        mock_interaction.guild = None
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+        from bot import MemberRemovalView
+
+        approve_func = MemberRemovalView.__dict__["approve_removal"]
+        await approve_func(view, mock_interaction, mock_button)
+
+        mock_interaction.followup.send.assert_called_once_with(
+            "Error: Guild not found.", ephemeral=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_approve_removal_kick_forbidden(self):
+        """Test approval when bot lacks permission to kick member."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_user = MagicMock()
+        mock_user.name = "admin"
+        mock_user.mention = "@admin"
+
+        mock_interaction.guild = mock_guild
+        mock_interaction.user = mock_user
+        mock_guild.get_member.return_value = mock_member
+        mock_member.mention = "@testuser"
+        mock_member.kick = AsyncMock(
+            side_effect=discord.Forbidden(MagicMock(), "Forbidden")
+        )
+
+        # Mock message editing
+        mock_embed = MagicMock()
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            from bot import MemberRemovalView
+
+            approve_func = MemberRemovalView.__dict__["approve_removal"]
+            await approve_func(view, mock_interaction, mock_button)
+
+            # Verify kick was attempted but failed
+            mock_member.kick.assert_called_once()
+
+            # Verify database record was still deleted
+            mock_table.delete_item.assert_any_call(Key={"discord_id": "987654321"})
+
+            # Verify response mentions kick failure
+            mock_interaction.followup.send.assert_called_once()
+            call_args = mock_interaction.followup.send.call_args[0][0]
+            assert "⚠️ Could not kick member" in call_args
+
+    @pytest.mark.asyncio
+    async def test_deny_removal_success(self):
+        """Test successful denial of member removal."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_user = MagicMock()
+        mock_user.mention = "@admin"
+
+        mock_interaction.user = mock_user
+
+        # Mock message editing
+        mock_embed = MagicMock()
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            from bot import MemberRemovalView
+
+            deny_func = MemberRemovalView.__dict__["deny_removal"]
+            await deny_func(view, mock_interaction, mock_button)
+
+            # Verify pending removal was removed
+            mock_table.delete_item.assert_called_once_with(
+                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            )
+
+            # Verify interaction response
+            mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+            mock_interaction.followup.send.assert_called_once()
+            call_args = mock_interaction.followup.send.call_args[0][0]
+            assert "**Denied removal of TestPlayer**" in call_args
+
+    @pytest.mark.asyncio
+    async def test_on_timeout(self):
+        """Test view timeout handling."""
+        mock_table = MagicMock()
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        with patch.object(bot, "table", mock_table):
+            await view.on_timeout()
+
+            # Verify pending removal was cleaned up on timeout
+            mock_table.delete_item.assert_called_once_with(
+                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            )
+
+
+class TestSendRemovalApprovalRequest:
+    """Test the send_removal_approval_request function."""
+
+    @pytest.mark.asyncio
+    async def test_send_removal_approval_request_success(self):
+        """Test successful sending of removal approval request."""
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+        mock_member.display_name = "TestUser"
+        mock_member.mention = "@TestUser"
+        mock_log_channel = AsyncMock()
+
+        with (
+            patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
+            patch("uuid.uuid4") as mock_uuid,
+        ):
+            mock_uuid.return_value.hex = "abcdef123456789"
+
+            await bot.send_removal_approval_request(
+                mock_guild, mock_member, "#PLAYER123", "TestPlayer", "Left clan"
+            )
+
+            # Verify log channel resolution was called
+            bot.resolve_log_channel.assert_called_once_with(mock_guild)
+
+            # Verify message was sent with embed and view
+            mock_log_channel.send.assert_called_once()
+            call_kwargs = mock_log_channel.send.call_args[1]
+            assert "embed" in call_kwargs
+            assert "view" in call_kwargs
+
+            # Verify embed content
+            embed = call_kwargs["embed"]
+            assert embed.title == "🚨 Member Removal Request"
+            assert "TestUser" in embed.description
+            assert "@TestUser" in embed.description
+
+    @pytest.mark.asyncio
+    async def test_send_removal_approval_request_no_log_channel(self):
+        """Test send_removal_approval_request when no log channel is configured."""
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+
+        with patch.object(bot, "resolve_log_channel", return_value=None):
+            await bot.send_removal_approval_request(
+                mock_guild, mock_member, "#PLAYER123", "TestPlayer", "Left clan"
+            )
+
+            # Should complete without error, just log a warning
+
+    @pytest.mark.asyncio
+    async def test_send_removal_approval_request_send_forbidden(self):
+        """Test send_removal_approval_request when bot lacks send permission."""
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+        mock_member.display_name = "TestUser"
+        mock_member.mention = "@TestUser"
+        mock_log_channel = AsyncMock()
+        mock_log_channel.send.side_effect = discord.Forbidden(MagicMock(), "Forbidden")
+        mock_log_channel.id = 67890
+
+        with (
+            patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
+            patch("uuid.uuid4") as mock_uuid,
+        ):
+            mock_uuid.return_value.hex = "abcdef123456789"
+
+            await bot.send_removal_approval_request(
+                mock_guild, mock_member, "#PLAYER123", "TestPlayer", "Left clan"
+            )
+
+            # Should handle the exception gracefully
+            mock_log_channel.send.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_removal_approval_request_http_exception(self):
+        """Test send_removal_approval_request with HTTP exception."""
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+        mock_member.display_name = "TestUser"
+        mock_member.mention = "@TestUser"
+        mock_log_channel = AsyncMock()
+        mock_log_channel.send.side_effect = discord.HTTPException(
+            MagicMock(), "HTTP Error"
+        )
+
+        with (
+            patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
+            patch("uuid.uuid4") as mock_uuid,
+        ):
+            mock_uuid.return_value.hex = "abcdef123456789"
+
+            await bot.send_removal_approval_request(
+                mock_guild, mock_member, "#PLAYER123", "TestPlayer", "Left clan"
+            )
+
+            # Should handle the exception gracefully
+            mock_log_channel.send.assert_called_once()
+
+
+class TestCleanupExpiredPendingRemovals:
+    """Test the cleanup_expired_pending_removals function."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_expired_pending_removals_no_table(self):
+        """Test cleanup when table is None."""
+        with patch.object(bot, "table", None):
+            await bot.cleanup_expired_pending_removals()
+            # Should complete without error
+
+    @pytest.mark.asyncio
+    async def test_cleanup_expired_pending_removals_no_expired(self):
+        """Test cleanup when there are no expired requests."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {"Items": []}
+
+        with patch.object(bot, "table", mock_table):
+            await bot.cleanup_expired_pending_removals()
+
+            mock_table.scan.assert_called_once()
+            mock_table.delete_item.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_expired_pending_removals_with_expired(self):
+        """Test cleanup when there are expired requests."""
+        from datetime import UTC, datetime, timedelta
+
+        # Create a timestamp from 25 hours ago (expired)
+        expired_time = datetime.now(UTC) - timedelta(hours=25)
+        recent_time = datetime.now(UTC) - timedelta(minutes=30)
+
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "PENDING_REMOVAL_expired1",
+                    "removal_id": "expired1",
+                    "timestamp": expired_time.isoformat(),
+                },
+                {
+                    "discord_id": "PENDING_REMOVAL_recent1",
+                    "removal_id": "recent1",
+                    "timestamp": recent_time.isoformat(),
+                },
+                {
+                    "discord_id": "regular_user_123",  # Not a pending removal
+                    "player_tag": "#PLAYER123",
+                },
+            ]
+        }
+
+        with patch.object(bot, "table", mock_table):
+            await bot.cleanup_expired_pending_removals()
+
+            mock_table.scan.assert_called_once()
+            # Should only delete the expired item
+            mock_table.delete_item.assert_called_once_with(
+                Key={"discord_id": "PENDING_REMOVAL_expired1"}
+            )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_expired_pending_removals_invalid_timestamp(self):
+        """Test cleanup handling invalid timestamps."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "PENDING_REMOVAL_invalid1",
+                    "removal_id": "invalid1",
+                    "timestamp": "invalid-timestamp",
+                },
+                {
+                    "discord_id": "PENDING_REMOVAL_invalid2",
+                    "removal_id": "invalid2",
+                    "timestamp": None,
+                },
+            ]
+        }
+
+        with patch.object(bot, "table", mock_table):
+            await bot.cleanup_expired_pending_removals()
+
+            mock_table.scan.assert_called_once()
+            # Should not delete anything due to invalid timestamps
+            mock_table.delete_item.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_expired_pending_removals_scan_exception(self):
+        """Test cleanup handling scan exceptions."""
+        mock_table = MagicMock()
+        mock_table.scan.side_effect = Exception("DynamoDB scan error")
+
+        with patch.object(bot, "table", mock_table):
+            await bot.cleanup_expired_pending_removals()
+
+            # Should handle the exception gracefully
+            mock_table.scan.assert_called_once()
+
+
+class TestMembershipCheckWithApprovalSystem:
+    """Test membership check integration with approval system."""
+
+    @pytest.mark.asyncio
+    async def test_membership_check_sends_approval_request(self):
+        """Test membership check sends approval request for members who left clan."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER1",
+                    "player_name": "TestPlayer",
+                    "clan_tag": "#TESTCLAN",
+                }
+            ]
+        }
+
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+        mock_guild.get_member.return_value = mock_member
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
+            patch.object(
+                bot, "get_player", return_value=None
+            ),  # Player not found (left clan)
+            patch.object(bot, "get_player_clan_tag", return_value=None),
+            patch.object(bot, "send_removal_approval_request") as mock_send_approval,
+        ):
+            await bot.membership_check()
+
+            # Verify approval request was sent
+            mock_send_approval.assert_called_once_with(
+                mock_guild,
+                mock_member,
+                "#PLAYER1",
+                "TestPlayer",
+                "Player TestPlayer (#PLAYER1) is no longer in any clan",
+            )
+
+    @pytest.mark.asyncio
+    async def test_membership_check_approval_request_exception(self):
+        """Test membership check handles exceptions when sending approval request."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER1",
+                    "player_name": "TestPlayer",
+                }
+            ]
+        }
+
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_guild.get_member.return_value = mock_member
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
+            patch.object(bot, "get_player", return_value=None),
+            patch.object(bot, "get_player_clan_tag", return_value=None),
+            patch.object(bot, "send_removal_approval_request") as mock_send_approval,
+        ):
+            mock_send_approval.side_effect = Exception("Network error")
+
+            await bot.membership_check()
+
+            # Should handle the exception gracefully
+            mock_send_approval.assert_called_once()
+
+
+class TestOnReadyWithCleanup:
+    """Test on_ready event with cleanup integration."""
+
+    @pytest.mark.asyncio
+    async def test_on_ready_calls_cleanup(self):
+        """Test that on_ready calls cleanup_expired_pending_removals."""
+        mock_user = MagicMock()
+        mock_user.id = 123456
+        mock_user.__str__ = lambda: "TestBot"
+
+        with (
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync_mock,
+            patch.object(bot, "coc_client") as coc_client_mock,
+            patch.object(bot, "cleanup_expired_pending_removals") as cleanup_mock,
+            patch.object(bot.membership_check, "start") as start_mock,
+            patch.object(
+                type(bot.bot), "user", new_callable=PropertyMock, return_value=mock_user
+            ),
+        ):
+            coc_client_mock.login = AsyncMock()
+            cleanup_mock.return_value = None
+
+            await bot.on_ready()
+
+            sync_mock.assert_called_once()
+            coc_client_mock.login.assert_called_once()
+            cleanup_mock.assert_called_once()
+            start_mock.assert_called_once()
