@@ -51,6 +51,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set up Python (for dependency caching)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Cache Python dependencies
+        run: |
+          echo "📦 Pre-caching Python dependencies..."
+          pip install --user -r requirements.txt
+
       - name: Determine build strategy
         id: strategy
         run: |
@@ -71,9 +83,25 @@ jobs:
 
       - name: Build verification bot (conditional)
         if: env.REBUILD_BOT == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: |
+            type=gha,scope=bot-deps
+            type=gha,scope=bot-runtime
+          cache-to: |
+            type=gha,mode=max,scope=bot-deps
+            type=gha,mode=max,scope=bot-runtime
+          target: runtime
+
+      - name: Set bot image environment (conditional)
+        if: env.REBUILD_BOT == 'true'
         run: |
-          echo "🔨 Building verification bot..."
-          docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA --push .
+          echo "🔨 Built verification bot with caching"
           echo "IMAGE=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
           echo "BOT_IMAGE_BUILT=true" >> $GITHUB_ENV
 
@@ -92,9 +120,25 @@ jobs:
 
       - name: Build giveaway bot (conditional)
         if: env.REBUILD_GIVEAWAY == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.giveaway
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.login.outputs.registry }}/${{ env.GIVEAWAY_ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: |
+            type=gha,scope=giveaway-deps
+            type=gha,scope=giveaway-runtime
+          cache-to: |
+            type=gha,mode=max,scope=giveaway-deps
+            type=gha,mode=max,scope=giveaway-runtime
+          target: runtime
+
+      - name: Set giveaway image environment (conditional)
+        if: env.REBUILD_GIVEAWAY == 'true'
         run: |
-          echo "🔨 Building giveaway bot..."
-          docker buildx build --platform linux/arm64 -t ${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA --push -f Dockerfile.giveaway .
+          echo "🔨 Built giveaway bot with caching"
           echo "GIVEAWAY_IMAGE=${{ steps.login.outputs.registry }}/$GIVEAWAY_ECR_REPOSITORY:$GITHUB_SHA" >> $GITHUB_ENV
           echo "GIVEAWAY_IMAGE_BUILT=true" >> $GITHUB_ENV
 
