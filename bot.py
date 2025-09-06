@@ -280,9 +280,9 @@ async def whois(interaction: discord.Interaction, member: discord.Member):
     )
 
 
-# ---------- /recruit command ----------
+# ---------- /recruited command ----------
 @tree.command(
-    name="recruit",
+    name="recruited",
     description="Announce a recruited player with tag and source.",
 )
 @app_commands.describe(
@@ -313,7 +313,7 @@ async def recruit(
     embed.add_field(name="Player Tag", value=f"`{tag}`", inline=True)
     embed.add_field(name="Source", value=source.value, inline=True)
     embed.add_field(name="Deep Link", value=f"[Open Profile]({link})", inline=False)
-    embed.set_footer(text="Reported via /recruit")
+    embed.set_footer(text="Reported via /recruited")
 
     await interaction.response.send_message(embed=embed)
 
