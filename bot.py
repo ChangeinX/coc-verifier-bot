@@ -15,8 +15,6 @@ Optional: ADMIN_LOG_CHANNEL_ID (numeric), AWS_REGION
 import asyncio
 import logging
 import os
-import uuid
-from datetime import UTC, datetime
 from typing import Final
 
 import boto3
@@ -24,6 +22,8 @@ import coc
 import discord
 from discord import app_commands
 from discord.ext import tasks
+
+from verifier_bot import approvals, coc_api, logging_utils
 
 # ---------- Environment ----------
 DISCORD_TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
@@ -68,34 +68,16 @@ log = logging.getLogger("coc-gateway")
 
 
 async def resolve_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
-    """Return a TextChannel object or None if unavailable."""
-    if not ADMIN_LOG_CHANNEL_ID:
-        return None
-
-    # First try guild cache -> global cache -> REST fetch
-    channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID) or bot.get_channel(
-        ADMIN_LOG_CHANNEL_ID
-    )
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(ADMIN_LOG_CHANNEL_ID)
-        except discord.HTTPException:
-            log.warning(
-                "Cannot fetch channel %s – invalid ID or not accessible",
-                ADMIN_LOG_CHANNEL_ID,
-            )
-            return None
-
-    if isinstance(channel, discord.TextChannel):
-        return channel
-    log.warning("Channel ID %s is not a text channel", ADMIN_LOG_CHANNEL_ID)
-    return None
+    """Thin wrapper delegating to logging_utils.resolve_log_channel."""
+    return await logging_utils.resolve_log_channel(bot, ADMIN_LOG_CHANNEL_ID, guild)
 
 
 # ---------- Member Removal Approval System ----------
 
 
-class MemberRemovalView(discord.ui.View):
+class MemberRemovalView(approvals.MemberRemovalViewBase):
+    """Thin wrapper to inject the module table into the generic view."""
+
     def __init__(
         self,
         removal_id: str,
@@ -103,242 +85,21 @@ class MemberRemovalView(discord.ui.View):
         player_tag: str,
         player_name: str,
         reason: str,
-    ):
-        super().__init__(timeout=86400)  # 24 hours timeout
-        self.removal_id = removal_id
-        self.discord_id = discord_id
-        self.player_tag = player_tag
-        self.player_name = player_name
-        self.reason = reason
-        self.request_timestamp = datetime.now(UTC)  # Store original request time
+    ) -> None:
+        super().__init__(
+            lambda: table, removal_id, discord_id, player_tag, player_name, reason
+        )
 
-    async def store_pending_removal(self) -> None:
-        """Store the pending removal in DynamoDB."""
-        if table is None:
-            return
-        try:
-            table.put_item(
-                Item={
-                    "discord_id": f"PENDING_REMOVAL_{self.removal_id}",
-                    "removal_id": self.removal_id,
-                    "target_discord_id": self.discord_id,
-                    "player_tag": self.player_tag,
-                    "player_name": self.player_name,
-                    "reason": self.reason,
-                    "timestamp": datetime.now(UTC).isoformat(),
-                    "status": "PENDING",
-                }
-            )
-            log.info(
-                "Stored pending removal %s for user %s",
-                self.removal_id,
-                self.discord_id,
-            )
-        except Exception as exc:
-            log.exception("Failed to store pending removal: %s", exc)
-
-    async def remove_pending_removal(self) -> None:
-        """Remove the pending removal from DynamoDB."""
-        if table is None:
-            return
-        try:
-            table.delete_item(Key={"discord_id": f"PENDING_REMOVAL_{self.removal_id}"})
-            log.info("Removed pending removal %s", self.removal_id)
-        except Exception as exc:
-            log.exception("Failed to remove pending removal: %s", exc)
-
-    @discord.ui.button(
-        label="Approve Removal", style=discord.ButtonStyle.danger, emoji="✅"
-    )
+    # Expose methods on this class for tests that access MemberRemovalView.__dict__
     async def approve_removal(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        """Handle approval of member removal."""
-        await interaction.response.defer(ephemeral=True)
+        return await super().approve_removal(interaction, button)
 
-        guild = interaction.guild
-        if guild is None:
-            await interaction.followup.send("Error: Guild not found.", ephemeral=True)
-            return
-
-        # Get the member to be removed
-        member = guild.get_member(int(self.discord_id))
-        if member is None:
-            await interaction.followup.send(
-                f"❌ Member {self.discord_id} not found in server. They may have already left.",
-                ephemeral=True,
-            )
-            await self.remove_pending_removal()
-            # Disable buttons and update the embed
-            for item in self.children:
-                item.disabled = True
-            if hasattr(interaction.message, "edit"):
-                try:
-                    embed = (
-                        interaction.message.embeds[0]
-                        if interaction.message.embeds
-                        else None
-                    )
-                    if embed:
-                        embed.color = discord.Color.red()
-                        # Fix the timestamp to static format before adding result
-                        self._update_timestamp_field_to_static(embed)
-                        embed.add_field(
-                            name="Result",
-                            value=f"❌ Member not found (approved by {interaction.user.mention})",
-                            inline=False,
-                        )
-                    await interaction.message.edit(embed=embed, view=self)
-                except Exception as exc:
-                    log.exception("Failed to update message after approval: %s", exc)
-            return
-
-        # Perform the removal actions
-        kicked = False
-        record_deleted = False
-
-        # Try to kick the member
-        try:
-            await member.kick(
-                reason=f"Left clan - approved by {interaction.user.name}: {self.reason}"
-            )
-            kicked = True
-            log.info(
-                "Kicked member %s (%s) - approved by %s",
-                member,
-                self.discord_id,
-                interaction.user,
-            )
-        except discord.Forbidden:
-            log.warning("Forbidden when trying to kick %s", member)
-        except discord.HTTPException as exc:
-            log.exception("Failed to kick %s: %s", member, exc)
-
-        # Try to delete the verification record
-        if table is not None:
-            try:
-                table.delete_item(Key={"discord_id": self.discord_id})
-                record_deleted = True
-                log.info(
-                    "Deleted verification record for %s - approved by %s",
-                    self.discord_id,
-                    interaction.user,
-                )
-            except Exception as exc:
-                log.exception(
-                    "Failed to delete verification record for %s: %s",
-                    self.discord_id,
-                    exc,
-                )
-
-        # Remove the pending removal
-        await self.remove_pending_removal()
-
-        # Update the interaction
-        result_parts = []
-        if kicked:
-            result_parts.append("✅ Member kicked")
-        else:
-            result_parts.append("⚠️ Could not kick member")
-
-        if record_deleted:
-            result_parts.append("✅ Record deleted")
-        else:
-            result_parts.append("⚠️ Could not delete record")
-
-        result_text = " | ".join(result_parts)
-        await interaction.followup.send(
-            f"**Approved removal of {member.mention}**\n{result_text}", ephemeral=True
-        )
-
-        # Disable buttons and update the embed
-        for item in self.children:
-            item.disabled = True
-
-        if hasattr(interaction.message, "edit"):
-            try:
-                embed = (
-                    interaction.message.embeds[0]
-                    if interaction.message.embeds
-                    else None
-                )
-                if embed:
-                    embed.color = discord.Color.green()
-                    # Fix the timestamp to static format before adding result
-                    self._update_timestamp_field_to_static(embed)
-                    embed.add_field(
-                        name="Result",
-                        value=f"✅ Approved by {interaction.user.mention}\n{result_text}",
-                        inline=False,
-                    )
-                await interaction.message.edit(embed=embed, view=self)
-            except Exception as exc:
-                log.exception("Failed to update message after approval: %s", exc)
-
-    @discord.ui.button(
-        label="Deny Removal", style=discord.ButtonStyle.secondary, emoji="❌"
-    )
     async def deny_removal(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        """Handle denial of member removal."""
-        await interaction.response.defer(ephemeral=True)
-
-        # Remove the pending removal
-        await self.remove_pending_removal()
-
-        log.info(
-            "Denied removal of %s (%s) - denied by %s",
-            self.player_name,
-            self.discord_id,
-            interaction.user,
-        )
-        await interaction.followup.send(
-            f"**Denied removal of {self.player_name}**", ephemeral=True
-        )
-
-        # Disable buttons and update the embed
-        for item in self.children:
-            item.disabled = True
-
-        if hasattr(interaction.message, "edit"):
-            try:
-                embed = (
-                    interaction.message.embeds[0]
-                    if interaction.message.embeds
-                    else None
-                )
-                if embed:
-                    embed.color = discord.Color.yellow()
-                    # Fix the timestamp to static format before adding result
-                    self._update_timestamp_field_to_static(embed)
-                    embed.add_field(
-                        name="Result",
-                        value=f"❌ Denied by {interaction.user.mention}",
-                        inline=False,
-                    )
-                await interaction.message.edit(embed=embed, view=self)
-            except Exception as exc:
-                log.exception("Failed to update message after denial: %s", exc)
-
-    def _update_timestamp_field_to_static(self, embed: discord.Embed) -> None:
-        """Update the 'Requested' field from dynamic to static timestamp format."""
-        try:
-            # Find and update the Requested field to static format
-            static_timestamp = f"<t:{int(self.request_timestamp.timestamp())}:F>"
-            for i, field in enumerate(embed.fields):
-                if field.name == "Requested":
-                    embed.set_field_at(
-                        i, name="Requested", value=static_timestamp, inline=field.inline
-                    )
-                    break
-        except Exception as exc:
-            log.exception("Failed to update timestamp field to static format: %s", exc)
-
-    async def on_timeout(self) -> None:
-        """Handle view timeout."""
-        await self.remove_pending_removal()
-        log.info("Removal request %s timed out", self.removal_id)
+        return await super().deny_removal(interaction, button)
 
 
 async def send_removal_approval_request(
@@ -348,148 +109,30 @@ async def send_removal_approval_request(
     player_name: str,
     reason: str,
 ) -> None:
-    """Send a member removal approval request to the admin log channel."""
-    log_chan = await resolve_log_channel(guild)
-    if log_chan is None:
-        log.warning(
-            "No admin log channel configured - cannot send removal approval request"
-        )
-        return
-
-    removal_id = uuid.uuid4().hex[:8]  # Short ID for easier reference
-    view = MemberRemovalView(
-        removal_id, str(member.id), player_tag, player_name, reason
+    return await approvals.send_removal_approval_request(
+        guild,
+        member,
+        player_tag,
+        player_name,
+        reason,
+        resolve_log_channel=resolve_log_channel,
+        table=table,
     )
-
-    # Store the pending removal
-    await view.store_pending_removal()
-
-    # Create the approval request embed
-    embed = discord.Embed(
-        title="🚨 Member Removal Request",
-        description=f"Member **{member.display_name}** ({member.mention}) needs approval for removal.",
-        color=discord.Color.orange(),
-        timestamp=datetime.now(UTC),
-    )
-
-    embed.add_field(
-        name="Discord User", value=f"{member.mention} ({member.id})", inline=True
-    )
-    embed.add_field(
-        name="CoC Player", value=f"{player_name} ({player_tag})", inline=True
-    )
-    embed.add_field(name="Reason", value=reason, inline=False)
-    embed.add_field(name="Request ID", value=removal_id, inline=True)
-    embed.add_field(
-        name="Requested",
-        value=f"<t:{int(datetime.now(UTC).timestamp())}:R>",
-        inline=True,
-    )
-
-    embed.set_footer(text="This request will expire in 24 hours")
-
-    try:
-        await log_chan.send(embed=embed, view=view)
-        log.info(
-            "Sent removal approval request for %s (%s) - ID: %s",
-            member,
-            player_tag,
-            removal_id,
-        )
-    except discord.Forbidden:
-        log.warning("No send permission in log channel %s", log_chan.id)
-    except discord.HTTPException as exc:
-        log.exception("Failed to send removal approval request: %s", exc)
 
 
 async def cleanup_expired_pending_removals() -> None:
-    """Clean up expired pending removal requests (older than 24 hours)."""
-    if table is None:
-        return
-
-    try:
-        # Scan for pending removals
-        response = table.scan()
-        expired_count = 0
-        cutoff_time = datetime.now(UTC).timestamp() - 86400  # 24 hours ago
-
-        for item in response.get("Items", []):
-            discord_id = item.get("discord_id", "")
-            if discord_id.startswith("PENDING_REMOVAL_"):
-                timestamp_str = item.get("timestamp")
-                if timestamp_str:
-                    try:
-                        timestamp = datetime.fromisoformat(
-                            timestamp_str.replace("Z", "+00:00")
-                        )
-                        if timestamp.timestamp() < cutoff_time:
-                            # This removal request has expired
-                            table.delete_item(Key={"discord_id": discord_id})
-                            expired_count += 1
-                            log.info(
-                                "Cleaned up expired pending removal: %s",
-                                item.get("removal_id", "unknown"),
-                            )
-                    except (ValueError, AttributeError) as exc:
-                        log.warning(
-                            "Invalid timestamp in pending removal %s: %s",
-                            discord_id,
-                            exc,
-                        )
-
-        if expired_count > 0:
-            log.info("Cleaned up %d expired pending removal requests", expired_count)
-
-    except Exception as exc:
-        log.exception("Failed to cleanup expired pending removals: %s", exc)
+    return await approvals.cleanup_expired_pending_removals(table)
 
 
 async def has_pending_removal(target_discord_id: str) -> bool:
-    """Check if there's already a pending removal request for the given discord_id."""
-    if table is None:
-        return False
-
-    try:
-        # Scan for existing pending removals for this discord_id
-        response = table.scan()
-
-        for item in response.get("Items", []):
-            discord_id = item.get("discord_id", "")
-            if (
-                discord_id.startswith("PENDING_REMOVAL_")
-                and item.get("target_discord_id") == target_discord_id
-            ):
-                log.info(
-                    "Found existing pending removal for discord_id %s",
-                    target_discord_id,
-                )
-                return True
-
-        return False
-
-    except Exception as exc:
-        log.exception(
-            "Failed to check for pending removal for %s: %s", target_discord_id, exc
-        )
-        return (
-            False  # Assume no pending request on error to avoid blocking new requests
-        )
+    return await approvals.has_pending_removal(table, target_discord_id)
 
 
 # ---------- Clash API ----------
 
 
 async def get_player(player_tag: str) -> coc.Player | None:
-    """Return player object or None on API error."""
-    try:
-        player = await coc_client.get_player(player_tag)
-    except coc.NotFound:
-        log.warning("Player %s not found", player_tag)
-        return None
-    except coc.HTTPException as exc:
-        log.error("CoC API error: %s", exc)
-        return None
-    return player
+    return await coc_api.get_player(coc_client, player_tag)
 
 
 async def is_member_of_clan(player_tag: str) -> bool:
@@ -505,7 +148,6 @@ async def is_member_of_clan(player_tag: str) -> bool:
 
 
 async def get_player_clan_tag(player_tag: str) -> str | None:
-    """Return the clan tag the player belongs to (main or feeder), or None if not a member."""
     player = await get_player(player_tag)
     if not player or not player.clan:
         return None

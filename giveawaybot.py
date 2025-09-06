@@ -1,5 +1,4 @@
 import asyncio
-import calendar
 import datetime
 import logging
 import os
@@ -214,11 +213,11 @@ def weekly_giveaway_id(date: datetime.date) -> str:
 async def schedule_check() -> None:
     today = datetime.date.today()
 
-    # Gold pass 5 days before month end
-    last_day = calendar.monthrange(today.year, today.month)[1]
-    target = datetime.date(today.year, today.month, last_day) - datetime.timedelta(
-        days=5
-    )
+    # Gold pass 5 days before month end (avoid constructing datetime.date class directly)
+    # Robust last-day calculation that works even if datetime.date is patched in tests
+    next_month = (today.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    last_date = next_month - datetime.timedelta(days=1)
+    target = last_date - datetime.timedelta(days=5)
     if today == target:
         gid = month_end_giveaway_id(today)
         if not await giveaway_exists(gid):
