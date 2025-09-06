@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 
 import coc
 import discord
@@ -1335,3 +1335,287 @@ class TestOnReadyWithCleanup:
             coc_client_mock.login.assert_called_once()
             cleanup_mock.assert_called_once()
             start_mock.assert_called_once()
+
+
+class TestHasPendingRemoval:
+    """Test the has_pending_removal function for preventing duplicate requests."""
+
+    @pytest.mark.asyncio
+    async def test_has_pending_removal_no_table(self):
+        """Test has_pending_removal when table is None."""
+        with patch.object(bot, "table", None):
+            result = await bot.has_pending_removal("123456789")
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_has_pending_removal_exists(self):
+        """Test has_pending_removal when a pending removal exists."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "PENDING_REMOVAL_abc123",
+                    "target_discord_id": "123456789",
+                    "removal_id": "abc123",
+                }
+            ]
+        }
+
+        with patch.object(bot, "table", mock_table):
+            result = await bot.has_pending_removal("123456789")
+            assert result is True
+            mock_table.scan.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_has_pending_removal_not_exists(self):
+        """Test has_pending_removal when no pending removal exists."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "PENDING_REMOVAL_abc123",
+                    "target_discord_id": "987654321",  # Different discord_id
+                    "removal_id": "abc123",
+                },
+                {"discord_id": "some_other_record", "player_tag": "#PLAYER123"},
+            ]
+        }
+
+        with patch.object(bot, "table", mock_table):
+            result = await bot.has_pending_removal("123456789")
+            assert result is False
+            mock_table.scan.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_has_pending_removal_scan_exception(self):
+        """Test has_pending_removal handling scan exceptions."""
+        mock_table = MagicMock()
+        mock_table.scan.side_effect = Exception("DynamoDB scan error")
+
+        with patch.object(bot, "table", mock_table):
+            result = await bot.has_pending_removal("123456789")
+            assert result is False  # Should return False on error to not block requests
+            mock_table.scan.assert_called_once()
+
+
+class TestMembershipCheckDuplicatePrevention:
+    """Test that membership_check prevents duplicate removal requests."""
+
+    @pytest.mark.asyncio
+    async def test_membership_check_skips_existing_pending_removal(self):
+        """Test that membership_check skips sending request if one already exists."""
+        mock_table = MagicMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+
+        # Mock table scan to return a member who left clan
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER123",
+                    "player_name": "TestPlayer",
+                    "clan_tag": "#CLAN123",
+                }
+            ]
+        }
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(bot, "bot") as mock_bot,
+            patch.object(
+                bot, "get_player_clan_tag", return_value=None
+            ),  # Member left clan
+            patch.object(bot, "get_player"),
+            patch.object(
+                bot, "has_pending_removal", return_value=True
+            ),  # Already has pending request
+            patch.object(bot, "send_removal_approval_request") as mock_send_request,
+        ):
+            mock_bot.guilds = [mock_guild]
+            mock_guild.get_member.return_value = mock_member
+
+            # Call the membership check
+            await bot.membership_check()
+
+            # Verify that send_removal_approval_request was NOT called
+            mock_send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_membership_check_sends_request_when_no_pending(self):
+        """Test that membership_check sends request when no pending removal exists."""
+        mock_table = MagicMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+
+        # Mock table scan to return a member who left clan
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER123",
+                    "player_name": "TestPlayer",
+                    "clan_tag": "#CLAN123",
+                }
+            ]
+        }
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(bot, "bot") as mock_bot,
+            patch.object(
+                bot, "get_player_clan_tag", return_value=None
+            ),  # Member left clan
+            patch.object(bot, "get_player"),
+            patch.object(
+                bot, "has_pending_removal", return_value=False
+            ),  # No pending request
+            patch.object(bot, "send_removal_approval_request") as mock_send_request,
+        ):
+            mock_bot.guilds = [mock_guild]
+            mock_guild.get_member.return_value = mock_member
+
+            # Call the membership check
+            await bot.membership_check()
+
+            # Verify that send_removal_approval_request WAS called
+            mock_send_request.assert_called_once_with(
+                mock_guild,
+                mock_member,
+                "#PLAYER123",
+                "TestPlayer",
+                "Player TestPlayer (#PLAYER123) is no longer in any clan",
+            )
+
+
+class TestTimestampFix:
+    """Test that timestamp field becomes static after approval/denial actions."""
+
+    @pytest.mark.asyncio
+    async def test_timestamp_field_updated_to_static_on_approval(self):
+        """Test that timestamp field becomes static when approval happens."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_user = MagicMock()
+        mock_user.name = "admin"
+        mock_user.mention = "@admin"
+
+        mock_interaction.guild = mock_guild
+        mock_interaction.user = mock_user
+        mock_guild.get_member.return_value = mock_member
+        mock_member.mention = "@testuser"
+        mock_member.kick = AsyncMock()
+
+        # Mock the embed with fields including Requested field
+        mock_embed = MagicMock()
+        mock_field_requested = MagicMock()
+        mock_field_requested.name = "Requested"
+        mock_field_requested.inline = True
+        mock_field_other = MagicMock()
+        mock_field_other.name = "Other Field"
+        mock_embed.fields = [mock_field_other, mock_field_requested]
+
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            from bot import MemberRemovalView
+
+            approve_func = MemberRemovalView.__dict__["approve_removal"]
+            await approve_func(view, mock_interaction, mock_button)
+
+            # Verify embed.set_field_at was called to update the timestamp field
+            mock_embed.set_field_at.assert_called()
+            # Check that it was called with index 1 (the Requested field)
+            call_args = mock_embed.set_field_at.call_args
+            assert call_args[0][0] == 1  # Index of Requested field
+            assert call_args[1]["name"] == "Requested"
+            # Verify the value uses static format (contains 'F' timestamp format)
+            assert ":F>" in call_args[1]["value"]
+
+    @pytest.mark.asyncio
+    async def test_timestamp_field_updated_to_static_on_denial(self):
+        """Test that timestamp field becomes static when denial happens."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_user = MagicMock()
+        mock_user.mention = "@admin"
+
+        mock_interaction.user = mock_user
+
+        # Mock the embed with fields including Requested field
+        mock_embed = MagicMock()
+        mock_field_requested = MagicMock()
+        mock_field_requested.name = "Requested"
+        mock_field_requested.inline = True
+        mock_embed.fields = [mock_field_requested]
+
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            from bot import MemberRemovalView
+
+            deny_func = MemberRemovalView.__dict__["deny_removal"]
+            await deny_func(view, mock_interaction, mock_button)
+
+            # Verify embed.set_field_at was called to update the timestamp field
+            mock_embed.set_field_at.assert_called()
+            call_args = mock_embed.set_field_at.call_args
+            assert call_args[0][0] == 0  # Index of Requested field
+            assert call_args[1]["name"] == "Requested"
+            # Verify the value uses static format (contains 'F' timestamp format)
+            assert ":F>" in call_args[1]["value"]
+
+    @pytest.mark.asyncio
+    async def test_update_timestamp_field_to_static_helper(self):
+        """Test the _update_timestamp_field_to_static helper method."""
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        # Mock embed with Requested field
+        mock_embed = MagicMock()
+        mock_field1 = MagicMock()
+        mock_field1.name = "Discord User"
+        mock_field1.inline = True
+        mock_field2 = MagicMock()
+        mock_field2.name = "Requested"
+        mock_field2.inline = True
+        mock_embed.fields = [mock_field1, mock_field2]
+
+        # Call the helper method
+        view._update_timestamp_field_to_static(mock_embed)
+
+        # Verify set_field_at was called for the Requested field
+        mock_embed.set_field_at.assert_called_once_with(
+            1,  # Index of Requested field
+            name="Requested",
+            value=ANY,  # We'll check the format separately
+            inline=True,
+        )
+
+        # Verify the timestamp format is static (contains :F>)
+        call_args = mock_embed.set_field_at.call_args
+        timestamp_value = call_args[1]["value"]
+        assert ":F>" in timestamp_value

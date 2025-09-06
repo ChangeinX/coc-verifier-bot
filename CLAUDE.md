@@ -140,3 +140,4 @@ async def before_task():
 - CoC API credentials must have access to target clan
 - AWS credentials configured for DynamoDB access
 - Proper Discord permissions: Manage Roles, Send Messages, Use Slash Commands
+- **CRITICIAL** always leverage the existing venv and verify all changes will pass the ci gate by running: `nox`
