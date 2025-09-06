@@ -159,6 +159,22 @@ async def get_player_clan_tag(player_tag: str) -> str | None:
     return None
 
 
+# ---------- Helpers ----------
+def normalize_player_tag(tag: str) -> str:
+    """Normalize a user-provided tag to Clash format (uppercase, prefixed with #)."""
+    tag = tag.strip().upper()
+    if not tag.startswith("#"):
+        tag = "#" + tag
+    return tag
+
+
+def player_deep_link(tag: str) -> str:
+    """Build the official Clash deep link for a player profile."""
+    return "https://link.clashofclans.com/?action=OpenPlayerProfile&tag=" + tag.lstrip(
+        "#"
+    )
+
+
 # ---------- /verify command ----------
 @tree.command(
     name="verify",
@@ -262,6 +278,44 @@ async def whois(interaction: discord.Interaction, member: discord.Member):
     await interaction.followup.send(
         f"{member.display_name} is {item['player_name']}", ephemeral=True
     )
+
+
+# ---------- /recruit command ----------
+@tree.command(
+    name="recruit",
+    description="Announce a recruited player with tag and source.",
+)
+@app_commands.describe(
+    player_tag="Player tag, e.g. #ABC123",
+    source="Where the player was found",
+)
+@app_commands.choices(
+    source=[
+        app_commands.Choice(name="Discord", value="Discord"),
+        app_commands.Choice(name="Reddit", value="Reddit"),
+        app_commands.Choice(name="Data scrape", value="Data scrape"),
+    ]
+)
+async def recruit(
+    interaction: discord.Interaction,
+    player_tag: str,
+    source: app_commands.Choice[str],
+):
+    """Post a public, nicely formatted recruit announcement."""
+    tag = normalize_player_tag(player_tag)
+    link = player_deep_link(tag)
+
+    embed = discord.Embed(
+        title="🎯 New Recruit",
+        description=f"{interaction.user.mention} reported a successful recruit!",
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Player Tag", value=f"`{tag}`", inline=True)
+    embed.add_field(name="Source", value=source.value, inline=True)
+    embed.add_field(name="Deep Link", value=f"[Open Profile]({link})", inline=False)
+    embed.set_footer(text="Reported via /recruit")
+
+    await interaction.response.send_message(embed=embed)
 
 
 # ---------- Clan membership check ----------
