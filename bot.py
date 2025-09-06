@@ -110,6 +110,7 @@ class MemberRemovalView(discord.ui.View):
         self.player_tag = player_tag
         self.player_name = player_name
         self.reason = reason
+        self.request_timestamp = datetime.now(UTC)  # Store original request time
 
     async def store_pending_removal(self) -> None:
         """Store the pending removal in DynamoDB."""
@@ -180,6 +181,8 @@ class MemberRemovalView(discord.ui.View):
                     )
                     if embed:
                         embed.color = discord.Color.red()
+                        # Fix the timestamp to static format before adding result
+                        self._update_timestamp_field_to_static(embed)
                         embed.add_field(
                             name="Result",
                             value=f"❌ Member not found (approved by {interaction.user.mention})",
@@ -261,6 +264,8 @@ class MemberRemovalView(discord.ui.View):
                 )
                 if embed:
                     embed.color = discord.Color.green()
+                    # Fix the timestamp to static format before adding result
+                    self._update_timestamp_field_to_static(embed)
                     embed.add_field(
                         name="Result",
                         value=f"✅ Approved by {interaction.user.mention}\n{result_text}",
@@ -305,6 +310,8 @@ class MemberRemovalView(discord.ui.View):
                 )
                 if embed:
                     embed.color = discord.Color.yellow()
+                    # Fix the timestamp to static format before adding result
+                    self._update_timestamp_field_to_static(embed)
                     embed.add_field(
                         name="Result",
                         value=f"❌ Denied by {interaction.user.mention}",
@@ -313,6 +320,20 @@ class MemberRemovalView(discord.ui.View):
                 await interaction.message.edit(embed=embed, view=self)
             except Exception as exc:
                 log.exception("Failed to update message after denial: %s", exc)
+
+    def _update_timestamp_field_to_static(self, embed: discord.Embed) -> None:
+        """Update the 'Requested' field from dynamic to static timestamp format."""
+        try:
+            # Find and update the Requested field to static format
+            static_timestamp = f"<t:{int(self.request_timestamp.timestamp())}:F>"
+            for i, field in enumerate(embed.fields):
+                if field.name == "Requested":
+                    embed.set_field_at(
+                        i, name="Requested", value=static_timestamp, inline=field.inline
+                    )
+                    break
+        except Exception as exc:
+            log.exception("Failed to update timestamp field to static format: %s", exc)
 
     async def on_timeout(self) -> None:
         """Handle view timeout."""
@@ -421,6 +442,38 @@ async def cleanup_expired_pending_removals() -> None:
 
     except Exception as exc:
         log.exception("Failed to cleanup expired pending removals: %s", exc)
+
+
+async def has_pending_removal(target_discord_id: str) -> bool:
+    """Check if there's already a pending removal request for the given discord_id."""
+    if table is None:
+        return False
+
+    try:
+        # Scan for existing pending removals for this discord_id
+        response = table.scan()
+
+        for item in response.get("Items", []):
+            discord_id = item.get("discord_id", "")
+            if (
+                discord_id.startswith("PENDING_REMOVAL_")
+                and item.get("target_discord_id") == target_discord_id
+            ):
+                log.info(
+                    "Found existing pending removal for discord_id %s",
+                    target_discord_id,
+                )
+                return True
+
+        return False
+
+    except Exception as exc:
+        log.exception(
+            "Failed to check for pending removal for %s: %s", target_discord_id, exc
+        )
+        return (
+            False  # Assume no pending request on error to avoid blocking new requests
+        )
 
 
 # ---------- Clash API ----------
@@ -598,6 +651,14 @@ async def membership_check() -> None:
         stored_clan_tag = item.get("clan_tag")
 
         if current_clan_tag is None:
+            # Check if there's already a pending removal request for this member
+            if await has_pending_removal(item["discord_id"]):
+                log.info(
+                    "Skipping duplicate removal request for %s - already pending",
+                    member,
+                )
+                continue
+
             # Send approval request for member removal
             reason = f"Player {item.get('player_name', 'Unknown')} ({item['player_tag']}) is no longer in any clan"
             try:
