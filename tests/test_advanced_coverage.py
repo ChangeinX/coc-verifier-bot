@@ -36,9 +36,13 @@ class TestAdvancedBotCoverage:
         """Test resolve_log_channel with non-text channel."""
         guild = MagicMock()
         voice_channel = MagicMock(spec=discord.VoiceChannel)
-        guild.get_channel.return_value = voice_channel
+        voice_channel.guild.id = guild.id
+        guild.get_channel.return_value = None
 
-        with patch("bot.ADMIN_LOG_CHANNEL_ID", 12345):
+        with (
+            patch("bot.ADMIN_LOG_CHANNEL_ID", 12345),
+            patch.object(bot.bot, "fetch_channel", return_value=voice_channel),
+        ):
             result = await bot.resolve_log_channel(guild)
             assert result is None
 
