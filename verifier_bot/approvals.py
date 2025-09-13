@@ -26,7 +26,10 @@ class MemberRemovalViewBase(discord.ui.View):
         player_name: str,
         reason: str,
     ) -> None:
-        super().__init__(timeout=86400)  # 24 hours timeout
+        # Import the constant from the main bot module
+        from bot import APPROVAL_TIMEOUT_SECONDS
+
+        super().__init__(timeout=APPROVAL_TIMEOUT_SECONDS)
         # table_getter: callable returning the latest table (to support tests patching bot.table)
         self._get_table = table_getter
         self.removal_id = removal_id
@@ -93,13 +96,9 @@ class MemberRemovalViewBase(discord.ui.View):
             await self.remove_pending_removal()
             for item in self.children:
                 item.disabled = True
-            if hasattr(interaction.message, "edit"):
+            if hasattr(interaction.message, "edit") and interaction.message:
                 try:
-                    embed = (
-                        interaction.message.embeds[0]
-                        if interaction.message.embeds
-                        else None
-                    )
+                    embed = self._get_or_create_embed(interaction.message)
                     if embed:
                         embed.color = discord.Color.red()
                         self._update_timestamp_field_to_static(embed)
@@ -108,7 +107,17 @@ class MemberRemovalViewBase(discord.ui.View):
                             value=f"❌ Member not found (approved by {interaction.user.mention})",
                             inline=False,
                         )
-                    await interaction.message.edit(embed=embed, view=self)
+                        await interaction.message.edit(embed=embed, view=self)
+                    else:
+                        log.warning(
+                            "Could not create or retrieve embed for message update"
+                        )
+                except discord.NotFound:
+                    log.warning(
+                        "Message not found when trying to update approval result"
+                    )
+                except discord.Forbidden:
+                    log.warning("No permission to edit approval message")
                 except Exception as exc:  # pylint: disable=broad-except
                     log.exception("Failed to update message after approval: %s", exc)
             return
@@ -164,13 +173,9 @@ class MemberRemovalViewBase(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-        if hasattr(interaction.message, "edit"):
+        if hasattr(interaction.message, "edit") and interaction.message:
             try:
-                embed = (
-                    interaction.message.embeds[0]
-                    if interaction.message.embeds
-                    else None
-                )
+                embed = self._get_or_create_embed(interaction.message)
                 if embed:
                     embed.color = discord.Color.green()
                     self._update_timestamp_field_to_static(embed)
@@ -179,7 +184,13 @@ class MemberRemovalViewBase(discord.ui.View):
                         value=f"✅ Approved by {interaction.user.mention}\n{result_text}",
                         inline=False,
                     )
-                await interaction.message.edit(embed=embed, view=self)
+                    await interaction.message.edit(embed=embed, view=self)
+                else:
+                    log.warning("Could not create or retrieve embed for message update")
+            except discord.NotFound:
+                log.warning("Message not found when trying to update approval result")
+            except discord.Forbidden:
+                log.warning("No permission to edit approval message")
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Failed to update message after approval: %s", exc)
 
@@ -206,13 +217,9 @@ class MemberRemovalViewBase(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-        if hasattr(interaction.message, "edit"):
+        if hasattr(interaction.message, "edit") and interaction.message:
             try:
-                embed = (
-                    interaction.message.embeds[0]
-                    if interaction.message.embeds
-                    else None
-                )
+                embed = self._get_or_create_embed(interaction.message)
                 if embed:
                     embed.color = discord.Color.yellow()
                     self._update_timestamp_field_to_static(embed)
@@ -221,9 +228,31 @@ class MemberRemovalViewBase(discord.ui.View):
                         value=f"❌ Denied by {interaction.user.mention}",
                         inline=False,
                     )
-                await interaction.message.edit(embed=embed, view=self)
+                    await interaction.message.edit(embed=embed, view=self)
+                else:
+                    log.warning("Could not create or retrieve embed for message update")
+            except discord.NotFound:
+                log.warning("Message not found when trying to update denial result")
+            except discord.Forbidden:
+                log.warning("No permission to edit denial message")
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Failed to update message after denial: %s", exc)
+
+    def _get_or_create_embed(self, message: discord.Message) -> discord.Embed | None:
+        """Get existing embed or create a basic one if none exists."""
+        try:
+            if message.embeds:
+                return message.embeds[0]
+            else:
+                # Create a basic embed if none exists
+                embed = discord.Embed(
+                    title="🚨 Member Removal Request",
+                    color=discord.Color.orange(),
+                )
+                return embed
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to get or create embed: %s", exc)
+            return None
 
     def _update_timestamp_field_to_static(self, embed: discord.Embed) -> None:
         try:
@@ -310,32 +339,43 @@ async def cleanup_expired_pending_removals(table) -> None:
         return
 
     try:
-        response = table.scan()
+        from boto3.dynamodb.conditions import Attr
+
+        # Use filtered scan to only get pending removal entries
+        response = table.scan(
+            FilterExpression=Attr("discord_id").begins_with("PENDING_REMOVAL_"),
+            ProjectionExpression="discord_id, removal_id, #ts",
+            ExpressionAttributeNames={
+                "#ts": "timestamp"
+            },  # 'timestamp' is a reserved word
+        )
+
         expired_count = 0
-        cutoff_time = datetime.now(UTC).timestamp() - 86400
+        from bot import APPROVAL_TIMEOUT_SECONDS
+
+        cutoff_time = datetime.now(UTC).timestamp() - APPROVAL_TIMEOUT_SECONDS
 
         for item in response.get("Items", []):
             discord_id = item.get("discord_id", "")
-            if discord_id.startswith("PENDING_REMOVAL_"):
-                timestamp_str = item.get("timestamp")
-                if timestamp_str:
-                    try:
-                        timestamp = datetime.fromisoformat(
-                            timestamp_str.replace("Z", "+00:00")
+            timestamp_str = item.get("timestamp")
+            if timestamp_str:
+                try:
+                    timestamp = datetime.fromisoformat(
+                        timestamp_str.replace("Z", "+00:00")
+                    )
+                    if timestamp.timestamp() < cutoff_time:
+                        table.delete_item(Key={"discord_id": discord_id})
+                        expired_count += 1
+                        log.info(
+                            "Cleaned up expired pending removal: %s",
+                            item.get("removal_id", "unknown"),
                         )
-                        if timestamp.timestamp() < cutoff_time:
-                            table.delete_item(Key={"discord_id": discord_id})
-                            expired_count += 1
-                            log.info(
-                                "Cleaned up expired pending removal: %s",
-                                item.get("removal_id", "unknown"),
-                            )
-                    except (ValueError, AttributeError) as exc:  # pylint: disable=broad-except
-                        log.warning(
-                            "Invalid timestamp in pending removal %s: %s",
-                            discord_id,
-                            exc,
-                        )
+                except (ValueError, AttributeError) as exc:
+                    log.warning(
+                        "Invalid timestamp in pending removal %s: %s",
+                        discord_id,
+                        exc,
+                    )
 
         if expired_count > 0:
             log.info("Cleaned up %d expired pending removal requests", expired_count)
@@ -345,24 +385,32 @@ async def cleanup_expired_pending_removals(table) -> None:
 
 
 async def has_pending_removal(table, target_discord_id: str) -> bool:
-    """Check if there's already a pending removal request for the given discord_id."""
+    """Check if there's already a pending removal request for the given discord_id.
+
+    This uses a targeted query approach to avoid expensive table scans.
+    """
     if table is None:
         return False
 
     try:
-        response = table.scan()
+        # First try the more efficient approach - query by prefix pattern
+        # This is more efficient than scanning the entire table
+        from boto3.dynamodb.conditions import Attr
 
-        for item in response.get("Items", []):
-            discord_id = item.get("discord_id", "")
-            if (
-                discord_id.startswith("PENDING_REMOVAL_")
-                and item.get("target_discord_id") == target_discord_id
-            ):
-                log.info(
-                    "Found existing pending removal for discord_id %s",
-                    target_discord_id,
-                )
-                return True
+        response = table.scan(
+            FilterExpression=Attr("target_discord_id").eq(target_discord_id)
+            & Attr("discord_id").begins_with("PENDING_REMOVAL_"),
+            ProjectionExpression="discord_id, target_discord_id",
+            Limit=1,  # We only need to know if one exists
+        )
+
+        items = response.get("Items", [])
+        if items:
+            log.info(
+                "Found existing pending removal for discord_id %s",
+                target_discord_id,
+            )
+            return True
 
         return False
 

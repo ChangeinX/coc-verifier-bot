@@ -67,11 +67,12 @@ class TestLogChannelResolution:
         """Test resolve_log_channel finding channel in bot global cache."""
         guild = MagicMock()
         text_channel = MagicMock(spec=discord.TextChannel)
+        text_channel.guild.id = guild.id
         guild.get_channel.return_value = None
 
         with (
             patch.object(bot, "ADMIN_LOG_CHANNEL_ID", 67890),
-            patch.object(bot.bot, "get_channel", return_value=text_channel),
+            patch.object(bot.bot, "fetch_channel", return_value=text_channel),
         ):
             result = await bot.resolve_log_channel(guild)
             assert result == text_channel
@@ -81,11 +82,11 @@ class TestLogChannelResolution:
         """Test resolve_log_channel fetching channel from Discord API."""
         guild = MagicMock()
         text_channel = MagicMock(spec=discord.TextChannel)
+        text_channel.guild.id = guild.id
         guild.get_channel.return_value = None
 
         with (
             patch.object(bot, "ADMIN_LOG_CHANNEL_ID", 67890),
-            patch.object(bot.bot, "get_channel", return_value=None),
             patch.object(
                 bot.bot, "fetch_channel", return_value=text_channel
             ) as fetch_mock,
@@ -106,11 +107,10 @@ class TestLogChannelResolution:
 
         with (
             patch.object(bot, "ADMIN_LOG_CHANNEL_ID", 67890),
-            patch.object(bot.bot, "get_channel", return_value=None),
             patch.object(
                 bot.bot,
                 "fetch_channel",
-                side_effect=discord.HTTPException(mock_response, "Channel not found"),
+                side_effect=discord.NotFound(mock_response, "Channel not found"),
             ) as fetch_mock,
         ):
             result = await bot.resolve_log_channel(guild)
@@ -122,9 +122,13 @@ class TestLogChannelResolution:
         """Test resolve_log_channel with non-text channel."""
         guild = MagicMock()
         voice_channel = MagicMock(spec=discord.VoiceChannel)
-        guild.get_channel.return_value = voice_channel
+        voice_channel.guild.id = guild.id
+        guild.get_channel.return_value = None
 
-        with patch.object(bot, "ADMIN_LOG_CHANNEL_ID", 67890):
+        with (
+            patch.object(bot, "ADMIN_LOG_CHANNEL_ID", 67890),
+            patch.object(bot.bot, "fetch_channel", return_value=voice_channel),
+        ):
             result = await bot.resolve_log_channel(guild)
             assert result is None
 
@@ -422,7 +426,7 @@ class TestVerifyCommand:
 
             mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
             mock_interaction.followup.send.assert_called_once_with(
-                "❌ Verification failed – you are not listed in any of our clans.",
+                "❌ Verification failed – player not found or CoC API unavailable.",
                 ephemeral=True,
             )
 
@@ -474,6 +478,25 @@ class TestVerifyCommand:
 
             mock_interaction.followup.send.assert_called_once_with(
                 "🚫 Bot lacks **Manage Roles** permission or the role hierarchy is incorrect.",
+                ephemeral=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_coc_api_403_error(self, mock_interaction):
+        """Test verification handles CoC API 403 authentication errors properly."""
+        # Mock a 403 authentication error from CoC API
+        mock_response = MagicMock()
+        mock_response.status = 403
+
+        with patch.object(bot, "get_player") as mock_get_player:
+            # Simulate player not found due to auth error
+            mock_get_player.return_value = None
+
+            await bot.verify.callback(mock_interaction, "#PLAYER1")
+
+            # Should show the generic "player not found" message - the re-auth happens transparently
+            mock_interaction.followup.send.assert_called_once_with(
+                "❌ Verification failed – player not found or CoC API unavailable.",
                 ephemeral=True,
             )
 
@@ -627,6 +650,53 @@ class TestMembershipCheck:
 
             # Verify deletion is NOT called (log-only mode)
             mock_table.delete_item.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_membership_check_skips_pending_removal_entries(self):
+        """Test membership check skips PENDING_REMOVAL entries without crashing."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",  # Valid Discord ID
+                    "player_tag": "#PLAYER1",
+                    "player_name": "ValidPlayer",
+                },
+                {
+                    "discord_id": "PENDING_REMOVAL_abc123",  # Should be skipped
+                    "removal_id": "abc123",
+                    "target_discord_id": "123456789",
+                    "player_tag": "#PLAYER2",
+                    "player_name": "PendingPlayer",
+                    "reason": "Left clan",
+                },
+                {
+                    "discord_id": "non_numeric_entry",  # Should be skipped
+                    "some_field": "some_value",
+                },
+            ]
+        }
+
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_guild.get_member.return_value = mock_member
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
+            patch.object(bot, "get_player", return_value=None),
+            patch.object(bot, "get_player_clan_tag", return_value="#CLAN123"),
+        ):
+            # This should not raise ValueError anymore
+            await bot.membership_check()
+
+            # Verify only the valid Discord ID was processed
+            mock_guild.get_member.assert_called_once_with(123456789)
 
 
 class TestMainFunction:
@@ -1256,6 +1326,7 @@ class TestMembershipCheckWithApprovalSystem:
                 bot, "get_player", return_value=None
             ),  # Player not found (left clan)
             patch.object(bot, "get_player_clan_tag", return_value=None),
+            patch.object(bot, "has_pending_removal", return_value=False),
             patch.object(bot, "send_removal_approval_request") as mock_send_approval,
         ):
             await bot.membership_check()
@@ -1297,6 +1368,7 @@ class TestMembershipCheckWithApprovalSystem:
             ),
             patch.object(bot, "get_player", return_value=None),
             patch.object(bot, "get_player_clan_tag", return_value=None),
+            patch.object(bot, "has_pending_removal", return_value=False),
             patch.object(bot, "send_removal_approval_request") as mock_send_approval,
         ):
             mock_send_approval.side_effect = Exception("Network error")
@@ -1371,14 +1443,7 @@ class TestHasPendingRemoval:
         """Test has_pending_removal when no pending removal exists."""
         mock_table = MagicMock()
         mock_table.scan.return_value = {
-            "Items": [
-                {
-                    "discord_id": "PENDING_REMOVAL_abc123",
-                    "target_discord_id": "987654321",  # Different discord_id
-                    "removal_id": "abc123",
-                },
-                {"discord_id": "some_other_record", "player_tag": "#PLAYER123"},
-            ]
+            "Items": []  # No matching items
         }
 
         with patch.object(bot, "table", mock_table):
@@ -1423,7 +1488,12 @@ class TestMembershipCheckDuplicatePrevention:
 
         with (
             patch.object(bot, "table", mock_table),
-            patch.object(bot, "bot") as mock_bot,
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
             patch.object(
                 bot, "get_player_clan_tag", return_value=None
             ),  # Member left clan
@@ -1433,7 +1503,6 @@ class TestMembershipCheckDuplicatePrevention:
             ),  # Already has pending request
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
-            mock_bot.guilds = [mock_guild]
             mock_guild.get_member.return_value = mock_member
 
             # Call the membership check
@@ -1464,7 +1533,12 @@ class TestMembershipCheckDuplicatePrevention:
 
         with (
             patch.object(bot, "table", mock_table),
-            patch.object(bot, "bot") as mock_bot,
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
             patch.object(
                 bot, "get_player_clan_tag", return_value=None
             ),  # Member left clan
@@ -1474,7 +1548,6 @@ class TestMembershipCheckDuplicatePrevention:
             ),  # No pending request
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
-            mock_bot.guilds = [mock_guild]
             mock_guild.get_member.return_value = mock_member
 
             # Call the membership check
