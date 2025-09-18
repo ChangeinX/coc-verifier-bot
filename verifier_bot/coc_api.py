@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Final
+from dataclasses import dataclass
+from typing import Final, Literal
 
 import coc
 
@@ -11,6 +12,18 @@ log: Final = logging.getLogger("coc-gateway")
 # Track re-authentication state to prevent concurrent re-auth attempts
 _reauth_lock = asyncio.Lock()
 _last_reauth_attempt = 0.0
+
+
+FetchStatus = Literal["ok", "not_found", "access_denied", "error"]
+
+
+@dataclass(slots=True)
+class PlayerFetchResult:
+    """Return object describing the result of a player fetch."""
+
+    status: FetchStatus
+    player: coc.Player | None = None
+    exception: Exception | None = None
 
 
 async def get_player(client: coc.Client, player_tag: str) -> coc.Player | None:
@@ -70,6 +83,26 @@ async def get_player_with_retry(
     reauth_cooldown: int = 60,
 ) -> coc.Player | None:
     """Get player with automatic re-authentication on 403 errors."""
+    result = await fetch_player_with_status(
+        client,
+        email,
+        password,
+        player_tag,
+        max_retries=max_retries,
+        reauth_cooldown=reauth_cooldown,
+    )
+    return result.player
+
+
+async def fetch_player_with_status(
+    client: coc.Client,
+    email: str,
+    password: str,
+    player_tag: str,
+    max_retries: int = 1,
+    reauth_cooldown: int = 60,
+) -> PlayerFetchResult:
+    """Get player data and return structured status information."""
     import time
 
     global _last_reauth_attempt
@@ -77,13 +110,14 @@ async def get_player_with_retry(
     for attempt in range(max_retries + 1):
         try:
             player = await client.get_player(player_tag)
-            return player
-        except coc.NotFound:
+            return PlayerFetchResult(status="ok", player=player)
+        except coc.NotFound as exc:
             log.warning("Player %s not found", player_tag)
-            return None
+            return PlayerFetchResult(status="not_found", exception=exc)
         except coc.HTTPException as exc:
-            # Check if this is a 403 authentication error
-            if hasattr(exc, "status") and exc.status == 403:
+            status_code = getattr(exc, "status", None)
+
+            if status_code == 403:
                 if attempt < max_retries:
                     log.warning(
                         "CoC API 403 error for player %s, attempting re-authentication (attempt %d/%d)",
@@ -92,10 +126,8 @@ async def get_player_with_retry(
                         max_retries,
                     )
 
-                    # Use lock to prevent concurrent re-authentication attempts
                     async with _reauth_lock:
                         current_time = time.time()
-                        # Only re-authenticate if we haven't tried recently (within cooldown period)
                         if current_time - _last_reauth_attempt > reauth_cooldown:
                             try:
                                 await client.login(email, password)
@@ -105,19 +137,25 @@ async def get_player_with_retry(
                                 log.error(
                                     "CoC API re-authentication failed: %s", login_exc
                                 )
-                                return None
+                                return PlayerFetchResult(
+                                    status="access_denied", exception=login_exc
+                                )
                         else:
                             log.debug("Skipping re-authentication (too recent)")
 
-                    # Continue to next retry attempt
                     continue
-                else:
-                    log.error(
-                        "CoC API 403 error after %d retries: %s", max_retries, exc
-                    )
-                    return None
-            else:
-                log.error("CoC API error: %s", exc)
-                return None
 
-    return None
+                log.error(
+                    "CoC API 403 error after %d retries for %s: %s",
+                    max_retries,
+                    player_tag,
+                    exc,
+                )
+                return PlayerFetchResult(status="access_denied", exception=exc)
+
+            log.error("CoC API error fetching %s: %s", player_tag, exc)
+            return PlayerFetchResult(status="error", exception=exc)
+
+    # Exhausted retries without success - treat as generic error
+    log.error("CoC API error fetching %s: retries exhausted", player_tag)
+    return PlayerFetchResult(status="error")
