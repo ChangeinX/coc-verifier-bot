@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -132,11 +133,18 @@ def build_registrations(
     guild_id: int,
     *,
     base_time: datetime | None = None,
+    shuffle: bool = False,
+    rng: random.Random | None = None,
 ) -> list[TeamRegistration]:
     """Convert seeded players into tournament registrations."""
     registrations: list[TeamRegistration] = []
     base = base_time or datetime.now(UTC)
-    for index, player in enumerate(players):
+    ordering = list(players)
+    if shuffle:
+        randomizer = rng or random.Random()
+        randomizer.shuffle(ordering)
+
+    for index, player in enumerate(ordering):
         registered_at = (base + timedelta(seconds=index)).strftime(ISO_FORMAT)
         entry = PlayerEntry(
             name=player.name,
@@ -164,6 +172,8 @@ async def build_seeded_registrations(
     *,
     seed_file: Path | None = None,
     base_time: datetime | None = None,
+    shuffle: bool = False,
+    rng: random.Random | None = None,
 ) -> list[TeamRegistration]:
     """Load seeded registrations using live player data."""
     tags = load_seed_tags(seed_file)
@@ -171,7 +181,11 @@ async def build_seeded_registrations(
     ensure_town_hall_range(players, minimum=15, maximum=17)
     seeded_players = sorted_for_seeding(players)
     return build_registrations(
-        seeded_players, guild_id, base_time=base_time or DEFAULT_BASE_REGISTRATION
+        seeded_players,
+        guild_id,
+        base_time=base_time or DEFAULT_BASE_REGISTRATION,
+        shuffle=shuffle,
+        rng=rng,
     )
 
 

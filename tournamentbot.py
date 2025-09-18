@@ -105,6 +105,7 @@ async def build_seeded_registrations_for_guild(guild_id: int) -> list[TeamRegist
         COC_EMAIL,
         COC_PASSWORD,
         guild_id,
+        shuffle=True,
     )
 
 
@@ -280,8 +281,9 @@ def build_bracket_embed(
     title: str,
     requested_by: discord.abc.User | None,
     summary_note: str | None = None,
+    shrink_completed: bool = False,
 ) -> discord.Embed:
-    graph = render_bracket(bracket)
+    graph = render_bracket(bracket, shrink_completed=shrink_completed)
     description = f"```\n{graph}\n```" if graph else "Bracket is empty"
     embed = discord.Embed(
         title=title,
@@ -589,6 +591,12 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
         await send_ephemeral(interaction, str(exc))
         return
 
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.warning("Failed to defer simulate-tourney interaction: %s", exc)
+
     storage_available = True
     try:
         storage.ensure_table()
@@ -773,6 +781,12 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         await send_ephemeral(interaction, str(exc))
         return
 
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.warning("Failed to defer simulate-tourney interaction: %s", exc)
+
     storage_available = True
     try:
         storage.ensure_table()
@@ -826,6 +840,7 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
                 title=f"Simulation – {label}",
                 requested_by=interaction.user,
                 summary_note=f"Snapshot {idx} of {len(snapshots)}",
+                shrink_completed=True,
             )
             try:
                 await channel.send(embed=embed)
@@ -835,6 +850,20 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
                 break
     else:
         log.debug("Skipping simulation announcements; channel not messageable")
+
+    if messages_posted == 0:
+        try:
+            fallback_embed = build_bracket_embed(
+                final_state,
+                title="Simulation – Final Bracket",
+                requested_by=interaction.user,
+                summary_note="Delivered via follow-up",
+                shrink_completed=True,
+            )
+            await interaction.followup.send(embed=fallback_embed, ephemeral=True)
+            messages_posted = 1
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.warning("Failed to send fallback simulation snapshot: %s", exc)
 
     champion = bracket_champion_name(final_state)
     ack_message_parts = [
