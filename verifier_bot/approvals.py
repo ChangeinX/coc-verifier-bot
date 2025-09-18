@@ -74,6 +74,24 @@ class MemberRemovalViewBase(discord.ui.View):
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to remove pending removal: %s", exc)
 
+    async def record_message_details(self, message: discord.Message) -> None:
+        """Persist Discord message metadata for later cleanup."""
+        table = self._get_table()
+        if table is None:
+            return
+        try:
+            table.update_item(
+                Key={"discord_id": f"PENDING_REMOVAL_{self.removal_id}"},
+                UpdateExpression="SET message_id = :msg_id, channel_id = :chan_id, guild_id = :guild_id",
+                ExpressionAttributeValues={
+                    ":msg_id": str(message.id),
+                    ":chan_id": str(message.channel.id),
+                    ":guild_id": str(message.guild.id) if message.guild else "",
+                },
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to record removal message details: %s", exc)
+
     @discord.ui.button(
         label="Approve Removal", style=discord.ButtonStyle.danger, emoji="✅"
     )
@@ -320,7 +338,8 @@ async def send_removal_approval_request(
     embed.set_footer(text="This request will expire in 24 hours")
 
     try:
-        await log_chan.send(embed=embed, view=view)
+        message = await log_chan.send(embed=embed, view=view)
+        await view.record_message_details(message)
         log.info(
             "Sent removal approval request for %s (%s) - ID: %s",
             member,
@@ -384,7 +403,12 @@ async def cleanup_expired_pending_removals(table) -> None:
         log.exception("Failed to cleanup expired pending removals: %s", exc)
 
 
-async def clear_pending_removals_for_target(table, target_discord_id: str) -> int:
+async def clear_pending_removals_for_target(
+    table,
+    target_discord_id: str,
+    *,
+    on_remove=None,
+) -> int:
     """Remove all pending removals for a given Discord user."""
     if table is None:
         return 0
@@ -406,6 +430,8 @@ async def clear_pending_removals_for_target(table, target_discord_id: str) -> in
             try:
                 table.delete_item(Key={"discord_id": discord_id})
                 removed += 1
+                if on_remove:
+                    await on_remove(item)
                 log.info(
                     "Removed pending removal %s for user %s",
                     item.get("removal_id", "unknown"),

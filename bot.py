@@ -15,6 +15,7 @@ Optional: ADMIN_LOG_CHANNEL_ID (numeric), AWS_REGION
 import asyncio
 import logging
 import os
+from functools import partial
 from typing import Final
 
 import boto3
@@ -182,6 +183,107 @@ def player_deep_link(tag: str) -> str:
     return "https://link.clashofclans.com/?action=OpenPlayerProfile&tag=" + tag.lstrip(
         "#"
     )
+
+
+async def cancel_pending_removal_message(
+    guild: discord.Guild, removal_item: dict
+) -> None:
+    """Delete the Discord approval message associated with a removal request."""
+
+    channel: discord.abc.GuildChannel | None = None
+    channel_id = removal_item.get("channel_id")
+    message_id = removal_item.get("message_id")
+    removal_id = removal_item.get("removal_id")
+
+    if channel_id:
+        int_channel_id = int(channel_id)
+        channel = guild.get_channel(int_channel_id) or bot.get_channel(int_channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(int_channel_id)
+            except (discord.NotFound, discord.Forbidden):
+                channel = None
+            except discord.HTTPException as exc:  # pylint: disable=broad-except
+                log.exception(
+                    "Failed to fetch channel %s for pending removal cleanup: %s",
+                    channel_id,
+                    exc,
+                )
+                return
+
+    if channel is None:
+        channel = await resolve_log_channel(guild)
+
+    if channel is None or not hasattr(channel, "fetch_message"):
+        log.debug("No channel available to clean up pending removal %s", removal_id)
+        return
+
+    target_message: discord.Message | None = None
+
+    if message_id:
+        try:
+            target_message = await channel.fetch_message(int(message_id))
+        except discord.NotFound:
+            target_message = None
+        except discord.Forbidden:
+            log.warning("No permission to fetch pending removal message %s", message_id)
+            return
+        except discord.HTTPException as exc:  # pylint: disable=broad-except
+            log.exception(
+                "Failed to fetch pending removal message %s: %s", message_id, exc
+            )
+            return
+
+    if target_message is None and removal_id:
+        try:
+            async for candidate in channel.history(limit=100):
+                for embed in candidate.embeds:
+                    for field in embed.fields:
+                        if field.name == "Request ID" and field.value == removal_id:
+                            target_message = candidate
+                            break
+                    if target_message:
+                        break
+                if target_message:
+                    break
+        except AttributeError:
+            target_message = None
+        except discord.Forbidden:
+            log.warning(
+                "No permission to inspect history for pending removal %s", removal_id
+            )
+            return
+        except discord.HTTPException as exc:  # pylint: disable=broad-except
+            log.exception(
+                "Failed to search log channel for pending removal %s: %s",
+                removal_id,
+                exc,
+            )
+            return
+
+    if target_message is None:
+        log.debug("Pending removal message not found for removal %s", removal_id)
+        return
+
+    try:
+        await target_message.delete()
+        log.info(
+            "Deleted pending removal message for %s (removal %s)",
+            removal_item.get("target_discord_id"),
+            removal_id or target_message.id,
+        )
+    except discord.NotFound:
+        log.debug("Pending removal message already deleted for removal %s", removal_id)
+    except discord.Forbidden:
+        log.warning(
+            "No permission to delete pending removal message %s", target_message.id
+        )
+    except discord.HTTPException as exc:  # pylint: disable=broad-except
+        log.exception(
+            "Failed to delete pending removal message %s: %s",
+            target_message.id,
+            exc,
+        )
 
 
 # ---------- /verify command ----------
@@ -365,6 +467,7 @@ async def membership_check() -> None:
     # Process all guilds the bot is in
     for guild in bot.guilds:
         log.debug(f"Processing membership check for guild {guild.name} ({guild.id})")
+        removal_cleanup = partial(cancel_pending_removal_message, guild)
 
         try:
             data = table.scan()
@@ -396,7 +499,11 @@ async def membership_check() -> None:
                     "Skipping membership check for %s due to CoC API access denial",
                     item["player_tag"],
                 )
-                await approvals.clear_pending_removals_for_target(table, discord_id_str)
+                await approvals.clear_pending_removals_for_target(
+                    table,
+                    discord_id_str,
+                    on_remove=removal_cleanup,
+                )
                 continue
 
             if fetch_result.status == "error":
@@ -453,7 +560,9 @@ async def membership_check() -> None:
             else:
                 if pending_exists:
                     await approvals.clear_pending_removals_for_target(
-                        table, item["discord_id"]
+                        table,
+                        item["discord_id"],
+                        on_remove=removal_cleanup,
                     )
                     log.info(
                         "Cleared stale pending removal for %s (%s) - player still in clan",
