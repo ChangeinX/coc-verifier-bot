@@ -639,9 +639,7 @@ class TestMembershipCheck:
         mock_member = MagicMock()
         mock_guild.get_member.return_value = mock_member
 
-        fetch_result = SimpleNamespace(
-            status="not_found", player=None, exception=None
-        )
+        fetch_result = SimpleNamespace(status="not_found", player=None, exception=None)
 
         with (
             patch.object(bot, "table", mock_table),
@@ -693,8 +691,12 @@ class TestMembershipCheck:
         mock_guild.get_member.return_value = mock_member
 
         fetch_results = {
-            "#PLAYER1": SimpleNamespace(status="not_found", player=None, exception=None),
-            "#PLAYER2": SimpleNamespace(status="not_found", player=None, exception=None),
+            "#PLAYER1": SimpleNamespace(
+                status="not_found", player=None, exception=None
+            ),
+            "#PLAYER2": SimpleNamespace(
+                status="not_found", player=None, exception=None
+            ),
         }
 
         async def mock_fetch_player_with_status(*args, **kwargs):
@@ -1629,7 +1631,9 @@ class TestMembershipCheckAuthFailures:
         mock_member.id = 123456789
         mock_guild.get_member.return_value = mock_member
 
-        fetch_result = SimpleNamespace(status="access_denied", player=None, exception=None)
+        fetch_result = SimpleNamespace(
+            status="access_denied", player=None, exception=None
+        )
 
         with (
             patch.object(bot, "table", mock_table),

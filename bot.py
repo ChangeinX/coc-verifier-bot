@@ -396,9 +396,7 @@ async def membership_check() -> None:
                     "Skipping membership check for %s due to CoC API access denial",
                     item["player_tag"],
                 )
-                await approvals.clear_pending_removals_for_target(
-                    table, discord_id_str
-                )
+                await approvals.clear_pending_removals_for_target(table, discord_id_str)
                 continue
 
             if fetch_result.status == "error":

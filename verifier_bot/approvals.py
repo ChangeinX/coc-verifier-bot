@@ -418,7 +418,9 @@ async def clear_pending_removals_for_target(table, target_discord_id: str) -> in
 
         if removed:
             log.info(
-                "Removed %d pending removal request(s) for %s", removed, target_discord_id
+                "Removed %d pending removal request(s) for %s",
+                removed,
+                target_discord_id,
             )
         return removed
 
