@@ -18,6 +18,7 @@ jobs:
     outputs:
       rebuild_bot: ${{ steps.strategy.outputs.rebuild_bot }}
       rebuild_giveaway: ${{ steps.strategy.outputs.rebuild_giveaway }}
+      rebuild_tournament: ${{ steps.strategy.outputs.rebuild_tournament }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,6 +38,11 @@ jobs:
               - 'giveawaybot.py'
               - 'giveaway_fairness.py'
               - 'Dockerfile.giveaway'
+              - 'requirements.txt'
+            tournament:
+              - 'tournamentbot.py'
+              - 'tournament_bot/**'
+              - 'Dockerfile.tournament'
               - 'requirements.txt'
             infrastructure:
               - '.github/workflows/deploy.yml'
@@ -61,9 +67,11 @@ jobs:
             echo "🏗️ Infrastructure changed - rebuilding all components"
             echo "rebuild_bot=true" >> $GITHUB_OUTPUT
             echo "rebuild_giveaway=true" >> $GITHUB_OUTPUT
+            echo "rebuild_tournament=true" >> $GITHUB_OUTPUT
           else
             echo "rebuild_bot=${{ steps.changes.outputs.bot }}" >> $GITHUB_OUTPUT
             echo "rebuild_giveaway=${{ steps.changes.outputs.giveaway }}" >> $GITHUB_OUTPUT
+            echo "rebuild_tournament=${{ steps.changes.outputs.tournament }}" >> $GITHUB_OUTPUT
           fi
 
   build-deploy:
@@ -92,9 +100,18 @@ jobs:
             rebuild_condition: ${{ needs.setup.outputs.rebuild_giveaway }}
             cache_scope: giveaway
             container_name: giveaway
+          - service: tournament
+            dockerfile: Dockerfile.tournament
+            ecr_repository: coc-tournament-bot
+            ecs_service: coc-tournament-bot
+            task_definition: coc-tournament-bot
+            rebuild_condition: ${{ needs.setup.outputs.rebuild_tournament }}
+            cache_scope: tournament
+            container_name: tournament
     outputs:
       bot_deployed: ${{ steps.deploy.outputs.bot_deployed }}
       giveaway_deployed: ${{ steps.deploy.outputs.giveaway_deployed }}
+      tournament_deployed: ${{ steps.deploy.outputs.tournament_deployed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -240,6 +257,7 @@ jobs:
           # Extract deployment results from matrix job outputs
           BOT_DEPLOYED="${{ needs.build-deploy.outputs.bot_deployed }}"
           GIVEAWAY_DEPLOYED="${{ needs.build-deploy.outputs.giveaway_deployed }}"
+          TOURNAMENT_DEPLOYED="${{ needs.build-deploy.outputs.tournament_deployed }}"
           
           # Build list of services that were actually deployed
           DEPLOYED_SERVICES=""
@@ -248,6 +266,9 @@ jobs:
           fi
           if [[ "$GIVEAWAY_DEPLOYED" == "true" ]]; then
             DEPLOYED_SERVICES="$DEPLOYED_SERVICES coc-giveaway-bot"
+          fi
+          if [[ "$TOURNAMENT_DEPLOYED" == "true" ]]; then
+            DEPLOYED_SERVICES="$DEPLOYED_SERVICES coc-tournament-bot"
           fi
           
           if [[ -z "$DEPLOYED_SERVICES" ]]; then
@@ -274,8 +295,10 @@ jobs:
           # Extract results from previous jobs
           BOT_REBUILT="${{ needs.setup.outputs.rebuild_bot }}"
           GIVEAWAY_REBUILT="${{ needs.setup.outputs.rebuild_giveaway }}"
+          TOURNAMENT_REBUILT="${{ needs.setup.outputs.rebuild_tournament }}"
           BOT_DEPLOYED="${{ needs.build-deploy.outputs.bot_deployed }}"
           GIVEAWAY_DEPLOYED="${{ needs.build-deploy.outputs.giveaway_deployed }}"
+          TOURNAMENT_DEPLOYED="${{ needs.build-deploy.outputs.tournament_deployed }}"
           
           echo "📊 Deployment Summary:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -283,12 +306,14 @@ jobs:
           echo "🚀 Bot deployed: ${BOT_DEPLOYED:-false}"
           echo "🔨 Giveaway image built: $GIVEAWAY_REBUILT"
           echo "🚀 Giveaway deployed: ${GIVEAWAY_DEPLOYED:-false}"
+          echo "🔨 Tournament image built: $TOURNAMENT_REBUILT"
+          echo "🚀 Tournament deployed: ${TOURNAMENT_DEPLOYED:-false}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           echo "📋 Final service status:"
           aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
-            --services "coc-bot" "coc-giveaway-bot" \
+            --services "coc-bot" "coc-giveaway-bot" "coc-tournament-bot" \
             --region "$AWS_REGION" \
             --query 'services[*].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount,TaskDefinition:taskDefinition}' \
             --output table

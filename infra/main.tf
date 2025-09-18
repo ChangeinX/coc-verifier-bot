@@ -38,6 +38,9 @@ variable "giveaway_channel_id" {}
 variable "giveaway_table_name" { default = "coc-giveaways" }
 variable "giveaway_test" {}
 variable "subnets" { type = list(string) }
+variable "tournament_bot_image" {}
+variable "tournament_discord_token" {}
+variable "tournament_table_name" { default = "coc-tournaments" }
 variable "vpc_id" {}
 
 resource "aws_cloudwatch_log_group" "bot" {
@@ -47,6 +50,12 @@ resource "aws_cloudwatch_log_group" "bot" {
 
 resource "aws_cloudwatch_log_group" "giveaway" {
   name              = "/ecs/coc-giveaway-bot"
+  retention_in_days = 7
+}
+
+
+resource "aws_cloudwatch_log_group" "tournament" {
+  name              = "/ecs/coc-tournament-bot"
   retention_in_days = 7
 }
 
@@ -77,6 +86,24 @@ resource "aws_dynamodb_table" "giveaways" {
 }
 
 
+resource "aws_dynamodb_table" "tournaments" {
+  name         = var.tournament_table_name
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
+    type = "S"
+  }
+}
+
+
 data "aws_iam_policy_document" "ecs_task_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -102,7 +129,7 @@ data "aws_iam_policy_document" "ddb_access" {
       "dynamodb:UpdateItem",
       "dynamodb:Query"
     ]
-    resources = [aws_dynamodb_table.verifications.arn, aws_dynamodb_table.giveaways.arn]
+    resources = [aws_dynamodb_table.verifications.arn, aws_dynamodb_table.giveaways.arn, aws_dynamodb_table.tournaments.arn]
   }
 }
 
@@ -129,7 +156,8 @@ data "aws_iam_policy_document" "task_extra" {
     ]
     resources = [
       "${aws_cloudwatch_log_group.bot.arn}:*",
-      "${aws_cloudwatch_log_group.giveaway.arn}:*"
+      "${aws_cloudwatch_log_group.giveaway.arn}:*",
+      "${aws_cloudwatch_log_group.tournament.arn}:*"
     ]
   }
 }
@@ -146,6 +174,10 @@ resource "aws_ecr_repository" "bot" {
 
 resource "aws_ecr_repository" "giveaway" {
   name = "coc-giveaway-bot"
+}
+
+resource "aws_ecr_repository" "tournament" {
+  name = "coc-tournament-bot"
 }
 
 resource "aws_ecs_cluster" "bot" {
@@ -249,6 +281,44 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
 }
 
 
+resource "aws_ecs_task_definition" "tournament_bot" {
+  family                   = "coc-tournament-bot"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  runtime_platform {
+    cpu_architecture        = "ARM64"
+    operating_system_family = "LINUX"
+  }
+  execution_role_arn = aws_iam_role.task.arn
+  task_role_arn      = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "tournament"
+      image     = var.tournament_bot_image
+      essential = true
+      environment = [
+        { name = "DISCORD_TOKEN", value = var.tournament_discord_token },
+        { name = "COC_EMAIL", value = var.coc_email },
+        { name = "COC_PASSWORD", value = var.coc_password },
+        { name = "TOURNAMENT_TABLE_NAME", value = var.tournament_table_name },
+        { name = "AWS_REGION", value = var.aws_region }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.tournament.name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = "tournament"
+        }
+      }
+    }
+  ])
+}
+
+
 resource "aws_ecs_service" "bot" {
   name            = "coc-bot"
   cluster         = aws_ecs_cluster.bot.id
@@ -271,6 +341,24 @@ resource "aws_ecs_service" "giveaway_bot" {
   name            = "coc-giveaway-bot"
   cluster         = aws_ecs_cluster.bot.id
   task_definition = aws_ecs_task_definition.giveaway_bot.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.subnets
+    security_groups  = [aws_security_group.bot.id]
+    assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+}
+
+resource "aws_ecs_service" "tournament_bot" {
+  name            = "coc-tournament-bot"
+  cluster         = aws_ecs_cluster.bot.id
+  task_definition = aws_ecs_task_definition.tournament_bot.arn
   desired_count   = 1
   launch_type     = "FARGATE"
 
