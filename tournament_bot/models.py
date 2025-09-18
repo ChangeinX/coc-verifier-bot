@@ -155,20 +155,184 @@ class TeamRegistration:
     def lines_for_channel(self) -> list[str]:
         lines: list[str] = []
         for player in self.players:
-            clan_segment = ""
+            clan_parts: list[str] = []
             if player.clan_name:
-                clan_segment = f" • {player.clan_name}" + (
-                    f" ({player.clan_tag})" if player.clan_tag else ""
-                )
+                clan_parts.append(player.clan_name)
+            if player.clan_tag:
+                clan_parts.append(player.clan_tag)
+            clan_display = " ".join(clan_parts) if clan_parts else "No clan"
             lines.append(
-                f"{player.name} (TH{player.town_hall}){clan_segment} — {player.tag}"
+                f"{player.name} (TH{player.town_hall})\n"
+                f"  - Player Tag: {player.tag}\n"
+                f"  - Clan: {clan_display}"
             )
         return lines
+
+
+@dataclass(slots=True)
+class BracketSlot:
+    seed: int | None
+    team_id: int | None
+    team_label: str
+    source_match_id: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {"team_label": self.team_label}
+        if self.seed is not None:
+            data["seed"] = self.seed
+        if self.team_id is not None:
+            data["team_id"] = str(self.team_id)
+        if self.source_match_id is not None:
+            data["source_match_id"] = self.source_match_id
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> BracketSlot:
+        seed = data.get("seed")
+        team_id = data.get("team_id")
+        return cls(
+            seed=int(seed) if seed is not None else None,
+            team_id=int(team_id) if team_id is not None else None,
+            team_label=str(data.get("team_label", "")),
+            source_match_id=(
+                str(data.get("source_match_id"))
+                if data.get("source_match_id") is not None
+                else None
+            ),
+        )
+
+    def display(self) -> str:
+        if self.team_id is None:
+            return self.team_label
+        if self.seed is not None:
+            return f"#{self.seed} {self.team_label}"
+        return self.team_label
+
+    def adopt_from(self, other: BracketSlot) -> None:
+        self.seed = other.seed
+        self.team_id = other.team_id
+        self.team_label = other.team_label
+
+
+@dataclass(slots=True)
+class BracketMatch:
+    match_id: str
+    round_index: int
+    competitor_one: BracketSlot
+    competitor_two: BracketSlot
+    winner_index: int | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "match_id": self.match_id,
+            "round_index": self.round_index,
+            "competitor_one": self.competitor_one.to_dict(),
+            "competitor_two": self.competitor_two.to_dict(),
+        }
+        if self.winner_index is not None:
+            data["winner_index"] = self.winner_index
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> BracketMatch:
+        return cls(
+            match_id=str(data.get("match_id", "")),
+            round_index=int(data.get("round_index", 0)),
+            competitor_one=BracketSlot.from_dict(
+                data.get("competitor_one", {})  # type: ignore[arg-type]
+            ),
+            competitor_two=BracketSlot.from_dict(
+                data.get("competitor_two", {})  # type: ignore[arg-type]
+            ),
+            winner_index=(
+                int(data["winner_index"])
+                if data.get("winner_index") is not None
+                else None
+            ),
+        )
+
+    def winner_slot(self) -> BracketSlot | None:
+        if self.winner_index == 0:
+            return self.competitor_one
+        if self.winner_index == 1:
+            return self.competitor_two
+        return None
+
+
+@dataclass(slots=True)
+class BracketRound:
+    name: str
+    matches: list[BracketMatch]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "matches": [match.to_dict() for match in self.matches],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> BracketRound:
+        matches_data: Iterable[dict[str, object]] = data.get("matches", [])  # type: ignore[assignment]
+        matches = [BracketMatch.from_dict(item) for item in matches_data]
+        return cls(name=str(data.get("name", "")), matches=matches)
+
+
+@dataclass(slots=True)
+class BracketState:
+    guild_id: int
+    created_at: str
+    rounds: list[BracketRound]
+
+    PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
+    SK_VALUE: ClassVar[str] = "BRACKET"
+
+    @classmethod
+    def key(cls, guild_id: int) -> dict[str, str]:
+        return {"pk": cls.PK_TEMPLATE % guild_id, "sk": cls.SK_VALUE}
+
+    def to_item(self) -> dict[str, object]:
+        item = self.key(self.guild_id)
+        item.update(
+            {
+                "created_at": self.created_at,
+                "rounds": [round_.to_dict() for round_ in self.rounds],
+            }
+        )
+        return item
+
+    @classmethod
+    def from_item(cls, item: dict[str, object]) -> BracketState:
+        guild_id = int(str(item["pk"]).split("#", 1)[1])
+        rounds_data: Iterable[dict[str, object]] = item.get("rounds", [])  # type: ignore[assignment]
+        rounds = [BracketRound.from_dict(round_item) for round_item in rounds_data]
+        return cls(
+            guild_id=guild_id,
+            created_at=str(item.get("created_at", "")),
+            rounds=rounds,
+        )
+
+    def clone(self) -> BracketState:
+        return BracketState.from_item(self.to_item())
+
+    def find_match(self, match_id: str) -> BracketMatch | None:
+        for round_ in self.rounds:
+            for match in round_.matches:
+                if match.match_id == match_id:
+                    return match
+        return None
+
+    def all_matches(self) -> Iterable[BracketMatch]:
+        for round_ in self.rounds:
+            yield from round_.matches
 
 
 __all__ = [
     "TournamentConfig",
     "TeamRegistration",
     "PlayerEntry",
+    "BracketSlot",
+    "BracketMatch",
+    "BracketRound",
+    "BracketState",
     "utc_now_iso",
 ]
