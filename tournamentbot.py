@@ -105,6 +105,7 @@ async def build_seeded_registrations_for_guild(guild_id: int) -> list[TeamRegist
         COC_EMAIL,
         COC_PASSWORD,
         guild_id,
+        shuffle=True,
     )
 
 
@@ -280,8 +281,9 @@ def build_bracket_embed(
     title: str,
     requested_by: discord.abc.User | None,
     summary_note: str | None = None,
+    shrink_completed: bool = False,
 ) -> discord.Embed:
-    graph = render_bracket(bracket)
+    graph = render_bracket(bracket, shrink_completed=shrink_completed)
     description = f"```\n{graph}\n```" if graph else "Bracket is empty"
     embed = discord.Embed(
         title=title,
@@ -589,6 +591,12 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
         await send_ephemeral(interaction, str(exc))
         return
 
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.warning("Failed to defer simulate-tourney interaction: %s", exc)
+
     storage_available = True
     try:
         storage.ensure_table()
@@ -773,6 +781,12 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         await send_ephemeral(interaction, str(exc))
         return
 
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.warning("Failed to defer simulate-tourney interaction: %s", exc)
+
     storage_available = True
     try:
         storage.ensure_table()
@@ -805,48 +819,33 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         )
         return
 
-    previous = (
-        storage.get_bracket(guild.id)
-        if storage_available and not use_seeded_registrations
-        else None
-    )
     bracket = create_bracket_state(guild.id, registrations)
-    if storage_available and not use_seeded_registrations:
-        storage.save_bracket(bracket)
     final_state, snapshots = simulate_tournament(bracket)
-    if storage_available and not use_seeded_registrations:
-        storage.save_bracket(final_state)
-
-    channel = interaction.channel
     messages_posted = 0
-    if isinstance(channel, Messageable):
-        for idx, (label, snapshot) in enumerate(snapshots, start=1):
-            embed = build_bracket_embed(
-                snapshot,
-                title=f"Simulation – {label}",
-                requested_by=interaction.user,
-                summary_note=f"Snapshot {idx} of {len(snapshots)}",
-            )
-            try:
-                await channel.send(embed=embed)
-                messages_posted += 1
-            except discord.HTTPException as exc:  # pragma: no cover - network failure
-                log.warning("Failed to send simulation snapshot: %s", exc)
-                break
-    else:
-        log.debug("Skipping simulation announcements; channel not messageable")
+    for idx, (label, snapshot) in enumerate(snapshots, start=1):
+        embed = build_bracket_embed(
+            snapshot,
+            title=f"Simulation – {label}",
+            requested_by=interaction.user,
+            summary_note=f"Snapshot {idx} of {len(snapshots)}",
+            shrink_completed=True,
+        )
+        try:
+            await interaction.followup.send(embed=embed)
+            messages_posted += 1
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning("Failed to send simulation snapshot: %s", exc)
+            break
 
     champion = bracket_champion_name(final_state)
     ack_message_parts = [
         "Simulation complete.",
         f"Posted {messages_posted} snapshot(s).",
     ]
-    if not storage_available:
-        ack_message_parts.append("Storage disabled; results not persisted.")
     if use_seeded_registrations:
         ack_message_parts.append("Used seeded roster for simulation.")
-    if previous is not None:
-        ack_message_parts.append("Previous bracket state was replaced.")
+    if not storage_available:
+        ack_message_parts.append("Storage unavailable; results were not persisted.")
     if champion:
         ack_message_parts.append(f"Champion: {champion}.")
     await send_ephemeral(interaction, " ".join(ack_message_parts))

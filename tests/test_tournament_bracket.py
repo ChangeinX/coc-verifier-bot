@@ -108,3 +108,17 @@ def test_simulate_tournament_produces_snapshots_and_champion():
 
     output = render_bracket(final_state)
     assert "Champion:" in output
+
+
+def test_render_bracket_shrinks_completed_rounds():
+    registrations = [make_reg(1, 0), make_reg(2, 30), make_reg(3, 60), make_reg(4, 90)]
+    bracket = create_bracket_state(7, registrations)
+    _, snapshots = simulate_tournament(bracket)
+
+    after_semifinals = snapshots[1][1]
+
+    full = render_bracket(after_semifinals)
+    shrunk = render_bracket(after_semifinals, shrink_completed=True)
+
+    assert full.splitlines()[0] == "Semifinals"
+    assert shrunk.splitlines()[0] == "Final"

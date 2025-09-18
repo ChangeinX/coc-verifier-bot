@@ -205,9 +205,19 @@ def set_match_winner(state: BracketState, match_id: str, winner_slot: int) -> No
     _auto_resolve(state)
 
 
-def render_bracket(state: BracketState) -> str:
+def render_bracket(state: BracketState, *, shrink_completed: bool = False) -> str:
+    start_index = 0
+    if shrink_completed and state.rounds:
+        last_index = len(state.rounds) - 1
+        for idx, round_ in enumerate(state.rounds):
+            if any(match.winner_index is None for match in round_.matches):
+                start_index = idx
+                break
+        else:
+            start_index = last_index
+
     lines: list[str] = []
-    for round_ in state.rounds:
+    for round_ in state.rounds[start_index:]:
         lines.append(round_.name)
         for match in round_.matches:
             competitor_one = match.competitor_one.display()
