@@ -60,6 +60,8 @@ ver_table = dynamodb.Table(DDB_TABLE_NAME) if DDB_TABLE_NAME else None
 
 log = logging.getLogger("giveaway-bot")
 
+_views_restored = False
+
 
 class GiveawayView(discord.ui.View):
     def __init__(self, giveaway_id: str, run_id: str) -> None:
@@ -187,6 +189,8 @@ async def create_giveaway(
     embed.add_field(name="Draw Time", value=f"<t:{ts}:F> (<t:{ts}:R>)", inline=False)
     embed.set_footer(text="0 entries")
     msg = await channel.send(embed=embed, view=view)
+    # Register the view so the interaction survives bot restarts
+    bot.add_view(view, message_id=msg.id)
     try:
         table.put_item(
             Item={
@@ -540,6 +544,53 @@ async def seed_initial_giveaways() -> None:
     )
 
 
+async def restore_persistent_giveaway_views() -> None:
+    """Register persistent giveaway buttons created before a restart."""
+    global _views_restored  # pylint: disable=global-statement
+
+    if _views_restored or table is None:
+        return
+
+    restored = 0
+    scan_kwargs: dict[str, object] = {
+        "FilterExpression": conditions.Attr("user_id").eq("META")
+    }
+
+    while True:
+        try:
+            resp = table.scan(**scan_kwargs)
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to scan for persistent views: %s", exc)
+            return
+
+        for item in resp.get("Items", []):
+            if item.get("drawn"):
+                continue
+            giveaway_id = item.get("giveaway_id")
+            run_id = item.get("run_id")
+            message_id = item.get("message_id")
+            if not (giveaway_id and run_id and message_id):
+                continue
+
+            try:
+                view = GiveawayView(str(giveaway_id), str(run_id))
+                bot.add_view(view, message_id=int(message_id))
+                restored += 1
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception(
+                    "Failed to restore persistent view for %s: %s", giveaway_id, exc
+                )
+
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_key
+
+    _views_restored = True
+    if restored:
+        log.info("Restored %s persistent giveaway views", restored)
+
+
 @tree.command(
     name="fairness_stats", description="Show giveaway fairness statistics (Admin only)"
 )
@@ -706,6 +757,7 @@ async def apply_fairness_decay(interaction: discord.Interaction) -> None:
 async def on_ready() -> None:
     await tree.sync()
     await coc_client.login(COC_EMAIL, COC_PASSWORD)
+    await restore_persistent_giveaway_views()
     schedule_check.start()
     draw_check.start()
 
