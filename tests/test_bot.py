@@ -1546,9 +1546,7 @@ class TestMembershipCheckDuplicatePrevention:
                 ),
             ),
             patch.object(
-                bot,
-                "has_pending_removal",
-                new=AsyncMock(return_value=True)
+                bot, "has_pending_removal", new=AsyncMock(return_value=True)
             ),  # Already has pending request
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
@@ -1598,9 +1596,7 @@ class TestMembershipCheckDuplicatePrevention:
                 ),
             ),
             patch.object(
-                bot,
-                "has_pending_removal",
-                new=AsyncMock(return_value=False)
+                bot, "has_pending_removal", new=AsyncMock(return_value=False)
             ),  # No pending request
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
@@ -1617,7 +1613,6 @@ class TestMembershipCheckDuplicatePrevention:
                 "TestPlayer",
                 "Player TestPlayer (#PLAYER123) is no longer in any clan",
             )
-
 
     @pytest.mark.asyncio
     async def test_membership_check_clears_stale_pending_removal(self):
