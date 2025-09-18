@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 
 
 class InvalidValueError(ValueError):
@@ -87,6 +88,37 @@ def validate_max_teams(max_teams: int) -> int:
     return max_teams
 
 
+def parse_registration_datetime(raw: str) -> datetime:
+    value = raw.strip()
+    if not value:
+        raise InvalidValueError("A date/time value is required")
+
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise InvalidValueError(
+            "Use ISO format such as 2024-05-01T18:00 or 2024-05-01 18:00"
+        ) from exc
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    else:
+        parsed = parsed.astimezone(UTC)
+    return parsed
+
+
+def validate_registration_window(
+    opens_at: datetime, closes_at: datetime
+) -> tuple[datetime, datetime]:
+    opens_at_utc = opens_at.astimezone(UTC)
+    closes_at_utc = closes_at.astimezone(UTC)
+
+    if closes_at_utc <= opens_at_utc:
+        raise InvalidValueError("Registration end must be after the start time")
+    return opens_at_utc, closes_at_utc
+
+
 __all__ = [
     "InvalidValueError",
     "InvalidTownHallError",
@@ -95,4 +127,6 @@ __all__ = [
     "parse_town_hall_levels",
     "validate_team_size",
     "validate_max_teams",
+    "parse_registration_datetime",
+    "validate_registration_window",
 ]
