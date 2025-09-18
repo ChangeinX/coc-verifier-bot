@@ -423,10 +423,11 @@ async def membership_check() -> None:
                     current_clan_tag = FEEDER_CLAN_TAG.upper()
 
             stored_clan_tag = item.get("clan_tag")
+            pending_exists = await has_pending_removal(item["discord_id"])
 
             if current_clan_tag is None:
                 # Check if there's already a pending removal request for this member
-                if await has_pending_removal(item["discord_id"]):
+                if pending_exists:
                     log.info(
                         "Skipping duplicate removal request for %s - already pending",
                         member,
@@ -449,21 +450,32 @@ async def membership_check() -> None:
                         member,
                         exc,
                     )
-            elif stored_clan_tag and current_clan_tag != stored_clan_tag:
-                try:
-                    table.update_item(
-                        Key={"discord_id": item["discord_id"]},
-                        UpdateExpression="SET clan_tag = :new_clan_tag",
-                        ExpressionAttributeValues={":new_clan_tag": current_clan_tag},
+            else:
+                if pending_exists:
+                    await approvals.clear_pending_removals_for_target(
+                        table, item["discord_id"]
                     )
                     log.info(
-                        "Updated clan tag for %s from %s to %s",
+                        "Cleared stale pending removal for %s (%s) - player still in clan",
                         member,
-                        stored_clan_tag,
-                        current_clan_tag,
+                        item["player_tag"],
                     )
-                except Exception as exc:  # pylint: disable=broad-except
-                    log.exception("Failed to update clan tag for %s: %s", member, exc)
+
+                if stored_clan_tag and current_clan_tag != stored_clan_tag:
+                    try:
+                        table.update_item(
+                            Key={"discord_id": item["discord_id"]},
+                            UpdateExpression="SET clan_tag = :new_clan_tag",
+                            ExpressionAttributeValues={":new_clan_tag": current_clan_tag},
+                        )
+                        log.info(
+                            "Updated clan tag for %s from %s to %s",
+                            member,
+                            stored_clan_tag,
+                            current_clan_tag,
+                        )
+                    except Exception as exc:  # pylint: disable=broad-except
+                        log.exception("Failed to update clan tag for %s: %s", member, exc)
 
 
 # ---------- Lifecycle ----------
