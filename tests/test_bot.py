@@ -1134,10 +1134,12 @@ class TestSendRemovalApprovalRequest:
         mock_message.guild = MagicMock()
         mock_message.guild.id = 54321
         mock_log_channel.send.return_value = mock_message
+        mock_table = MagicMock()
 
         with (
             patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
             patch("uuid.uuid4") as mock_uuid,
+            patch.object(bot, "table", mock_table),
         ):
             mock_uuid.return_value.hex = "abcdef123456789"
 
@@ -1160,13 +1162,26 @@ class TestSendRemovalApprovalRequest:
             assert "TestUser" in embed.description
             assert "@TestUser" in embed.description
 
+            mock_table.put_item.assert_called_once()
+            mock_table.update_item.assert_called_once()
+            update_kwargs = mock_table.update_item.call_args.kwargs
+            assert update_kwargs["Key"] == {"discord_id": "PENDING_REMOVAL_abcdef12"}
+            assert update_kwargs["ExpressionAttributeValues"][":msg_id"] == "999"
+            assert update_kwargs["ExpressionAttributeValues"][":chan_id"] == str(
+                mock_message.channel.id
+            )
+
     @pytest.mark.asyncio
     async def test_send_removal_approval_request_no_log_channel(self):
         """Test send_removal_approval_request when no log channel is configured."""
         mock_guild = MagicMock()
         mock_member = MagicMock()
+        mock_table = MagicMock()
 
-        with patch.object(bot, "resolve_log_channel", return_value=None):
+        with (
+            patch.object(bot, "resolve_log_channel", return_value=None),
+            patch.object(bot, "table", mock_table),
+        ):
             await bot.send_removal_approval_request(
                 mock_guild, mock_member, "#PLAYER123", "TestPlayer", "Left clan"
             )
@@ -1184,10 +1199,12 @@ class TestSendRemovalApprovalRequest:
         mock_log_channel = AsyncMock()
         mock_log_channel.send.side_effect = discord.Forbidden(MagicMock(), "Forbidden")
         mock_log_channel.id = 67890
+        mock_table = MagicMock()
 
         with (
             patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
             patch("uuid.uuid4") as mock_uuid,
+            patch.object(bot, "table", mock_table),
         ):
             mock_uuid.return_value.hex = "abcdef123456789"
 
@@ -1210,10 +1227,12 @@ class TestSendRemovalApprovalRequest:
         mock_log_channel.send.side_effect = discord.HTTPException(
             MagicMock(), "HTTP Error"
         )
+        mock_table = MagicMock()
 
         with (
             patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
             patch("uuid.uuid4") as mock_uuid,
+            patch.object(bot, "table", mock_table),
         ):
             mock_uuid.return_value.hex = "abcdef123456789"
 
@@ -1788,6 +1807,115 @@ class TestPendingRemovalCleanup:
             Key={"discord_id": "PENDING_REMOVAL_456"}
         )
         assert on_remove.await_count == 2
+
+
+class TestCancelPendingRemovalMessage:
+    """Test cleanup of Discord messages tied to pending removals."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_removal_uses_stored_message(self):
+        """Delete the stored approval message when metadata is present."""
+
+        guild = MagicMock()
+        channel = MagicMock()
+        message = MagicMock()
+        message.id = 222
+        message.delete = AsyncMock()
+        channel.fetch_message = AsyncMock(return_value=message)
+        guild.get_channel.return_value = channel
+
+        removal_item = {
+            "channel_id": "111",
+            "message_id": "222",
+            "target_discord_id": "123",
+            "removal_id": "abc",
+        }
+
+        with (
+            patch.object(bot.bot, "get_channel", return_value=None),
+            patch.object(bot.bot, "fetch_channel", new=AsyncMock()) as fetch_channel,
+            patch.object(bot, "resolve_log_channel", new=AsyncMock(return_value=None)),
+        ):
+            await bot.cancel_pending_removal_message(guild, removal_item)
+
+        channel.fetch_message.assert_awaited_once_with(222)
+        message.delete.assert_awaited_once()
+        fetch_channel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_removal_falls_back_to_history(self):
+        """Search the log channel when no message metadata exists."""
+
+        guild = MagicMock()
+        guild.get_channel.return_value = None
+
+        channel = MagicMock()
+        channel.fetch_message = AsyncMock()
+
+        embed = MagicMock()
+        embed.fields = [SimpleNamespace(name="Request ID", value="abc")]
+        candidate = MagicMock()
+        candidate.embeds = [embed]
+        candidate.delete = AsyncMock()
+
+        class HistoryStream:
+            def __init__(self, messages):
+                self._messages = messages
+
+            def __aiter__(self):
+                self._iter = iter(self._messages)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration as exc:  # pragma: no cover - defensive
+                    raise StopAsyncIteration from exc
+
+        channel.history.return_value = HistoryStream([candidate])
+
+        removal_item = {
+            "target_discord_id": "123",
+            "removal_id": "abc",
+        }
+
+        with (
+            patch.object(bot.bot, "get_channel", return_value=None),
+            patch.object(bot.bot, "fetch_channel", new=AsyncMock(return_value=None)),
+            patch.object(
+                bot, "resolve_log_channel", new=AsyncMock(return_value=channel)
+            ),
+        ):
+            await bot.cancel_pending_removal_message(guild, removal_item)
+
+        channel.fetch_message.assert_not_called()
+        candidate.delete.assert_awaited_once()
+        channel.history.assert_called_once_with(limit=100)
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_removal_handles_missing_channel(self):
+        """Gracefully exit when the log channel cannot be resolved."""
+
+        guild = MagicMock()
+        guild.get_channel.return_value = None
+
+        removal_item = {
+            "channel_id": "999",
+            "message_id": "888",
+            "target_discord_id": "123",
+            "removal_id": "abc",
+        }
+
+        with (
+            patch.object(bot.bot, "get_channel", return_value=None),
+            patch.object(
+                bot.bot,
+                "fetch_channel",
+                new=AsyncMock(side_effect=discord.NotFound(MagicMock(), "not found")),
+            ),
+            patch.object(bot, "resolve_log_channel", new=AsyncMock(return_value=None)),
+        ):
+            await bot.cancel_pending_removal_message(guild, removal_item)
 
 
 class TestTimestampFix:
