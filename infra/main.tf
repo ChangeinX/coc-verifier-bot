@@ -302,6 +302,24 @@ resource "aws_s3_object" "white_devel_cup_html" {
   content_type = "text/html"
 }
 
+resource "aws_s3_object" "white_devel_cup_robots" {
+  bucket        = aws_s3_bucket.white_devel_cup.id
+  key           = "robots.txt"
+  source        = "${path.module}/robots.txt"
+  etag          = filemd5("${path.module}/robots.txt")
+  content_type  = "text/plain"
+  cache_control = "public, max-age=86400"
+}
+
+resource "aws_s3_object" "white_devel_cup_sitemap" {
+  bucket        = aws_s3_bucket.white_devel_cup.id
+  key           = "sitemap.xml"
+  source        = "${path.module}/sitemap.xml"
+  etag          = filemd5("${path.module}/sitemap.xml")
+  content_type  = "application/xml"
+  cache_control = "public, max-age=86400"
+}
+
 resource "aws_s3_bucket_public_access_block" "white_devel_cup" {
   bucket = aws_s3_bucket.white_devel_cup.id
 
