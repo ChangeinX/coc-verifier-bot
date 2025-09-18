@@ -383,14 +383,47 @@ async def membership_check() -> None:
             member = guild.get_member(discord_id)
             if member is None:
                 continue
-            player = await get_player(item["player_tag"])
+
+            fetch_result = await coc_api.fetch_player_with_status(
+                coc_client,
+                COC_EMAIL,
+                COC_PASSWORD,
+                item["player_tag"],
+            )
+
+            if fetch_result.status == "access_denied":
+                log.error(
+                    "Skipping membership check for %s due to CoC API access denial",
+                    item["player_tag"],
+                )
+                await approvals.clear_pending_removals_for_target(
+                    table, discord_id_str
+                )
+                continue
+
+            if fetch_result.status == "error":
+                log.error(
+                    "Skipping membership check for %s due to CoC API error",
+                    item["player_tag"],
+                )
+                continue
+
+            player = fetch_result.player
             log.info(
                 "Player %s (%s) in clan %s",
                 player,
                 item["player_tag"],
                 player.clan.tag if player and player.clan else "None",
             )
-            current_clan_tag = await get_player_clan_tag(item["player_tag"])
+
+            current_clan_tag = None
+            if player and player.clan:
+                player_clan_tag = player.clan.tag.upper()
+                if CLAN_TAG and player_clan_tag == CLAN_TAG.upper():
+                    current_clan_tag = CLAN_TAG.upper()
+                elif FEEDER_CLAN_TAG and player_clan_tag == FEEDER_CLAN_TAG.upper():
+                    current_clan_tag = FEEDER_CLAN_TAG.upper()
+
             stored_clan_tag = item.get("clan_tag")
 
             if current_clan_tag is None:

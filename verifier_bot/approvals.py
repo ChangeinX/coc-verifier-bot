@@ -384,6 +384,51 @@ async def cleanup_expired_pending_removals(table) -> None:
         log.exception("Failed to cleanup expired pending removals: %s", exc)
 
 
+async def clear_pending_removals_for_target(table, target_discord_id: str) -> int:
+    """Remove all pending removals for a given Discord user."""
+    if table is None:
+        return 0
+
+    try:
+        from boto3.dynamodb.conditions import Attr
+
+        response = table.scan(
+            FilterExpression=Attr("discord_id").begins_with("PENDING_REMOVAL_")
+            & Attr("target_discord_id").eq(target_discord_id),
+            ProjectionExpression="discord_id, removal_id",
+        )
+
+        removed = 0
+        for item in response.get("Items", []):
+            discord_id = item.get("discord_id")
+            if not discord_id:
+                continue
+            try:
+                table.delete_item(Key={"discord_id": discord_id})
+                removed += 1
+                log.info(
+                    "Removed pending removal %s for user %s",
+                    item.get("removal_id", "unknown"),
+                    target_discord_id,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception(
+                    "Failed to delete pending removal %s: %s", discord_id, exc
+                )
+
+        if removed:
+            log.info(
+                "Removed %d pending removal request(s) for %s", removed, target_discord_id
+            )
+        return removed
+
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception(
+            "Failed to clear pending removals for %s: %s", target_discord_id, exc
+        )
+        return 0
+
+
 async def has_pending_removal(table, target_discord_id: str) -> bool:
     """Check if there's already a pending removal request for the given discord_id.
 

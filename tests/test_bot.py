@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
 
 import coc
@@ -23,6 +24,8 @@ with patch.dict(
     },
 ):
     import bot
+
+from verifier_bot import approvals
 
 
 class TestEnvironmentValidation:
@@ -636,6 +639,10 @@ class TestMembershipCheck:
         mock_member = MagicMock()
         mock_guild.get_member.return_value = mock_member
 
+        fetch_result = SimpleNamespace(
+            status="not_found", player=None, exception=None
+        )
+
         with (
             patch.object(bot, "table", mock_table),
             patch.object(
@@ -644,7 +651,11 @@ class TestMembershipCheck:
                 new_callable=PropertyMock,
                 return_value=[mock_guild],
             ),
-            patch.object(bot, "get_player", return_value=None),
+            patch.object(
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(return_value=fetch_result),
+            ),
         ):
             await bot.membership_check()
 
@@ -681,6 +692,16 @@ class TestMembershipCheck:
         mock_member = MagicMock()
         mock_guild.get_member.return_value = mock_member
 
+        fetch_results = {
+            "#PLAYER1": SimpleNamespace(status="not_found", player=None, exception=None),
+            "#PLAYER2": SimpleNamespace(status="not_found", player=None, exception=None),
+        }
+
+        async def mock_fetch_player_with_status(*args, **kwargs):
+            # player_tag is the fourth positional argument
+            player_tag = args[3]
+            return fetch_results[player_tag]
+
         with (
             patch.object(bot, "table", mock_table),
             patch.object(
@@ -689,8 +710,11 @@ class TestMembershipCheck:
                 new_callable=PropertyMock,
                 return_value=[mock_guild],
             ),
-            patch.object(bot, "get_player", return_value=None),
-            patch.object(bot, "get_player_clan_tag", return_value="#CLAN123"),
+            patch.object(
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(side_effect=mock_fetch_player_with_status),
+            ),
         ):
             # This should not raise ValueError anymore
             await bot.membership_check()
@@ -1314,6 +1338,8 @@ class TestMembershipCheckWithApprovalSystem:
         mock_member.id = 123456789
         mock_guild.get_member.return_value = mock_member
 
+        fetch_result = SimpleNamespace(status="not_found", player=None, exception=None)
+
         with (
             patch.object(bot, "table", mock_table),
             patch.object(
@@ -1323,9 +1349,10 @@ class TestMembershipCheckWithApprovalSystem:
                 return_value=[mock_guild],
             ),
             patch.object(
-                bot, "get_player", return_value=None
-            ),  # Player not found (left clan)
-            patch.object(bot, "get_player_clan_tag", return_value=None),
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(return_value=fetch_result),
+            ),
             patch.object(bot, "has_pending_removal", return_value=False),
             patch.object(bot, "send_removal_approval_request") as mock_send_approval,
         ):
@@ -1358,6 +1385,8 @@ class TestMembershipCheckWithApprovalSystem:
         mock_member = MagicMock()
         mock_guild.get_member.return_value = mock_member
 
+        fetch_result = SimpleNamespace(status="not_found", player=None, exception=None)
+
         with (
             patch.object(bot, "table", mock_table),
             patch.object(
@@ -1366,8 +1395,11 @@ class TestMembershipCheckWithApprovalSystem:
                 new_callable=PropertyMock,
                 return_value=[mock_guild],
             ),
-            patch.object(bot, "get_player", return_value=None),
-            patch.object(bot, "get_player_clan_tag", return_value=None),
+            patch.object(
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(return_value=fetch_result),
+            ),
             patch.object(bot, "has_pending_removal", return_value=False),
             patch.object(bot, "send_removal_approval_request") as mock_send_approval,
         ):
@@ -1495,9 +1527,14 @@ class TestMembershipCheckDuplicatePrevention:
                 return_value=[mock_guild],
             ),
             patch.object(
-                bot, "get_player_clan_tag", return_value=None
-            ),  # Member left clan
-            patch.object(bot, "get_player"),
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        status="not_found", player=None, exception=None
+                    )
+                ),
+            ),
             patch.object(
                 bot, "has_pending_removal", return_value=True
             ),  # Already has pending request
@@ -1540,9 +1577,14 @@ class TestMembershipCheckDuplicatePrevention:
                 return_value=[mock_guild],
             ),
             patch.object(
-                bot, "get_player_clan_tag", return_value=None
-            ),  # Member left clan
-            patch.object(bot, "get_player"),
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        status="not_found", player=None, exception=None
+                    )
+                ),
+            ),
             patch.object(
                 bot, "has_pending_removal", return_value=False
             ),  # No pending request
@@ -1561,6 +1603,100 @@ class TestMembershipCheckDuplicatePrevention:
                 "TestPlayer",
                 "Player TestPlayer (#PLAYER123) is no longer in any clan",
             )
+
+
+class TestMembershipCheckAuthFailures:
+    """Test membership check handling of Clash API authentication failures."""
+
+    @pytest.mark.asyncio
+    async def test_membership_check_skips_on_access_denied(self):
+        """Ensure membership check skips removals and clears invalid pending requests."""
+
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER123",
+                    "player_name": "TestPlayer",
+                    "clan_tag": "#CLAN123",
+                }
+            ]
+        }
+
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+        mock_guild.get_member.return_value = mock_member
+
+        fetch_result = SimpleNamespace(status="access_denied", player=None, exception=None)
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
+            patch.object(
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(return_value=fetch_result),
+            ),
+            patch.object(
+                bot,
+                "has_pending_removal",
+                new=AsyncMock(return_value=False),
+            ) as mock_has_pending,
+            patch.object(bot, "send_removal_approval_request") as mock_send_request,
+            patch(
+                "verifier_bot.approvals.clear_pending_removals_for_target",
+                new=AsyncMock(return_value=1),
+                create=True,
+            ) as mock_clear_pending,
+        ):
+            await bot.membership_check()
+
+            mock_send_request.assert_not_called()
+            mock_clear_pending.assert_awaited_once_with(mock_table, "123456789")
+            mock_has_pending.assert_not_called()
+
+
+class TestPendingRemovalCleanup:
+    """Test pending removal cleanup utilities."""
+
+    @pytest.mark.asyncio
+    async def test_clear_pending_removals_for_target(self):
+        """Ensure pending removal entries are removed for a target user."""
+        mock_table = MagicMock()
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "PENDING_REMOVAL_123",
+                    "target_discord_id": "123456789",
+                    "removal_id": "123",
+                },
+                {
+                    "discord_id": "PENDING_REMOVAL_456",
+                    "target_discord_id": "123456789",
+                    "removal_id": "456",
+                },
+            ]
+        }
+
+        deleted_count = await approvals.clear_pending_removals_for_target(
+            mock_table, "123456789"
+        )
+
+        assert deleted_count == 2
+        mock_table.scan.assert_called_once()
+        mock_table.delete_item.assert_any_call(
+            Key={"discord_id": "PENDING_REMOVAL_123"}
+        )
+        mock_table.delete_item.assert_any_call(
+            Key={"discord_id": "PENDING_REMOVAL_456"}
+        )
 
 
 class TestTimestampFix:
