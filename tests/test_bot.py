@@ -1355,7 +1355,11 @@ class TestMembershipCheckWithApprovalSystem:
                 "fetch_player_with_status",
                 new=AsyncMock(return_value=fetch_result),
             ),
-            patch.object(bot, "has_pending_removal", return_value=False),
+            patch.object(
+                bot,
+                "has_pending_removal",
+                new=AsyncMock(return_value=False),
+            ),
             patch.object(bot, "send_removal_approval_request") as mock_send_approval,
         ):
             await bot.membership_check()
@@ -1402,7 +1406,11 @@ class TestMembershipCheckWithApprovalSystem:
                 "fetch_player_with_status",
                 new=AsyncMock(return_value=fetch_result),
             ),
-            patch.object(bot, "has_pending_removal", return_value=False),
+            patch.object(
+                bot,
+                "has_pending_removal",
+                new=AsyncMock(return_value=False),
+            ),
             patch.object(bot, "send_removal_approval_request") as mock_send_approval,
         ):
             mock_send_approval.side_effect = Exception("Network error")
@@ -1538,7 +1546,7 @@ class TestMembershipCheckDuplicatePrevention:
                 ),
             ),
             patch.object(
-                bot, "has_pending_removal", return_value=True
+                bot, "has_pending_removal", new=AsyncMock(return_value=True)
             ),  # Already has pending request
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
@@ -1588,7 +1596,7 @@ class TestMembershipCheckDuplicatePrevention:
                 ),
             ),
             patch.object(
-                bot, "has_pending_removal", return_value=False
+                bot, "has_pending_removal", new=AsyncMock(return_value=False)
             ),  # No pending request
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
@@ -1605,6 +1613,63 @@ class TestMembershipCheckDuplicatePrevention:
                 "TestPlayer",
                 "Player TestPlayer (#PLAYER123) is no longer in any clan",
             )
+
+    @pytest.mark.asyncio
+    async def test_membership_check_clears_stale_pending_removal(self):
+        """Ensure stale pending removals are cleared when member remains in clan."""
+        mock_table = MagicMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER123",
+                    "player_name": "TestPlayer",
+                    "clan_tag": bot.CLAN_TAG,
+                }
+            ]
+        }
+
+        player = MagicMock()
+        player.clan = MagicMock()
+        player.clan.tag = bot.CLAN_TAG
+
+        fetch_result = SimpleNamespace(status="ok", player=player, exception=None)
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
+            patch.object(
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(return_value=fetch_result),
+            ),
+            patch.object(
+                bot,
+                "has_pending_removal",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(
+                approvals,
+                "clear_pending_removals_for_target",
+                new=AsyncMock(return_value=1),
+            ) as mock_clear_pending,
+            patch.object(bot, "send_removal_approval_request") as mock_send_request,
+        ):
+            mock_guild.get_member.return_value = mock_member
+
+            await bot.membership_check()
+
+            mock_clear_pending.assert_awaited_once_with(mock_table, "123456789")
+            mock_send_request.assert_not_called()
 
 
 class TestMembershipCheckAuthFailures:
