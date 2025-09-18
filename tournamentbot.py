@@ -38,6 +38,7 @@ from tournament_bot.bracket import (
     set_match_winner,
     simulate_tournament,
 )
+from tournament_bot.simulator import build_seeded_registrations
 from verifier_bot import coc_api
 
 # ---------- Environment ----------
@@ -78,6 +79,33 @@ coc_client: coc.Client | None = None
 
 def isoformat_utc(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+async def ensure_coc_client() -> coc.Client:
+    global coc_client
+    if coc_client is None:
+        if not COC_EMAIL or not COC_PASSWORD:
+            raise RuntimeError(
+                "COC_EMAIL and COC_PASSWORD are required for seeded simulations"
+            )
+        coc_client = coc.Client()
+        await coc_client.login(COC_EMAIL, COC_PASSWORD)
+    return coc_client
+
+
+async def build_seeded_registrations_for_guild(guild_id: int) -> list[TeamRegistration]:
+    """Fetch live player data and build seeded tournament registrations."""
+    if not COC_EMAIL or not COC_PASSWORD:
+        raise RuntimeError(
+            "COC_EMAIL and COC_PASSWORD must be configured for simulations"
+        )
+    client = await ensure_coc_client()
+    return await build_seeded_registrations(
+        client,
+        COC_EMAIL,
+        COC_PASSWORD,
+        guild_id,
+    )
 
 
 def format_display(dt: datetime) -> str:
@@ -561,13 +589,16 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
         await send_ephemeral(interaction, str(exc))
         return
 
+    storage_available = True
     try:
         storage.ensure_table()
     except RuntimeError as exc:
-        await send_ephemeral(interaction, str(exc))
-        return
+        storage_available = False
+        log.info(
+            "Tournament storage unavailable; falling back to seeded simulation: %s", exc
+        )
 
-    registrations = storage.list_registrations(guild.id)
+    registrations = storage.list_registrations(guild.id) if storage_available else []
     if len(registrations) < 2:
         await send_ephemeral(
             interaction,
@@ -742,13 +773,31 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         await send_ephemeral(interaction, str(exc))
         return
 
+    storage_available = True
     try:
         storage.ensure_table()
     except RuntimeError as exc:
-        await send_ephemeral(interaction, str(exc))
-        return
+        storage_available = False
+        log.info(
+            "Tournament storage unavailable; falling back to seeded simulation: %s",
+            exc,
+        )
 
-    registrations = storage.list_registrations(guild.id)
+    registrations = storage.list_registrations(guild.id) if storage_available else []
+    use_seeded_registrations = False
+
+    if len(registrations) < 2:
+        try:
+            registrations = await build_seeded_registrations_for_guild(guild.id)
+            use_seeded_registrations = True
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("Failed to build seeded registrations: %s", exc)
+            await send_ephemeral(
+                interaction,
+                "Unable to load seeded tournament data for the simulation.",
+            )
+            return
+
     if len(registrations) < 2:
         await send_ephemeral(
             interaction,
@@ -756,11 +805,17 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         )
         return
 
-    previous = storage.get_bracket(guild.id)
+    previous = (
+        storage.get_bracket(guild.id)
+        if storage_available and not use_seeded_registrations
+        else None
+    )
     bracket = create_bracket_state(guild.id, registrations)
-    storage.save_bracket(bracket)
+    if storage_available and not use_seeded_registrations:
+        storage.save_bracket(bracket)
     final_state, snapshots = simulate_tournament(bracket)
-    storage.save_bracket(final_state)
+    if storage_available and not use_seeded_registrations:
+        storage.save_bracket(final_state)
 
     channel = interaction.channel
     messages_posted = 0
@@ -786,6 +841,10 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         "Simulation complete.",
         f"Posted {messages_posted} snapshot(s).",
     ]
+    if not storage_available:
+        ack_message_parts.append("Storage disabled; results not persisted.")
+    if use_seeded_registrations:
+        ack_message_parts.append("Used seeded roster for simulation.")
     if previous is not None:
         ack_message_parts.append("Previous bracket state was replaced.")
     if champion:

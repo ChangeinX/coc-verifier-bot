@@ -5,24 +5,26 @@ from types import SimpleNamespace
 
 import pytest
 
-import tournament_bot.tourney_simulator as sim
+import tournament_bot.simulator as sim
+import tournament_bot.tourney_simulator as cli
+from tournament_bot.bracket import create_bracket_state
 
 
-def test_load_tags_success(tmp_path):
+def test_load_seed_tags_success(tmp_path):
     seed_file = tmp_path / "seed.txt"
     seed_file.write_text("#aaa\n\n#bbb\n")
 
-    tags = sim.load_tags(seed_file)
+    tags = sim.load_seed_tags(seed_file)
 
     assert tags == ["#AAA", "#BBB"]
 
 
-def test_load_tags_empty(tmp_path):
+def test_load_seed_tags_empty(tmp_path):
     seed_file = tmp_path / "empty.txt"
     seed_file.write_text("\n\n")
 
     with pytest.raises(ValueError):
-        sim.load_tags(seed_file)
+        sim.load_seed_tags(seed_file)
 
 
 def test_ensure_town_hall_range_validation():
@@ -38,6 +40,7 @@ def test_ensure_town_hall_range_validation():
         )
     ]
 
+    # Should not raise inside allowed range
     sim.ensure_town_hall_range(players, minimum=15, maximum=17)
 
     players.append(
@@ -128,10 +131,10 @@ async def test_fetch_seeded_players_failure(monkeypatch):
         )
 
 
-def test_print_helpers(capsys):
-    sim.print_snapshots([("Initial", object()), ("After Final", object())])
+def test_cli_helpers(capsys):
+    cli.print_snapshots([("Initial", object()), ("After Final", object())])
     output = capsys.readouterr().out
-    assert "Snapshot recorded: Initial" in output
+    assert "Snapshot 1: Initial" in output
 
     registrations = sim.build_registrations(
         [
@@ -141,14 +144,14 @@ def test_print_helpers(capsys):
         guild_id=1,
         base_time=datetime(2025, 1, 1, tzinfo=UTC),
     )
-    bracket = sim.create_bracket_state(1, registrations)
-    sim.render_and_print_final(bracket)
+    bracket = create_bracket_state(1, registrations)
+    cli.render_final_bracket(bracket)
     rendered = capsys.readouterr().out
     assert "Final Bracket" in rendered
 
 
 @pytest.mark.asyncio
-async def test_main_async_executes_flow(monkeypatch, tmp_path, capsys):
+async def test_cli_main_async(monkeypatch, tmp_path, capsys):
     seed_file = tmp_path / "seed.txt"
     seed_file.write_text("#AAA\n#BBB\n")
 
@@ -161,7 +164,7 @@ async def test_main_async_executes_flow(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setenv("COC_EMAIL", "email@example.com")
     monkeypatch.setenv("COC_PASSWORD", "secret")
-    monkeypatch.setattr(sim, "parse_args", lambda: args)
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
 
     fake_players = {
         "#AAA": SimpleNamespace(
@@ -182,8 +185,22 @@ async def test_main_async_executes_flow(monkeypatch, tmp_path, capsys):
         ),
     }
 
-    async def fake_fetch(client, email, password, tag, **kwargs):
-        return SimpleNamespace(status="ok", player=fake_players[tag])
+    async def fake_build_seeded(
+        client, email, password, guild_id, seed_file=None, base_time=None
+    ):
+        seeded = [
+            sim.SeededPlayer(
+                name=player.name,
+                tag=player.tag,
+                town_hall=player.town_hall,
+                trophies=player.trophies,
+                exp_level=player.exp_level,
+                clan_name=player.clan.name if player.clan else None,
+                clan_tag=player.clan.tag if player.clan else None,
+            )
+            for player in fake_players.values()
+        ]
+        return sim.build_registrations(seeded, guild_id, base_time=base_time)
 
     class FakeClient:
         async def login(self, email, password):
@@ -193,10 +210,10 @@ async def test_main_async_executes_flow(monkeypatch, tmp_path, capsys):
         async def close(self):
             pass
 
-    monkeypatch.setattr(sim.coc_api, "fetch_player_with_status", fake_fetch)
-    monkeypatch.setattr(sim.coc, "Client", lambda: FakeClient())
+    monkeypatch.setattr(cli.coc, "Client", lambda: FakeClient())
+    monkeypatch.setattr(cli, "build_seeded_registrations", fake_build_seeded)
 
-    await sim.main_async()
+    await cli.main_async()
 
     output = capsys.readouterr().out
-    assert "Snapshot recorded" in output
+    assert "Snapshot" in output

@@ -63,3 +63,23 @@ async def test_fetch_players_raises_when_missing_data(monkeypatch):
 
     with pytest.raises(tournamentbot.InvalidValueError):
         await tournamentbot.fetch_players(["#AAA111", "#BBB222"])
+
+
+@pytest.mark.asyncio
+async def test_build_seeded_registrations_for_guild(monkeypatch):
+    monkeypatch.setattr(tournamentbot, "COC_EMAIL", "email")
+    monkeypatch.setattr(tournamentbot, "COC_PASSWORD", "password")
+    monkeypatch.setattr(tournamentbot, "coc_client", SimpleNamespace(), raising=False)
+
+    async def fake_build(client, email, password, guild_id, **kwargs):
+        assert client is tournamentbot.coc_client
+        assert email == "email"
+        assert password == "password"
+        assert guild_id == 99
+        return ["registration"]
+
+    monkeypatch.setattr(tournamentbot, "build_seeded_registrations", fake_build)
+
+    result = await tournamentbot.build_seeded_registrations_for_guild(99)
+
+    assert result == ["registration"]
