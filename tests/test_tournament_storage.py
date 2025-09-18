@@ -62,6 +62,8 @@ def sample_config() -> TournamentConfig:
         team_size=5,
         allowed_town_halls=[16, 17],
         max_teams=10,
+        registration_opens_at="2024-01-01T00:00:00.000Z",
+        registration_closes_at="2024-01-05T00:00:00.000Z",
         updated_by=99,
         updated_at="2024-01-01T00:00:00.000Z",
     )
@@ -73,8 +75,16 @@ def sample_registration() -> TeamRegistration:
         user_id=7,
         user_name="User#1234",
         players=[
-            PlayerEntry(name="One", tag="#AAA111", town_hall=16),
-            PlayerEntry(name="Two", tag="#BBB222", town_hall=17),
+            PlayerEntry(
+                name="One",
+                tag="#AAA111",
+                town_hall=16,
+                clan_name="Alpha",
+                clan_tag="#CLAN1",
+            ),
+            PlayerEntry(
+                name="Two", tag="#BBB222", town_hall=17, clan_name=None, clan_tag=None
+            ),
         ],
         registered_at="2024-01-01T00:00:00.000Z",
     )
@@ -93,6 +103,9 @@ def test_config_round_trip():
 
     restored = storage.get_config(config.guild_id)
     assert restored == config
+    opens_at, closes_at = restored.registration_window()
+    assert opens_at.year == 2024
+    assert closes_at.day == 5
 
 
 def test_config_missing_returns_none():

@@ -19,6 +19,8 @@ class TournamentConfig:
     team_size: int
     allowed_town_halls: list[int]
     max_teams: int
+    registration_opens_at: str
+    registration_closes_at: str
     updated_by: int
     updated_at: str
 
@@ -36,6 +38,8 @@ class TournamentConfig:
                 "team_size": self.team_size,
                 "allowed_town_halls": self.allowed_town_halls,
                 "max_teams": self.max_teams,
+                "registration_opens_at": self.registration_opens_at,
+                "registration_closes_at": self.registration_closes_at,
                 "updated_by": str(self.updated_by),
                 "updated_at": self.updated_at,
             }
@@ -50,9 +54,20 @@ class TournamentConfig:
             team_size=int(item["team_size"]),
             allowed_town_halls=[int(v) for v in item.get("allowed_town_halls", [])],
             max_teams=int(item["max_teams"]),
+            registration_opens_at=str(item.get("registration_opens_at", "")),
+            registration_closes_at=str(item.get("registration_closes_at", "")),
             updated_by=int(item.get("updated_by", 0)),
             updated_at=str(item.get("updated_at", "")),
         )
+
+    def registration_window(self) -> tuple[datetime, datetime]:
+        opens_at = datetime.strptime(self.registration_opens_at, ISO_FORMAT).replace(
+            tzinfo=UTC
+        )
+        closes_at = datetime.strptime(self.registration_closes_at, ISO_FORMAT).replace(
+            tzinfo=UTC
+        )
+        return opens_at, closes_at
 
 
 @dataclass(slots=True)
@@ -60,9 +75,20 @@ class PlayerEntry:
     name: str
     tag: str
     town_hall: int
+    clan_name: str | None = None
+    clan_tag: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {"name": self.name, "tag": self.tag, "town_hall": self.town_hall}
+        data: dict[str, object] = {
+            "name": self.name,
+            "tag": self.tag,
+            "town_hall": self.town_hall,
+        }
+        if self.clan_name is not None:
+            data["clan_name"] = self.clan_name
+        if self.clan_tag is not None:
+            data["clan_tag"] = self.clan_tag
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> PlayerEntry:
@@ -70,6 +96,14 @@ class PlayerEntry:
             name=str(data.get("name", "")),
             tag=str(data.get("tag", "")),
             town_hall=int(data.get("town_hall", 0)),
+            clan_name=(
+                str(data.get("clan_name"))
+                if data.get("clan_name") is not None
+                else None
+            ),
+            clan_tag=(
+                str(data.get("clan_tag")) if data.get("clan_tag") is not None else None
+            ),
         )
 
 
@@ -119,10 +153,17 @@ class TeamRegistration:
 
     @property
     def lines_for_channel(self) -> list[str]:
-        return [
-            f"{self.user_name} | {player.name} | {player.tag}"
-            for player in self.players
-        ]
+        lines: list[str] = []
+        for player in self.players:
+            clan_segment = ""
+            if player.clan_name:
+                clan_segment = f" • {player.clan_name}" + (
+                    f" ({player.clan_tag})" if player.clan_tag else ""
+                )
+            lines.append(
+                f"{player.name} (TH{player.town_hall}){clan_segment} — {player.tag}"
+            )
+        return lines
 
 
 __all__ = [
