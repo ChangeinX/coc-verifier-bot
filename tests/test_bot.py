@@ -1127,6 +1127,13 @@ class TestSendRemovalApprovalRequest:
         mock_member.display_name = "TestUser"
         mock_member.mention = "@TestUser"
         mock_log_channel = AsyncMock()
+        mock_message = MagicMock()
+        mock_message.id = 999
+        mock_message.channel = MagicMock()
+        mock_message.channel.id = 67890
+        mock_message.guild = MagicMock()
+        mock_message.guild.id = 54321
+        mock_log_channel.send.return_value = mock_message
 
         with (
             patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
@@ -1668,7 +1675,11 @@ class TestMembershipCheckDuplicatePrevention:
 
             await bot.membership_check()
 
-            mock_clear_pending.assert_awaited_once_with(mock_table, "123456789")
+            mock_clear_pending.assert_awaited_once()
+            args, kwargs = mock_clear_pending.await_args
+            assert args == (mock_table, "123456789")
+            assert "on_remove" in kwargs
+            assert callable(kwargs["on_remove"])
             mock_send_request.assert_not_called()
 
 
@@ -1728,7 +1739,11 @@ class TestMembershipCheckAuthFailures:
             await bot.membership_check()
 
             mock_send_request.assert_not_called()
-            mock_clear_pending.assert_awaited_once_with(mock_table, "123456789")
+            mock_clear_pending.assert_awaited_once()
+            args, kwargs = mock_clear_pending.await_args
+            assert args == (mock_table, "123456789")
+            assert "on_remove" in kwargs
+            assert callable(kwargs["on_remove"])
             mock_has_pending.assert_not_called()
 
 
@@ -1745,17 +1760,23 @@ class TestPendingRemovalCleanup:
                     "discord_id": "PENDING_REMOVAL_123",
                     "target_discord_id": "123456789",
                     "removal_id": "123",
+                    "channel_id": "111",
+                    "message_id": "222",
                 },
                 {
                     "discord_id": "PENDING_REMOVAL_456",
                     "target_discord_id": "123456789",
                     "removal_id": "456",
+                    "channel_id": "333",
+                    "message_id": "444",
                 },
             ]
         }
 
+        on_remove = AsyncMock()
+
         deleted_count = await approvals.clear_pending_removals_for_target(
-            mock_table, "123456789"
+            mock_table, "123456789", on_remove=on_remove
         )
 
         assert deleted_count == 2
@@ -1766,6 +1787,7 @@ class TestPendingRemovalCleanup:
         mock_table.delete_item.assert_any_call(
             Key={"discord_id": "PENDING_REMOVAL_456"}
         )
+        assert on_remove.await_count == 2
 
 
 class TestTimestampFix:
