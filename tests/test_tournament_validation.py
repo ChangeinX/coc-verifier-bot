@@ -8,9 +8,11 @@ from tournament_bot import (
     TournamentConfig,
     normalize_player_tag,
     parse_player_tags,
+    parse_registration_datetime,
     parse_town_hall_levels,
     utc_now_iso,
     validate_max_teams,
+    validate_registration_window,
     validate_team_size,
 )
 
@@ -93,11 +95,16 @@ def test_models_round_trip():
         team_size=5,
         allowed_town_halls=[16, 17],
         max_teams=10,
+        registration_opens_at="2024-02-01T12:00:00.000Z",
+        registration_closes_at="2024-02-05T18:00:00.000Z",
         updated_by=42,
         updated_at=utc_now_iso(),
     )
     config_item = config.to_item()
     assert TournamentConfig.from_item(config_item) == config
+    opens_at, closes_at = config.registration_window()
+    assert opens_at.day == 1
+    assert closes_at.day == 5
 
     registration = TeamRegistration(
         guild_id=123,
@@ -114,4 +121,20 @@ def test_models_round_trip():
     assert restored.guild_id == registration.guild_id
     assert restored.user_id == registration.user_id
     assert [p.tag for p in restored.players] == ["#AAA111", "#BBB222"]
-    assert registration.lines_for_channel[0].startswith("User#1234 | PlayerOne")
+    assert registration.lines_for_channel[0].startswith("PlayerOne (TH16)")
+
+
+def test_parse_registration_datetime_accepts_iso_variants():
+    dt = parse_registration_datetime("2024-05-01 18:00")
+    assert dt.isoformat().startswith("2024-05-01T18:00")
+    with pytest.raises(InvalidValueError):
+        parse_registration_datetime("not-a-date")
+
+
+def test_validate_registration_window_enforces_order():
+    opens = parse_registration_datetime("2024-05-01T18:00")
+    closes = parse_registration_datetime("2024-05-02T18:00")
+    validated_opens, validated_closes = validate_registration_window(opens, closes)
+    assert validated_opens < validated_closes
+    with pytest.raises(InvalidValueError):
+        validate_registration_window(closes, opens)
