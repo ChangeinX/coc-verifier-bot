@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.5"
+    }
   }
 }
 
@@ -281,3 +285,136 @@ resource "aws_ecs_service" "giveaway_bot" {
   }
 }
 
+resource "random_id" "white_devel_cup_suffix" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "white_devel_cup" {
+  bucket        = "white-devel-cup-${random_id.white_devel_cup_suffix.hex}"
+  force_destroy = true
+}
+
+resource "aws_s3_object" "white_devel_cup_html" {
+  bucket       = aws_s3_bucket.white_devel_cup.id
+  key          = "white-devel-cup.html"
+  source       = "${path.module}/white-devel-cup.html"
+  etag         = filemd5("${path.module}/white-devel-cup.html")
+  content_type = "text/html"
+}
+
+resource "aws_s3_bucket_public_access_block" "white_devel_cup" {
+  bucket = aws_s3_bucket.white_devel_cup.id
+
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_website_configuration" "white_devel_cup" {
+  bucket = aws_s3_bucket.white_devel_cup.id
+
+  index_document {
+    suffix = "white-devel-cup.html"
+  }
+
+  error_document {
+    key = "white-devel-cup.html"
+  }
+}
+
+data "aws_iam_policy_document" "white_devel_cup_public" {
+  statement {
+    sid = "AllowPublicRead"
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.white_devel_cup.arn}/*"]
+  }
+}
+
+resource "aws_s3_bucket_policy" "white_devel_cup" {
+  bucket = aws_s3_bucket.white_devel_cup.id
+  policy = data.aws_iam_policy_document.white_devel_cup_public.json
+
+  depends_on = [aws_s3_bucket_public_access_block.white_devel_cup]
+}
+
+resource "aws_cloudfront_function" "white_devel_redirect" {
+  name    = "white-devel-apex-redirect"
+  runtime = "cloudfront-js-1.0"
+  comment = "Redirect white-devel.com to tournaments subdomain"
+  publish = true
+  code    = file("${path.module}/white-devel-redirect.js")
+}
+
+resource "aws_cloudfront_distribution" "white_devel_cup" {
+  enabled             = true
+  comment             = "HTTPS distribution for white-devel-cup"
+  default_root_object = "white-devel-cup.html"
+  aliases = [
+    local.tournaments_subdomain,
+    local.white_devel_domain
+  ]
+
+  origin {
+    domain_name = aws_s3_bucket_website_configuration.white_devel_cup.website_endpoint
+    origin_id   = "white-devel-cup-s3"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "http-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  default_cache_behavior {
+    target_origin_id       = "white-devel-cup-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.white_devel_redirect.arn
+    }
+
+    forwarded_values {
+      query_string = false
+
+      cookies {
+        forward = "none"
+      }
+    }
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn      = aws_acm_certificate_validation.white_devel.certificate_arn
+    minimum_protocol_version = "TLSv1.2_2021"
+    ssl_support_method       = "sni-only"
+  }
+}
+
+output "white_devel_cup_http_endpoint" {
+  description = "HTTP endpoint that serves white-devel-cup.html"
+  value       = "http://${aws_s3_bucket_website_configuration.white_devel_cup.website_endpoint}"
+}
+
+output "white_devel_cup_https_endpoint" {
+  description = "HTTPS endpoint backed by CloudFront"
+  value       = "https://${local.tournaments_subdomain}"
+}
+
+output "white_devel_cup_cloudfront_domain" {
+  description = "CloudFront distribution domain name"
+  value       = aws_cloudfront_distribution.white_devel_cup.domain_name
+}

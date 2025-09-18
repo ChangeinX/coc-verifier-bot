@@ -56,7 +56,7 @@ data "aws_iam_policy_document" "github_oidc_assume_role" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [
+      values = [
         "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${var.github_branch}"
       ]
     }
@@ -64,9 +64,9 @@ data "aws_iam_policy_document" "github_oidc_assume_role" {
 }
 
 resource "aws_iam_role" "deploy" {
-  name               = var.deploy_role_name
-  assume_role_policy = data.aws_iam_policy_document.github_oidc_assume_role.json
-  description        = "Role assumed by GitHub Actions to deploy ECS/ECR/Dynamo/Logs infra for CoC bots"
+  name                  = var.deploy_role_name
+  assume_role_policy    = data.aws_iam_policy_document.github_oidc_assume_role.json
+  description           = "Role assumed by GitHub Actions to deploy ECS/ECR/Dynamo/Logs infra for CoC bots"
   force_detach_policies = true
 }
 
