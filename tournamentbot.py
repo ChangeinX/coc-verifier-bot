@@ -144,7 +144,9 @@ async def setup_command(  # pragma: no cover - Discord slash command wiring
     )
     storage.save_config(config)
 
-    await interaction.response.send_message(format_config_message(config), ephemeral=True)
+    await interaction.response.send_message(
+        format_config_message(config), ephemeral=True
+    )
 
 
 @setup_command.error
@@ -245,7 +247,8 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
     ]
     if disallowed:
         lines = ", ".join(
-            f"{player.name} ({player.tag}) TH{player.town_hall}" for player in disallowed
+            f"{player.name} ({player.tag}) TH{player.town_hall}"
+            for player in disallowed
         )
         await interaction.followup.send(
             f"These players have unsupported Town Hall levels: {lines}",
@@ -262,7 +265,11 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
     )
     storage.save_registration(registration)
 
-    prefix = "Team registration updated!" if existing_registration else "Team registered successfully!"
+    prefix = (
+        "Team registration updated!"
+        if existing_registration
+        else "Team registered successfully!"
+    )
     message = "\n".join([prefix, *registration.lines_for_channel])
     await interaction.followup.send(message)
 
@@ -279,7 +286,9 @@ async def on_ready() -> None:  # pragma: no cover - Discord lifecycle hook
 async def main() -> None:  # pragma: no cover - CLI entry point
     missing = [var for var in REQUIRED_VARS if not os.getenv(var)]
     if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(missing)}"
+        )
 
     try:
         async with bot:

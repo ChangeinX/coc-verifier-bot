@@ -56,7 +56,9 @@ def parse_town_hall_levels(raw: str) -> list[int]:
         try:
             level = int(part)
         except ValueError as exc:
-            raise InvalidTownHallError(f"Town hall level must be a number: {part}") from exc
+            raise InvalidTownHallError(
+                f"Town hall level must be a number: {part}"
+            ) from exc
         if level < 1 or level > 25:
             raise InvalidTownHallError(
                 f"Town hall level {level} is outside supported range (1-25)"

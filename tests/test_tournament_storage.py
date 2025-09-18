@@ -30,7 +30,7 @@ class FakeTable:
             elif key.name == "sk":
                 sk_prefix = value
         count = 0
-        for (pk, sk) in self.items:
+        for pk, sk in self.items:
             if pk == pk_value and sk.startswith(sk_prefix):
                 count += 1
         return {"Count": count}
@@ -117,8 +117,13 @@ def test_delete_registration_outcome():
     registration = sample_registration()
     storage.save_registration(registration)
 
-    assert storage.delete_registration(registration.guild_id, registration.user_id) is True
-    assert storage.delete_registration(registration.guild_id, registration.user_id) is False
+    assert (
+        storage.delete_registration(registration.guild_id, registration.user_id) is True
+    )
+    assert (
+        storage.delete_registration(registration.guild_id, registration.user_id)
+        is False
+    )
 
 
 def test_delete_registration_raises_for_other_errors():
