@@ -1,6 +1,15 @@
 """Tournament bot helpers."""
 
-from .models import PlayerEntry, TeamRegistration, TournamentConfig, utc_now_iso
+from .models import (
+    BracketMatch,
+    BracketRound,
+    BracketSlot,
+    BracketState,
+    PlayerEntry,
+    TeamRegistration,
+    TournamentConfig,
+    utc_now_iso,
+)
 from .storage import TournamentStorage
 from .validation import (
     InvalidTownHallError,
@@ -18,6 +27,10 @@ __all__ = [
     "PlayerEntry",
     "TeamRegistration",
     "TournamentConfig",
+    "BracketSlot",
+    "BracketMatch",
+    "BracketRound",
+    "BracketState",
     "utc_now_iso",
     "TournamentStorage",
     "InvalidTownHallError",

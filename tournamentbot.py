@@ -17,6 +17,7 @@ from discord.abc import Messageable
 from discord.app_commands import errors as app_errors
 
 from tournament_bot import (
+    BracketState,
     InvalidTownHallError,
     InvalidValueError,
     PlayerEntry,
@@ -30,6 +31,12 @@ from tournament_bot import (
     validate_max_teams,
     validate_registration_window,
     validate_team_size,
+)
+from tournament_bot.bracket import (
+    create_bracket_state,
+    render_bracket,
+    set_match_winner,
+    simulate_tournament,
 )
 from verifier_bot import coc_api
 
@@ -141,6 +148,42 @@ def build_setup_embed(
     return embed
 
 
+def format_lineup_table(players: list[PlayerEntry]) -> str:
+    headers = ("Player", "TH", "Player Tag", "Clan")
+    rows: list[tuple[str, str, str, str]] = []
+    for player in players:
+        clan_parts: list[str] = []
+        if player.clan_name:
+            clan_parts.append(player.clan_name)
+        if player.clan_tag:
+            clan_parts.append(player.clan_tag)
+        clan_value = " ".join(clan_parts) if clan_parts else "-"
+        rows.append(
+            (
+                player.name,
+                f"TH{player.town_hall}",
+                player.tag,
+                clan_value,
+            )
+        )
+
+    if not rows:
+        return "No players registered"
+
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for idx, value in enumerate(row):
+            widths[idx] = max(widths[idx], len(value))
+
+    lines = [" ".join(headers[idx].ljust(widths[idx]) for idx in range(len(headers)))]
+    lines.append(" ".join("-" * widths[idx] for idx in range(len(headers))))
+    for row in rows:
+        lines.append(
+            " ".join(row[idx].ljust(widths[idx]) for idx in range(len(headers)))
+        )
+    return "\n".join(lines)
+
+
 def build_registration_embed(
     registration: TeamRegistration,
     *,
@@ -154,8 +197,12 @@ def build_registration_embed(
         color=discord.Color.green(),
         timestamp=datetime.now(UTC),
     )
-    players_value = "\n".join(registration.lines_for_channel)
-    embed.add_field(name="Lineup", value=players_value, inline=False)
+    players_table = format_lineup_table(registration.players)
+    embed.add_field(
+        name="Lineup",
+        value=f"```\n{players_table}\n```",
+        inline=False,
+    )
     embed.set_footer(text=f"Teams lock {format_display(closes_at)}")
     embed.add_field(
         name="Team Size",
@@ -170,6 +217,57 @@ def build_registration_embed(
         or "-",
         inline=True,
     )
+    return embed
+
+
+def bracket_summary(bracket: BracketState) -> str:
+    if not bracket.rounds:
+        return "No rounds configured"
+    first_round = bracket.rounds[0]
+    team_ids = {
+        slot.team_id
+        for match in first_round.matches
+        for slot in (match.competitor_one, match.competitor_two)
+        if slot.team_id is not None
+    }
+    round_names = ", ".join(round_.name for round_ in bracket.rounds)
+    return f"Teams: {len(team_ids)} | Rounds: {round_names}"
+
+
+def bracket_champion_name(bracket: BracketState) -> str | None:
+    if not bracket.rounds:
+        return None
+    final_round = bracket.rounds[-1]
+    if not final_round.matches:
+        return None
+    winner_slot = final_round.matches[-1].winner_slot()
+    if winner_slot and winner_slot.team_id is not None:
+        return winner_slot.display()
+    return None
+
+
+def build_bracket_embed(
+    bracket: BracketState,
+    *,
+    title: str,
+    requested_by: discord.abc.User | None,
+    summary_note: str | None = None,
+) -> discord.Embed:
+    graph = render_bracket(bracket)
+    description = f"```\n{graph}\n```" if graph else "Bracket is empty"
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(UTC),
+    )
+    summary = bracket_summary(bracket)
+    if summary:
+        embed.add_field(name="Summary", value=summary, inline=False)
+    if summary_note:
+        embed.add_field(name="Note", value=summary_note, inline=False)
+    if requested_by is not None:
+        embed.set_footer(text=f"Updated by {requested_by}")
     return embed
 
 
@@ -209,6 +307,13 @@ def ensure_guild(interaction: discord.Interaction) -> discord.Guild:
     if guild is None:
         raise RuntimeError("This command can only be used in a server")
     return guild
+
+
+async def send_ephemeral(interaction: discord.Interaction, message: str) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
 
 
 # ---------- Slash Commands ----------
@@ -443,6 +548,266 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
             "Team registered, but I couldn't post the announcement.",
             ephemeral=True,
         )
+
+
+@app_commands.default_permissions(administrator=True)
+@tree.command(name="create-bracket", description="Seed registered teams into a bracket")
+async def create_bracket_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    registrations = storage.list_registrations(guild.id)
+    if len(registrations) < 2:
+        await send_ephemeral(
+            interaction,
+            "At least two registered teams are required to create a bracket.",
+        )
+        return
+
+    existing = storage.get_bracket(guild.id)
+    bracket = create_bracket_state(guild.id, registrations)
+    storage.save_bracket(bracket)
+
+    bye_count = sum(
+        1
+        for match in bracket.rounds[0].matches
+        for slot in (match.competitor_one, match.competitor_two)
+        if slot.team_id is None and slot.team_label == "BYE"
+    )
+    note_parts = [f"Teams seeded from {len(registrations)} registration(s)"]
+    if bye_count:
+        note_parts.append(f"Auto-advances applied for {bye_count} bye(s)")
+    if existing is not None:
+        note_parts.append("Replaced previous bracket state")
+    note = " | ".join(note_parts)
+
+    await send_ephemeral(
+        interaction,
+        "Bracket created successfully."
+        + (" Replaced previous bracket." if existing is not None else ""),
+    )
+
+    channel = interaction.channel
+    if isinstance(channel, Messageable):
+        embed = build_bracket_embed(
+            bracket,
+            title="Tournament Bracket Created",
+            requested_by=interaction.user,
+            summary_note=note,
+        )
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning("Failed to send bracket announcement: %s", exc)
+    else:
+        log.debug("Skipping bracket announcement; channel not messageable")
+
+
+@create_bracket_command.error
+async def create_bracket_error_handler(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+) -> None:
+    if isinstance(error, app_errors.MissingPermissions):
+        await send_ephemeral(
+            interaction,
+            "You need administrator permissions to run this command.",
+        )
+        return
+    log.exception("Unhandled create-bracket error: %s", error)
+    await send_ephemeral(
+        interaction,
+        "An unexpected error occurred while creating the bracket.",
+    )
+
+
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    match_id="Match identifier (e.g. R1M1)",
+    winner_slot="Winning slot: 1 for the first team, 2 for the second team",
+)
+@tree.command(
+    name="select-round-winner",
+    description="Record the winner for a bracket match",
+)
+async def select_round_winner_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    match_id: str,
+    winner_slot: app_commands.Range[int, 1, 2],
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    bracket = storage.get_bracket(guild.id)
+    if bracket is None:
+        await send_ephemeral(
+            interaction,
+            "No bracket found. Run /create-bracket before selecting winners.",
+        )
+        return
+
+    match_identifier = match_id.strip().upper()
+    match_obj = bracket.find_match(match_identifier)
+    if match_obj is None:
+        await send_ephemeral(
+            interaction,
+            f"Match {match_identifier} was not found. Please double-check the ID.",
+        )
+        return
+
+    previous_winner = match_obj.winner_index
+    try:
+        set_match_winner(bracket, match_identifier, winner_slot)
+    except ValueError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    storage.save_bracket(bracket)
+    winner_slot_obj = match_obj.winner_slot()
+    if previous_winner == match_obj.winner_index and winner_slot_obj is not None:
+        ack_message = (
+            f"Winner for {match_identifier} remains {winner_slot_obj.display()}."
+        )
+    elif winner_slot_obj is not None:
+        ack_message = f"Recorded {winner_slot_obj.display()} as the winner for {match_identifier}."
+    else:
+        ack_message = f"Recorded winner for {match_identifier}."
+
+    champion = bracket_champion_name(bracket)
+    if champion:
+        ack_message += f" Current champion: {champion}."
+
+    await send_ephemeral(interaction, ack_message)
+
+    channel = interaction.channel
+    if isinstance(channel, Messageable):
+        embed = build_bracket_embed(
+            bracket,
+            title="Bracket Update",
+            requested_by=interaction.user,
+            summary_note=f"Winner recorded for {match_identifier}",
+        )
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning("Failed to post bracket update: %s", exc)
+    else:
+        log.debug("Skipping bracket update; channel not messageable")
+
+
+@select_round_winner_command.error
+async def select_round_winner_error_handler(  # pragma: no cover - Discord wiring
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+) -> None:
+    if isinstance(error, app_errors.MissingPermissions):
+        await send_ephemeral(
+            interaction,
+            "You need administrator permissions to run this command.",
+        )
+        return
+    log.exception("Unhandled select-round-winner error: %s", error)
+    await send_ephemeral(
+        interaction,
+        "An unexpected error occurred while recording the winner.",
+    )
+
+
+@app_commands.default_permissions(administrator=True)
+@tree.command(name="simulate-tourney", description="Simulate the full tournament flow")
+async def simulate_tourney_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    registrations = storage.list_registrations(guild.id)
+    if len(registrations) < 2:
+        await send_ephemeral(
+            interaction,
+            "At least two registered teams are required to run the simulation.",
+        )
+        return
+
+    previous = storage.get_bracket(guild.id)
+    bracket = create_bracket_state(guild.id, registrations)
+    storage.save_bracket(bracket)
+    final_state, snapshots = simulate_tournament(bracket)
+    storage.save_bracket(final_state)
+
+    channel = interaction.channel
+    messages_posted = 0
+    if isinstance(channel, Messageable):
+        for idx, (label, snapshot) in enumerate(snapshots, start=1):
+            embed = build_bracket_embed(
+                snapshot,
+                title=f"Simulation – {label}",
+                requested_by=interaction.user,
+                summary_note=f"Snapshot {idx} of {len(snapshots)}",
+            )
+            try:
+                await channel.send(embed=embed)
+                messages_posted += 1
+            except discord.HTTPException as exc:  # pragma: no cover - network failure
+                log.warning("Failed to send simulation snapshot: %s", exc)
+                break
+    else:
+        log.debug("Skipping simulation announcements; channel not messageable")
+
+    champion = bracket_champion_name(final_state)
+    ack_message_parts = [
+        "Simulation complete.",
+        f"Posted {messages_posted} snapshot(s).",
+    ]
+    if previous is not None:
+        ack_message_parts.append("Previous bracket state was replaced.")
+    if champion:
+        ack_message_parts.append(f"Champion: {champion}.")
+    await send_ephemeral(interaction, " ".join(ack_message_parts))
+
+
+@simulate_tourney_command.error
+async def simulate_tourney_error_handler(  # pragma: no cover - Discord wiring
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+) -> None:
+    if isinstance(error, app_errors.MissingPermissions):
+        await send_ephemeral(
+            interaction,
+            "You need administrator permissions to run this command.",
+        )
+        return
+    log.exception("Unhandled simulate-tourney error: %s", error)
+    await send_ephemeral(
+        interaction,
+        "An unexpected error occurred while simulating the tournament.",
+    )
 
 
 # ---------- Lifecycle ----------

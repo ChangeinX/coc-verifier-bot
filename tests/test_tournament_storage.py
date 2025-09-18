@@ -1,12 +1,16 @@
+from datetime import datetime, timedelta
+
 import pytest
 from botocore.exceptions import ClientError
 
 from tournament_bot import (
+    BracketState,
     PlayerEntry,
     TeamRegistration,
     TournamentConfig,
     TournamentStorage,
 )
+from tournament_bot.bracket import create_bracket_state
 
 
 class FakeTable:
@@ -20,7 +24,6 @@ class FakeTable:
         self.items[(Item["pk"], Item["sk"])] = Item
 
     def query(self, *, KeyConditionExpression, Select="COUNT", **_kwargs):
-        del Select  # pragma: no cover - unused in fake implementation
         pk_value = None
         sk_prefix = ""
         for condition in KeyConditionExpression._values:  # type: ignore[attr-defined]
@@ -29,11 +32,15 @@ class FakeTable:
                 pk_value = value
             elif key.name == "sk":
                 sk_prefix = value
-        count = 0
-        for pk, sk in self.items:
-            if pk == pk_value and sk.startswith(sk_prefix):
-                count += 1
-        return {"Count": count}
+        matching_keys = [
+            key
+            for key in sorted(self.items)
+            if key[0] == pk_value and key[1].startswith(sk_prefix)
+        ]
+        items = [self.items[key] for key in matching_keys]
+        if Select == "COUNT":
+            return {"Count": len(items)}
+        return {"Items": [item.copy() for item in items], "Count": len(items)}
 
     def delete_item(self, *, Key, ConditionExpression):
         del ConditionExpression  # pragma: no cover - unused in fake implementation
@@ -87,6 +94,26 @@ def sample_registration() -> TeamRegistration:
             ),
         ],
         registered_at="2024-01-01T00:00:00.000Z",
+    )
+
+
+def make_registration(user_id: int, offset_seconds: int) -> TeamRegistration:
+    registered_at = (
+        datetime.fromisoformat("2024-01-01T00:00:00+00:00")
+        + timedelta(seconds=offset_seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return TeamRegistration(
+        guild_id=42,
+        user_id=user_id,
+        user_name=f"User#{user_id}",
+        players=[
+            PlayerEntry(
+                name=f"Player{user_id}",
+                tag=f"#T{user_id:03d}",
+                town_hall=16,
+            )
+        ],
+        registered_at=registered_at,
     )
 
 
@@ -149,3 +176,35 @@ def test_delete_registration_raises_for_other_errors():
 
     with pytest.raises(ClientError):
         storage.delete_registration(42, 99)
+
+
+def test_list_registrations_returns_sorted_entries():
+    storage, _table = build_storage()
+    registrations = [
+        make_registration(10, 60),
+        make_registration(11, 0),
+        make_registration(12, 120),
+    ]
+    for registration in registrations:
+        storage.save_registration(registration)
+
+    ordered = storage.list_registrations(42)
+    assert [entry.user_id for entry in ordered] == [11, 10, 12]
+
+
+def test_bracket_round_trip():
+    storage, _table = build_storage()
+    registrations = [make_registration(1, 0), make_registration(2, 60)]
+    for registration in registrations:
+        storage.save_registration(registration)
+
+    bracket = create_bracket_state(42, registrations)
+    storage.save_bracket(bracket)
+
+    restored = storage.get_bracket(42)
+    assert isinstance(restored, BracketState)
+    assert (
+        restored.rounds[0].matches[0].competitor_one.team_id == registrations[0].user_id
+    )
+    storage.delete_bracket(42)
+    assert storage.get_bracket(42) is None
