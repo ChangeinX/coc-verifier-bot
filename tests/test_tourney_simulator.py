@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -85,6 +86,30 @@ def test_build_registrations_produces_unique_entries():
     assert registrations[1].user_id == 2
     assert registrations[0].registered_at != registrations[1].registered_at
     assert registrations[0].players[0].clan_name == "Foo"
+
+
+def test_build_registrations_shuffle_uses_rng():
+    base_time = datetime(2025, 1, 1, tzinfo=UTC)
+    players = [
+        sim.SeededPlayer("Foxtrot", "#F", 16, 5000, 200, "Foo", "#FOO"),
+        sim.SeededPlayer("Golf", "#G", 15, 4800, 190, None, None),
+        sim.SeededPlayer("Hotel", "#H", 17, 5200, 205, None, None),
+    ]
+
+    rng = random.Random(0)
+    registrations = sim.build_registrations(
+        players,
+        guild_id=5,
+        base_time=base_time,
+        shuffle=True,
+        rng=rng,
+    )
+
+    assert [entry.user_name for entry in registrations] == [
+        "Foxtrot (Foo)",
+        "Hotel",
+        "Golf",
+    ]
 
 
 @pytest.mark.asyncio
@@ -186,7 +211,14 @@ async def test_cli_main_async(monkeypatch, tmp_path, capsys):
     }
 
     async def fake_build_seeded(
-        client, email, password, guild_id, seed_file=None, base_time=None
+        client,
+        email,
+        password,
+        guild_id,
+        seed_file=None,
+        base_time=None,
+        shuffle=False,
+        rng=None,
     ):
         seeded = [
             sim.SeededPlayer(
@@ -200,7 +232,13 @@ async def test_cli_main_async(monkeypatch, tmp_path, capsys):
             )
             for player in fake_players.values()
         ]
-        return sim.build_registrations(seeded, guild_id, base_time=base_time)
+        return sim.build_registrations(
+            seeded,
+            guild_id,
+            base_time=base_time,
+            shuffle=shuffle,
+            rng=rng,
+        )
 
     class FakeClient:
         async def login(self, email, password):
