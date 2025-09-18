@@ -9,7 +9,7 @@
   <!-- Tournament Main Page -->
   <url>
     <loc>https://tournaments.white-devel.com/</loc>
-    <lastmod>2024-09-18T12:00:00+00:00</lastmod>
+    <lastmod>2025-09-18T20:19:35+00:00</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
     <mobile:mobile/>
@@ -18,7 +18,7 @@
   <!-- Main Domain -->
   <url>
     <loc>https://white-devel.com/</loc>
-    <lastmod>2024-09-18T12:00:00+00:00</lastmod>
+    <lastmod>2025-09-18T20:19:35+00:00</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
     <mobile:mobile/>
@@ -27,7 +27,7 @@
   <!-- Tournament Rules Section -->
   <url>
     <loc>https://tournaments.white-devel.com/#rules</loc>
-    <lastmod>2024-09-18T12:00:00+00:00</lastmod>
+    <lastmod>2025-09-18T20:19:35+00:00</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
     <mobile:mobile/>
@@ -36,7 +36,7 @@
   <!-- Tournament Schedule Section -->
   <url>
     <loc>https://tournaments.white-devel.com/#schedule</loc>
-    <lastmod>2024-09-18T12:00:00+00:00</lastmod>
+    <lastmod>2025-09-18T20:19:35+00:00</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.9</priority>
     <mobile:mobile/>
@@ -45,7 +45,7 @@
   <!-- Tournament Prizes Section -->
   <url>
     <loc>https://tournaments.white-devel.com/#prizes</loc>
-    <lastmod>2024-09-18T12:00:00+00:00</lastmod>
+    <lastmod>2025-09-18T20:19:35+00:00</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
     <mobile:mobile/>
@@ -54,7 +54,7 @@
   <!-- Tournament Registration Section -->
   <url>
     <loc>https://tournaments.white-devel.com/#general</loc>
-    <lastmod>2024-09-18T12:00:00+00:00</lastmod>
+    <lastmod>2025-09-18T20:19:35+00:00</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.9</priority>
     <mobile:mobile/>
