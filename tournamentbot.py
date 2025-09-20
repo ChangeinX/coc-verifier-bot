@@ -909,6 +909,20 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
             log.warning("Failed to send simulation snapshot: %s", exc)
             break
 
+    if messages_posted == 0:
+        try:
+            fallback_embed = build_bracket_embed(
+                final_state,
+                title="Simulation – Final Bracket",
+                requested_by=interaction.user,
+                summary_note="Delivered via follow-up",
+                shrink_completed=True,
+            )
+            await interaction.followup.send(embed=fallback_embed, ephemeral=True)
+            messages_posted = 1
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.warning("Failed to send fallback simulation snapshot: %s", exc)
+
     champion = bracket_champion_name(final_state)
     ack_message_parts = [
         "Simulation complete.",
@@ -918,6 +932,7 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         ack_message_parts.append("Used seeded roster for simulation.")
     if not storage_available:
         ack_message_parts.append("Storage unavailable; results were not persisted.")
+
     if champion:
         ack_message_parts.append(f"Champion: {champion}.")
     await send_ephemeral(interaction, " ".join(ack_message_parts))
