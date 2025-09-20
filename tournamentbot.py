@@ -47,12 +47,16 @@ COC_EMAIL: Final[str | None] = os.getenv("COC_EMAIL")
 COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 TOURNAMENT_TABLE_NAME: Final[str | None] = os.getenv("TOURNAMENT_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
+REGISTRATION_CHANNEL_ID_RAW: Final[str | None] = os.getenv(
+    "TOURNAMENT_REGISTRATION_CHANNEL_ID"
+)
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
     "COC_EMAIL",
     "COC_PASSWORD",
     "TOURNAMENT_TABLE_NAME",
+    "TOURNAMENT_REGISTRATION_CHANNEL_ID",
 )
 
 # ---------- Logging ----------
@@ -61,6 +65,20 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("tournament-bot")
+
+if REGISTRATION_CHANNEL_ID_RAW:
+    try:
+        _registration_channel_id = int(REGISTRATION_CHANNEL_ID_RAW)
+    except ValueError:
+        log.warning(
+            "Invalid TOURNAMENT_REGISTRATION_CHANNEL_ID=%s; expected an integer",
+            REGISTRATION_CHANNEL_ID_RAW,
+        )
+        _registration_channel_id = None
+else:
+    _registration_channel_id = None
+
+TOURNAMENT_REGISTRATION_CHANNEL_ID: Final[int | None] = _registration_channel_id
 
 # ---------- Discord Setup ----------
 intents = discord.Intents.default()
@@ -247,6 +265,54 @@ def build_registration_embed(
         inline=True,
     )
     return embed
+
+
+async def post_registration_announcement(
+    guild: discord.Guild, embed: discord.Embed
+) -> str | None:
+    if TOURNAMENT_REGISTRATION_CHANNEL_ID is None:
+        log.warning("Registration channel ID not configured; skipping announcement")
+        return (
+            "Team registered, but the registration channel isn't configured. "
+            "Please contact an admin."
+        )
+
+    channel = guild.get_channel(TOURNAMENT_REGISTRATION_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(TOURNAMENT_REGISTRATION_CHANNEL_ID)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning(
+                "Failed to resolve registration channel %s: %s",
+                TOURNAMENT_REGISTRATION_CHANNEL_ID,
+                exc,
+            )
+            return (
+                "Team registered, but I couldn't reach the registration channel. "
+                "Please contact an admin."
+            )
+
+    if not isinstance(channel, Messageable):
+        log.warning(
+            "Registration channel %s is not messageable (type=%s)",
+            TOURNAMENT_REGISTRATION_CHANNEL_ID,
+            type(channel).__name__,
+        )
+        return (
+            "Team registered, but the registration channel cannot accept messages. "
+            "Please contact an admin."
+        )
+
+    try:
+        await channel.send(embed=embed)
+    except discord.HTTPException as exc:  # pragma: no cover - network failure
+        log.warning("Failed to send registration announcement: %s", exc)
+        return (
+            "Team registered, but I couldn't post the announcement. "
+            "Please contact an admin."
+        )
+
+    return None
 
 
 def bracket_summary(bracket: BracketState) -> str:
@@ -525,7 +591,7 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
         )
         return
 
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
 
     try:
         players = await fetch_players(tags)
@@ -570,14 +636,20 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
         closes_at=closes_at,
         is_update=existing_registration is not None,
     )
-    try:
-        await interaction.followup.send(embed=embed)
-    except discord.HTTPException as exc:  # pragma: no cover - network failure
-        log.warning("Failed to send registration embed: %s", exc)
-        await interaction.followup.send(
-            "Team registered, but I couldn't post the announcement.",
-            ephemeral=True,
+
+    announcement_error = await post_registration_announcement(guild, embed)
+    if announcement_error:
+        await interaction.followup.send(announcement_error, ephemeral=True)
+        return
+
+    confirmation = "Team registered!"
+    if TOURNAMENT_REGISTRATION_CHANNEL_ID is not None:
+        confirmation = (
+            "Team registered! Announcement posted in "
+            f"<#{TOURNAMENT_REGISTRATION_CHANNEL_ID}>."
         )
+
+    await interaction.followup.send(confirmation, ephemeral=True)
 
 
 @app_commands.default_permissions(administrator=True)
@@ -819,37 +891,23 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         )
         return
 
-    previous = (
-        storage.get_bracket(guild.id)
-        if storage_available and not use_seeded_registrations
-        else None
-    )
     bracket = create_bracket_state(guild.id, registrations)
-    if storage_available and not use_seeded_registrations:
-        storage.save_bracket(bracket)
     final_state, snapshots = simulate_tournament(bracket)
-    if storage_available and not use_seeded_registrations:
-        storage.save_bracket(final_state)
-
-    channel = interaction.channel
     messages_posted = 0
-    if isinstance(channel, Messageable):
-        for idx, (label, snapshot) in enumerate(snapshots, start=1):
-            embed = build_bracket_embed(
-                snapshot,
-                title=f"Simulation – {label}",
-                requested_by=interaction.user,
-                summary_note=f"Snapshot {idx} of {len(snapshots)}",
-                shrink_completed=True,
-            )
-            try:
-                await channel.send(embed=embed)
-                messages_posted += 1
-            except discord.HTTPException as exc:  # pragma: no cover - network failure
-                log.warning("Failed to send simulation snapshot: %s", exc)
-                break
-    else:
-        log.debug("Skipping simulation announcements; channel not messageable")
+    for idx, (label, snapshot) in enumerate(snapshots, start=1):
+        embed = build_bracket_embed(
+            snapshot,
+            title=f"Simulation – {label}",
+            requested_by=interaction.user,
+            summary_note=f"Snapshot {idx} of {len(snapshots)}",
+            shrink_completed=True,
+        )
+        try:
+            await interaction.followup.send(embed=embed)
+            messages_posted += 1
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning("Failed to send simulation snapshot: %s", exc)
+            break
 
     if messages_posted == 0:
         try:
@@ -870,12 +928,11 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         "Simulation complete.",
         f"Posted {messages_posted} snapshot(s).",
     ]
-    if not storage_available:
-        ack_message_parts.append("Storage disabled; results not persisted.")
     if use_seeded_registrations:
         ack_message_parts.append("Used seeded roster for simulation.")
-    if previous is not None:
-        ack_message_parts.append("Previous bracket state was replaced.")
+    if not storage_available:
+        ack_message_parts.append("Storage unavailable; results were not persisted.")
+
     if champion:
         ack_message_parts.append(f"Champion: {champion}.")
     await send_ephemeral(interaction, " ".join(ack_message_parts))

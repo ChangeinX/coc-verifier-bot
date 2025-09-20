@@ -24,7 +24,11 @@ variable "ddb_table_name" {
   default = "coc-verifications"
 }
 
-variable "bot_image" {}
+variable "bot_image" {
+  description = "Optional override for the verifier bot image tag"
+  type        = string
+  default     = null
+}
 variable "discord_token" {}
 variable "coc_email" {}
 variable "coc_password" {}
@@ -32,16 +36,57 @@ variable "clan_tag" {}
 variable "feeder_clan_tag" { default = "" }
 variable "verified_role_id" {}
 variable "admin_log_channel_id" { default = "" }
-variable "giveaway_bot_image" {}
+variable "giveaway_bot_image" {
+  description = "Optional override for the giveaway bot image tag"
+  type        = string
+  default     = null
+}
 variable "giveaway_discord_token" {}
 variable "giveaway_channel_id" {}
 variable "giveaway_table_name" { default = "coc-giveaways" }
 variable "giveaway_test" {}
 variable "subnets" { type = list(string) }
-variable "tournament_bot_image" {}
+variable "tournament_bot_image" {
+  description = "Optional override for the tournament bot image tag"
+  type        = string
+  default     = null
+}
 variable "tournament_discord_token" {}
 variable "tournament_table_name" { default = "coc-tournaments" }
+variable "tournament_registration_channel_id" { default = "" }
 variable "vpc_id" {}
+
+data "aws_ecs_task_definition" "bot_latest" {
+  count           = var.bot_image == null ? 1 : 0
+  task_definition = "coc-bot"
+}
+
+data "aws_ecs_task_definition" "giveaway_latest" {
+  count           = var.giveaway_bot_image == null ? 1 : 0
+  task_definition = "coc-giveaway-bot"
+}
+
+data "aws_ecs_task_definition" "tournament_latest" {
+  count           = var.tournament_bot_image == null ? 1 : 0
+  task_definition = "coc-tournament-bot"
+}
+
+locals {
+  bot_image_effective = var.bot_image != null ? var.bot_image : try(
+    jsondecode(data.aws_ecs_task_definition.bot_latest[0].container_definitions)[0].image,
+    null
+  )
+
+  giveaway_image_effective = var.giveaway_bot_image != null ? var.giveaway_bot_image : try(
+    jsondecode(data.aws_ecs_task_definition.giveaway_latest[0].container_definitions)[0].image,
+    null
+  )
+
+  tournament_image_effective = var.tournament_bot_image != null ? var.tournament_bot_image : try(
+    jsondecode(data.aws_ecs_task_definition.tournament_latest[0].container_definitions)[0].image,
+    null
+  )
+}
 
 resource "aws_cloudwatch_log_group" "bot" {
   name              = "/ecs/coc-verifier-bot"
@@ -212,7 +257,7 @@ resource "aws_ecs_task_definition" "bot" {
   container_definitions = jsonencode([
     {
       name      = "bot"
-      image     = var.bot_image
+      image     = local.bot_image_effective
       essential = true
       environment = [
         { name = "DISCORD_TOKEN", value = var.discord_token },
@@ -235,6 +280,13 @@ resource "aws_ecs_task_definition" "bot" {
       }
     }
   ])
+
+  lifecycle {
+    precondition {
+      condition     = local.bot_image_effective != null
+      error_message = "No verifier bot image is available; set var \"bot_image\" for the initial deployment or ensure a prior revision exists."
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "giveaway_bot" {
@@ -253,7 +305,7 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
   container_definitions = jsonencode([
     {
       name      = "giveaway"
-      image     = var.giveaway_bot_image
+      image     = local.giveaway_image_effective
       essential = true
       environment = [
         { name = "DISCORD_TOKEN", value = var.giveaway_discord_token },
@@ -278,6 +330,13 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
       }
     }
   ])
+
+  lifecycle {
+    precondition {
+      condition     = local.giveaway_image_effective != null
+      error_message = "No giveaway bot image is available; provide var \"giveaway_bot_image\" for the initial deployment or ensure a prior revision exists."
+    }
+  }
 }
 
 
@@ -297,13 +356,17 @@ resource "aws_ecs_task_definition" "tournament_bot" {
   container_definitions = jsonencode([
     {
       name      = "tournament"
-      image     = var.tournament_bot_image
+      image     = local.tournament_image_effective
       essential = true
       environment = [
         { name = "DISCORD_TOKEN", value = var.tournament_discord_token },
         { name = "COC_EMAIL", value = var.coc_email },
         { name = "COC_PASSWORD", value = var.coc_password },
         { name = "TOURNAMENT_TABLE_NAME", value = var.tournament_table_name },
+        {
+          name  = "TOURNAMENT_REGISTRATION_CHANNEL_ID"
+          value = var.tournament_registration_channel_id
+        },
         { name = "AWS_REGION", value = var.aws_region }
       ]
       logConfiguration = {
@@ -316,6 +379,13 @@ resource "aws_ecs_task_definition" "tournament_bot" {
       }
     }
   ])
+
+  lifecycle {
+    precondition {
+      condition     = local.tournament_image_effective != null
+      error_message = "No tournament bot image is available; set var \"tournament_bot_image\" for the initial deployment or ensure a prior revision exists."
+    }
+  }
 }
 
 

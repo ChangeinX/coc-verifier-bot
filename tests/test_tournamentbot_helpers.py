@@ -76,6 +76,8 @@ async def test_build_seeded_registrations_for_guild(monkeypatch):
         assert email == "email"
         assert password == "password"
         assert guild_id == 99
+        assert kwargs.get("shuffle") is True
+
         return ["registration"]
 
     monkeypatch.setattr(tournamentbot, "build_seeded_registrations", fake_build)
