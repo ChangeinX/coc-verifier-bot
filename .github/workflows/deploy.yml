@@ -57,22 +57,29 @@ jobs:
       - name: Determine build strategy
         id: strategy
         run: |
+          set -eo pipefail
+
+          BOT_CHANGED="${{ steps.changes.outputs.bot }}"
+          GIVEAWAY_CHANGED="${{ steps.changes.outputs.giveaway }}"
+          TOURNAMENT_CHANGED="${{ steps.changes.outputs.tournament }}"
+          INFRASTRUCTURE_CHANGED="${{ steps.changes.outputs.infrastructure }}"
+
           echo "🔍 Build Strategy Analysis:"
-          echo "Bot files changed: ${{ steps.changes.outputs.bot }}"
-          echo "Giveaway files changed: ${{ steps.changes.outputs.giveaway }}"
-          echo "Infrastructure changed: ${{ steps.changes.outputs.infrastructure }}"
-          
-          # Force rebuild all if infrastructure changed
-          if [[ "${{ steps.changes.outputs.infrastructure }}" == "true" ]]; then
-            echo "🏗️ Infrastructure changed - rebuilding all components"
-            echo "rebuild_bot=true" >> $GITHUB_OUTPUT
-            echo "rebuild_giveaway=true" >> $GITHUB_OUTPUT
-            echo "rebuild_tournament=true" >> $GITHUB_OUTPUT
-          else
-            echo "rebuild_bot=${{ steps.changes.outputs.bot }}" >> $GITHUB_OUTPUT
-            echo "rebuild_giveaway=${{ steps.changes.outputs.giveaway }}" >> $GITHUB_OUTPUT
-            echo "rebuild_tournament=${{ steps.changes.outputs.tournament }}" >> $GITHUB_OUTPUT
+          echo "Bot files changed: ${BOT_CHANGED:-false}"
+          echo "Giveaway files changed: ${GIVEAWAY_CHANGED:-false}"
+          echo "Tournament files changed: ${TOURNAMENT_CHANGED:-false}"
+          echo "Infrastructure changed: ${INFRASTRUCTURE_CHANGED:-false}"
+
+          if [[ "$INFRASTRUCTURE_CHANGED" == "true" ]]; then
+            echo "🏗️ Infrastructure changed - image publishing remains controlled here"
+            if [[ "$BOT_CHANGED" != "true" && "$GIVEAWAY_CHANGED" != "true" && "$TOURNAMENT_CHANGED" != "true" ]]; then
+              echo "ℹ️ Infrastructure-only change detected; skipping image rebuilds"
+            fi
           fi
+
+          echo "rebuild_bot=${BOT_CHANGED:-false}" >> $GITHUB_OUTPUT
+          echo "rebuild_giveaway=${GIVEAWAY_CHANGED:-false}" >> $GITHUB_OUTPUT
+          echo "rebuild_tournament=${TOURNAMENT_CHANGED:-false}" >> $GITHUB_OUTPUT
 
   build-deploy:
     name: Build & Deploy (${{ matrix.service }})
