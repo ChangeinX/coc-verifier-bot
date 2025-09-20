@@ -41,6 +41,7 @@ variable "subnets" { type = list(string) }
 variable "tournament_bot_image" {}
 variable "tournament_discord_token" {}
 variable "tournament_table_name" { default = "coc-tournaments" }
+variable "tournament_registration_channel_id" { default = "" }
 variable "vpc_id" {}
 
 resource "aws_cloudwatch_log_group" "bot" {
@@ -304,6 +305,10 @@ resource "aws_ecs_task_definition" "tournament_bot" {
         { name = "COC_EMAIL", value = var.coc_email },
         { name = "COC_PASSWORD", value = var.coc_password },
         { name = "TOURNAMENT_TABLE_NAME", value = var.tournament_table_name },
+        {
+          name  = "TOURNAMENT_REGISTRATION_CHANNEL_ID"
+          value = var.tournament_registration_channel_id
+        },
         { name = "AWS_REGION", value = var.aws_region }
       ]
       logConfiguration = {
