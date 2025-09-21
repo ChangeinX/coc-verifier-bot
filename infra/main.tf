@@ -76,10 +76,10 @@ data "aws_ecs_task_definition" "tournament_latest" {
   task_definition = "coc-tournament-bot"
 }
 
-data "aws_ecs_task_definition" "unified_latest" {
-  count           = var.unified_bot_image == null ? 1 : 0
-  task_definition = "coc-unified-bot"
-}
+# data "aws_ecs_task_definition" "unified_latest" {
+#   count           = var.unified_bot_image == null ? 1 : 0
+#   task_definition = "coc-unified-bot"
+# }
 
 locals {
   bot_image_effective = var.bot_image != null ? var.bot_image : try(
@@ -97,10 +97,7 @@ locals {
     null
   )
 
-  unified_image_effective = var.unified_bot_image != null ? var.unified_bot_image : try(
-    jsondecode(data.aws_ecs_task_definition.unified_latest[0].container_definitions)[0].image,
-    null
-  )
+  unified_image_effective = var.unified_bot_image != null ? var.unified_bot_image : local.bot_image_effective
 
   legacy_verifier_environment = {
     DISCORD_TOKEN        = var.discord_token
