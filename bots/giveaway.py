@@ -21,7 +21,9 @@ from bots.shadow import ShadowReporter
 from giveaway_fairness import select_fair_winners, update_giveaway_stats
 
 TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
-GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID"))
+GIVEAWAY_CHANNEL_ID: Final[int | None] = (
+    int(os.getenv("GIVEAWAY_CHANNEL_ID")) if os.getenv("GIVEAWAY_CHANNEL_ID") else None
+)
 GIVEAWAY_TABLE_NAME: Final[str | None] = os.getenv("GIVEAWAY_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
 TEST_MODE: Final[bool] = os.getenv("GIVEAWAY_TEST", "false").lower() in {
@@ -58,7 +60,7 @@ tree = app_commands.CommandTree(bot)
 _shadow_config = read_shadow_config(default_enabled=False)
 shadow_reporter = ShadowReporter(bot, _shadow_config)
 
-coc_client = coc.Client()
+coc_client = None
 
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 table = dynamodb.Table(GIVEAWAY_TABLE_NAME) if GIVEAWAY_TABLE_NAME else None
@@ -898,6 +900,8 @@ def configure_runtime(
 
     if coc_client_override is not None:
         coc_client = coc_client_override
+    elif coc_client is None:
+        coc_client = coc.Client()
 
     if test_mode is not None:
         TEST_MODE = test_mode

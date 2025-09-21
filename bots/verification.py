@@ -70,7 +70,7 @@ shadow_reporter = ShadowReporter(bot, _shadow_config)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 table = dynamodb.Table(DDB_TABLE_NAME) if DDB_TABLE_NAME else None
 
-coc_client = coc.Client()
+coc_client = None
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -704,6 +704,8 @@ def configure_runtime(
 
     if coc_client_override is not None:
         coc_client = coc_client_override
+    elif coc_client is None:
+        coc_client = coc.Client()
 
     if shadow_enabled is not None or shadow_channel_id is not None:
         _shadow_config = ShadowConfig(
