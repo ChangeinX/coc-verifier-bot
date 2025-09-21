@@ -51,6 +51,11 @@ variable "tournament_bot_image" {
   type        = string
   default     = null
 }
+variable "unified_bot_image" {
+  description = "Optional override for the unified bot image tag"
+  type        = string
+  default     = null
+}
 variable "tournament_discord_token" {}
 variable "tournament_table_name" { default = "coc-tournaments" }
 variable "tournament_registration_channel_id" { default = "" }
@@ -71,6 +76,11 @@ data "aws_ecs_task_definition" "tournament_latest" {
   task_definition = "coc-tournament-bot"
 }
 
+data "aws_ecs_task_definition" "unified_latest" {
+  count           = var.unified_bot_image == null ? 1 : 0
+  task_definition = "coc-unified-bot"
+}
+
 locals {
   bot_image_effective = var.bot_image != null ? var.bot_image : try(
     jsondecode(data.aws_ecs_task_definition.bot_latest[0].container_definitions)[0].image,
@@ -86,24 +96,67 @@ locals {
     jsondecode(data.aws_ecs_task_definition.tournament_latest[0].container_definitions)[0].image,
     null
   )
+
+  unified_image_effective = var.unified_bot_image != null ? var.unified_bot_image : try(
+    jsondecode(data.aws_ecs_task_definition.unified_latest[0].container_definitions)[0].image,
+    null
+  )
+
+  legacy_verifier_environment = {
+    DISCORD_TOKEN        = var.discord_token
+    COC_EMAIL            = var.coc_email
+    COC_PASSWORD         = var.coc_password
+    CLAN_TAG             = var.clan_tag
+    FEEDER_CLAN_TAG      = var.feeder_clan_tag
+    VERIFIED_ROLE_ID     = tostring(var.verified_role_id)
+    ADMIN_LOG_CHANNEL_ID = var.admin_log_channel_id
+    DDB_TABLE_NAME       = aws_dynamodb_table.verifications.name
+    AWS_REGION           = var.aws_region
+  }
+
+  legacy_giveaway_environment = {
+    DISCORD_TOKEN       = var.giveaway_discord_token
+    GIVEAWAY_CHANNEL_ID = var.giveaway_channel_id
+    GIVEAWAY_TABLE_NAME = var.giveaway_table_name
+    DDB_TABLE_NAME      = aws_dynamodb_table.verifications.name
+    COC_EMAIL           = var.coc_email
+    COC_PASSWORD        = var.coc_password
+    CLAN_TAG            = var.clan_tag
+    FEEDER_CLAN_TAG     = var.feeder_clan_tag
+    AWS_REGION          = var.aws_region
+    GIVEAWAY_TEST       = var.giveaway_test
+    USE_FAIRNESS_SYSTEM = "true"
+  }
+
+  legacy_tournament_environment = {
+    DISCORD_TOKEN                      = var.tournament_discord_token
+    COC_EMAIL                          = var.coc_email
+    COC_PASSWORD                       = var.coc_password
+    TOURNAMENT_TABLE_NAME              = var.tournament_table_name
+    TOURNAMENT_REGISTRATION_CHANNEL_ID = var.tournament_registration_channel_id
+    AWS_REGION                         = var.aws_region
+  }
+
+  unified_environment = {
+    DISCORD_TOKEN                      = var.discord_token
+    COC_EMAIL                          = var.coc_email
+    COC_PASSWORD                       = var.coc_password
+    CLAN_TAG                           = var.clan_tag
+    FEEDER_CLAN_TAG                    = var.feeder_clan_tag
+    VERIFIED_ROLE_ID                   = tostring(var.verified_role_id)
+    ADMIN_LOG_CHANNEL_ID               = var.admin_log_channel_id
+    DDB_TABLE_NAME                     = aws_dynamodb_table.verifications.name
+    AWS_REGION                         = var.aws_region
+    GIVEAWAY_CHANNEL_ID                = var.giveaway_channel_id
+    GIVEAWAY_TABLE_NAME                = var.giveaway_table_name
+    GIVEAWAY_TEST                      = var.giveaway_test
+    USE_FAIRNESS_SYSTEM                = "true"
+    TOURNAMENT_TABLE_NAME              = var.tournament_table_name
+    TOURNAMENT_REGISTRATION_CHANNEL_ID = var.tournament_registration_channel_id
+    SHADOW_MODE                        = "true"
+    SHADOW_CHANNEL_ID                  = coalesce(var.admin_log_channel_id, "")
+  }
 }
-
-resource "aws_cloudwatch_log_group" "bot" {
-  name              = "/ecs/coc-verifier-bot"
-  retention_in_days = 7
-}
-
-resource "aws_cloudwatch_log_group" "giveaway" {
-  name              = "/ecs/coc-giveaway-bot"
-  retention_in_days = 7
-}
-
-
-resource "aws_cloudwatch_log_group" "tournament" {
-  name              = "/ecs/coc-tournament-bot"
-  retention_in_days = 7
-}
-
 
 resource "aws_dynamodb_table" "verifications" {
   name         = var.ddb_table_name
@@ -200,9 +253,12 @@ data "aws_iam_policy_document" "task_extra" {
       "logs:PutLogEvents"
     ]
     resources = [
-      "${aws_cloudwatch_log_group.bot.arn}:*",
-      "${aws_cloudwatch_log_group.giveaway.arn}:*",
-      "${aws_cloudwatch_log_group.tournament.arn}:*"
+      for arn in [
+        module.legacy_verifier_service.log_group_arn,
+        module.legacy_giveaway_service.log_group_arn,
+        module.legacy_tournament_service.log_group_arn,
+        module.unified_bot_service.log_group_arn,
+      ] : "${arn}:*"
     ]
   }
 }
@@ -225,6 +281,10 @@ resource "aws_ecr_repository" "tournament" {
   name = "coc-tournament-bot"
 }
 
+resource "aws_ecr_repository" "unified" {
+  name = "coc-unified-bot"
+}
+
 resource "aws_ecs_cluster" "bot" {
   name = "coc-verifier-cluster"
 }
@@ -241,206 +301,68 @@ resource "aws_security_group" "bot" {
   }
 }
 
-resource "aws_ecs_task_definition" "bot" {
-  family                   = "coc-bot"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = "256"
-  memory                   = "512"
-  runtime_platform {
-    cpu_architecture        = "ARM64"
-    operating_system_family = "LINUX"
-  }
-  execution_role_arn = aws_iam_role.task.arn
+module "legacy_verifier_service" {
+  source = "./modules/bot_service"
+
+  name               = "coc-bot"
+  family             = "coc-bot"
+  cluster_arn        = aws_ecs_cluster.bot.arn
   task_role_arn      = aws_iam_role.task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "bot"
-      image     = local.bot_image_effective
-      essential = true
-      environment = [
-        { name = "DISCORD_TOKEN", value = var.discord_token },
-        { name = "COC_EMAIL", value = var.coc_email },
-        { name = "COC_PASSWORD", value = var.coc_password },
-        { name = "CLAN_TAG", value = var.clan_tag },
-        { name = "FEEDER_CLAN_TAG", value = var.feeder_clan_tag },
-        { name = "VERIFIED_ROLE_ID", value = var.verified_role_id },
-        { name = "ADMIN_LOG_CHANNEL_ID", value = var.admin_log_channel_id },
-        { name = "DDB_TABLE_NAME", value = aws_dynamodb_table.verifications.name },
-        { name = "AWS_REGION", value = var.aws_region }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.bot.name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "bot"
-        }
-      }
-    }
-  ])
-
-  lifecycle {
-    precondition {
-      condition     = local.bot_image_effective != null
-      error_message = "No verifier bot image is available; set var \"bot_image\" for the initial deployment or ensure a prior revision exists."
-    }
-  }
-}
-
-resource "aws_ecs_task_definition" "giveaway_bot" {
-  family                   = "coc-giveaway-bot"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = "256"
-  memory                   = "512"
-  runtime_platform {
-    cpu_architecture        = "ARM64"
-    operating_system_family = "LINUX"
-  }
   execution_role_arn = aws_iam_role.task.arn
-  task_role_arn      = aws_iam_role.task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "giveaway"
-      image     = local.giveaway_image_effective
-      essential = true
-      environment = [
-        { name = "DISCORD_TOKEN", value = var.giveaway_discord_token },
-        { name = "GIVEAWAY_CHANNEL_ID", value = var.giveaway_channel_id },
-        { name = "GIVEAWAY_TABLE_NAME", value = var.giveaway_table_name },
-        { name = "DDB_TABLE_NAME", value = aws_dynamodb_table.verifications.name },
-        { name = "COC_EMAIL", value = var.coc_email },
-        { name = "COC_PASSWORD", value = var.coc_password },
-        { name = "CLAN_TAG", value = var.clan_tag },
-        { name = "FEEDER_CLAN_TAG", value = var.feeder_clan_tag },
-        { name = "AWS_REGION", value = var.aws_region },
-        { name = "GIVEAWAY_TEST", value = var.giveaway_test },
-        { name = "USE_FAIRNESS_SYSTEM", value = "true" }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.giveaway.name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "giveaway"
-        }
-      }
-    }
-  ])
-
-  lifecycle {
-    precondition {
-      condition     = local.giveaway_image_effective != null
-      error_message = "No giveaway bot image is available; provide var \"giveaway_bot_image\" for the initial deployment or ensure a prior revision exists."
-    }
-  }
+  security_group_ids = [aws_security_group.bot.id]
+  subnet_ids         = var.subnets
+  container_image    = local.bot_image_effective
+  environment        = local.legacy_verifier_environment
+  log_group_name     = "/ecs/coc-verifier-bot"
+  log_region         = var.aws_region
 }
 
+module "legacy_giveaway_service" {
+  source = "./modules/bot_service"
 
-resource "aws_ecs_task_definition" "tournament_bot" {
-  family                   = "coc-tournament-bot"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = "256"
-  memory                   = "512"
-  runtime_platform {
-    cpu_architecture        = "ARM64"
-    operating_system_family = "LINUX"
-  }
+  name               = "coc-giveaway-bot"
+  family             = "coc-giveaway-bot"
+  cluster_arn        = aws_ecs_cluster.bot.arn
+  task_role_arn      = aws_iam_role.task.arn
   execution_role_arn = aws_iam_role.task.arn
+  security_group_ids = [aws_security_group.bot.id]
+  subnet_ids         = var.subnets
+  container_image    = local.giveaway_image_effective
+  environment        = local.legacy_giveaway_environment
+  log_group_name     = "/ecs/coc-giveaway-bot"
+  log_region         = var.aws_region
+}
+
+module "legacy_tournament_service" {
+  source = "./modules/bot_service"
+
+  name               = "coc-tournament-bot"
+  family             = "coc-tournament-bot"
+  cluster_arn        = aws_ecs_cluster.bot.arn
   task_role_arn      = aws_iam_role.task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "tournament"
-      image     = local.tournament_image_effective
-      essential = true
-      environment = [
-        { name = "DISCORD_TOKEN", value = var.tournament_discord_token },
-        { name = "COC_EMAIL", value = var.coc_email },
-        { name = "COC_PASSWORD", value = var.coc_password },
-        { name = "TOURNAMENT_TABLE_NAME", value = var.tournament_table_name },
-        {
-          name  = "TOURNAMENT_REGISTRATION_CHANNEL_ID"
-          value = var.tournament_registration_channel_id
-        },
-        { name = "AWS_REGION", value = var.aws_region }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.tournament.name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "tournament"
-        }
-      }
-    }
-  ])
-
-  lifecycle {
-    precondition {
-      condition     = local.tournament_image_effective != null
-      error_message = "No tournament bot image is available; set var \"tournament_bot_image\" for the initial deployment or ensure a prior revision exists."
-    }
-  }
+  execution_role_arn = aws_iam_role.task.arn
+  security_group_ids = [aws_security_group.bot.id]
+  subnet_ids         = var.subnets
+  container_image    = local.tournament_image_effective
+  environment        = local.legacy_tournament_environment
+  log_group_name     = "/ecs/coc-tournament-bot"
+  log_region         = var.aws_region
 }
 
+module "unified_bot_service" {
+  source = "./modules/bot_service"
 
-resource "aws_ecs_service" "bot" {
-  name            = "coc-bot"
-  cluster         = aws_ecs_cluster.bot.id
-  task_definition = aws_ecs_task_definition.bot.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = var.subnets
-    security_groups  = [aws_security_group.bot.id]
-    assign_public_ip = true
-  }
-
-  lifecycle {
-    ignore_changes = [task_definition]
-  }
-}
-
-resource "aws_ecs_service" "giveaway_bot" {
-  name            = "coc-giveaway-bot"
-  cluster         = aws_ecs_cluster.bot.id
-  task_definition = aws_ecs_task_definition.giveaway_bot.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = var.subnets
-    security_groups  = [aws_security_group.bot.id]
-    assign_public_ip = true
-  }
-
-  lifecycle {
-    ignore_changes = [task_definition]
-  }
-}
-
-resource "aws_ecs_service" "tournament_bot" {
-  name            = "coc-tournament-bot"
-  cluster         = aws_ecs_cluster.bot.id
-  task_definition = aws_ecs_task_definition.tournament_bot.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = var.subnets
-    security_groups  = [aws_security_group.bot.id]
-    assign_public_ip = true
-  }
-
-  lifecycle {
-    ignore_changes = [task_definition]
-  }
+  name               = "coc-unified-bot"
+  family             = "coc-unified-bot"
+  cluster_arn        = aws_ecs_cluster.bot.arn
+  task_role_arn      = aws_iam_role.task.arn
+  execution_role_arn = aws_iam_role.task.arn
+  security_group_ids = [aws_security_group.bot.id]
+  subnet_ids         = var.subnets
+  container_image    = local.unified_image_effective
+  environment        = local.unified_environment
+  log_group_name     = "/ecs/coc-unified-bot"
+  log_region         = var.aws_region
 }
 
 resource "random_id" "white_devel_cup_suffix" {
