@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Sequence
 
 import boto3
 import coc
 import discord
 from discord import app_commands
 
+from bots import giveaway, tournament, verification
 from bots.config import read_shadow_config
 from bots.shadow import ShadowReporter
-from bots import verification, giveaway, tournament
 
 log = logging.getLogger("coc-unified")
 
@@ -37,7 +35,7 @@ class EnvironmentConfig:
     verification_table_name: str
 
     @classmethod
-    def load(cls) -> "EnvironmentConfig":
+    def load(cls) -> EnvironmentConfig:
         missing: list[str] = []
 
         def need(name: str) -> str:
@@ -62,7 +60,11 @@ class EnvironmentConfig:
 
         feeder_clan_tag = os.getenv("FEEDER_CLAN_TAG") or None
         admin_log_channel_id = os.getenv("ADMIN_LOG_CHANNEL_ID") or None
-        giveaway_test_mode = os.getenv("GIVEAWAY_TEST", "false").lower() in {"1", "true", "yes"}
+        giveaway_test_mode = os.getenv("GIVEAWAY_TEST", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         tournament_registration_channel_id = (
             os.getenv("TOURNAMENT_REGISTRATION_CHANNEL_ID") or None
         )
@@ -95,14 +97,16 @@ class UnifiedRuntime:
         self.tree = app_commands.CommandTree(self.bot)
         self.shadow_config = read_shadow_config(default_enabled=True)
         self.shadow_reporter = ShadowReporter(self.bot, self.shadow_config)
-        self.dynamodb = boto3.resource("dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1"))
+        self.dynamodb = boto3.resource(
+            "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-1")
+        )
         self.coc_client: coc.Client | None = None
 
     def configure_features(self) -> None:
-        shadow_kwargs = dict(
-            shadow_enabled=self.shadow_config.enabled,
-            shadow_channel_id=self.shadow_config.channel_id,
-        )
+        shadow_kwargs = {
+            "shadow_enabled": self.shadow_config.enabled,
+            "shadow_channel_id": self.shadow_config.channel_id,
+        }
 
         verification.configure_runtime(
             client=self.bot,
@@ -153,7 +157,7 @@ class UnifiedRuntime:
             await self.bot.start(self.config.discord_token)
 
     @classmethod
-    def create(cls) -> "UnifiedRuntime":
+    def create(cls) -> UnifiedRuntime:
         config = EnvironmentConfig.load()
         runtime = cls(config)
         return runtime

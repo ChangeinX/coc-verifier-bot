@@ -908,10 +908,10 @@ def configure_runtime(
 
     if shadow_enabled is not None or shadow_channel_id is not None:
         _shadow_config = ShadowConfig(
-            enabled=
-            shadow_enabled if shadow_enabled is not None else _shadow_config.enabled,
-            channel_id=
-            shadow_channel_id
+            enabled=shadow_enabled
+            if shadow_enabled is not None
+            else _shadow_config.enabled,
+            channel_id=shadow_channel_id
             if shadow_channel_id is not None
             else _shadow_config.channel_id,
         )

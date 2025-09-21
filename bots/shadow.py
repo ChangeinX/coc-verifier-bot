@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from collections.abc import Iterable
 
 import discord
 
@@ -47,8 +47,12 @@ class ShadowReporter:
         if channel is None:
             try:
                 channel = await self._bot.fetch_channel(self.channel_id)
-            except discord.DiscordException as exc:  # pragma: no cover - network failure
-                log.warning("Unable to fetch shadow channel %s: %s", self.channel_id, exc)
+            except (
+                discord.DiscordException
+            ) as exc:  # pragma: no cover - network failure
+                log.warning(
+                    "Unable to fetch shadow channel %s: %s", self.channel_id, exc
+                )
                 channel = None
 
         if not isinstance(channel, discord.abc.Messageable):

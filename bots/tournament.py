@@ -18,7 +18,6 @@ from discord.app_commands import errors as app_errors
 
 from bots.config import ShadowConfig, read_shadow_config
 from bots.shadow import ShadowReporter
-
 from tournament_bot import (
     BracketState,
     InvalidTownHallError,
@@ -285,7 +284,9 @@ async def post_registration_announcement(
     guild: discord.Guild, embed: discord.Embed
 ) -> str | None:
     if shadow_reporter.enabled:
-        await shadow_reporter.report(guild, "[tournament] registration announcement", embeds=[embed])
+        await shadow_reporter.report(
+            guild, "[tournament] registration announcement", embeds=[embed]
+        )
         return None
 
     if TOURNAMENT_REGISTRATION_CHANNEL_ID is None:
@@ -751,7 +752,9 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
             interaction,
             "Bracket creation logged in shadow mode.",
         )
-        await shadow_reporter.report(guild, "[tournament] simulated bracket", embeds=[embed])
+        await shadow_reporter.report(
+            guild, "[tournament] simulated bracket", embeds=[embed]
+        )
         return
     storage.save_bracket(bracket)
 
@@ -986,7 +989,9 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
             interaction,
             "Tournament simulation executed in shadow mode.",
         )
-        await shadow_reporter.report(guild, "[tournament] simulated tournament", embeds=[embed])
+        await shadow_reporter.report(
+            guild, "[tournament] simulated tournament", embeds=[embed]
+        )
         return
 
     final_state, snapshots = simulate_tournament(bracket)
@@ -1139,10 +1144,10 @@ def configure_runtime(
 
     if shadow_enabled is not None or shadow_channel_id is not None:
         _shadow_config = ShadowConfig(
-            enabled=
-            shadow_enabled if shadow_enabled is not None else _shadow_config.enabled,
-            channel_id=
-            shadow_channel_id
+            enabled=shadow_enabled
+            if shadow_enabled is not None
+            else _shadow_config.enabled,
+            channel_id=shadow_channel_id
             if shadow_channel_id is not None
             else _shadow_config.channel_id,
         )

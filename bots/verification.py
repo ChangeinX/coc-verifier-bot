@@ -380,10 +380,10 @@ async def verify(interaction: discord.Interaction, player_tag: str) -> None:
             description=f"{interaction.user.mention} would be verified.",
             color=discord.Color.orange(),
         )
-        embed.add_field(name="Player Tag", value=normalized_tag, inline=True)
+        embed.add_field(name="Player Tag", value=player_tag, inline=True)
         embed.add_field(name="Clan", value=player_clan_tag, inline=True)
         await shadow_reporter.report(
-            guild,
+            interaction.guild,
             "[verify] simulated verification",
             embeds=[embed],
         )
@@ -709,10 +709,10 @@ def configure_runtime(
 
     if shadow_enabled is not None or shadow_channel_id is not None:
         _shadow_config = ShadowConfig(
-            enabled=
-            shadow_enabled if shadow_enabled is not None else _shadow_config.enabled,
-            channel_id=
-            shadow_channel_id
+            enabled=shadow_enabled
+            if shadow_enabled is not None
+            else _shadow_config.enabled,
+            channel_id=shadow_channel_id
             if shadow_channel_id is not None
             else _shadow_config.channel_id,
         )
