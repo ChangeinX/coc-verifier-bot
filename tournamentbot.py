@@ -52,6 +52,7 @@ REGISTRATION_CHANNEL_ID_RAW: Final[str | None] = os.getenv(
     "TOURNAMENT_REGISTRATION_CHANNEL_ID"
 )
 TOURNAMENT_ADMIN_ROLE_ID: Final[int] = 1_400_887_994_445_205_707
+GUILD_ID_RAW: Final[str | None] = os.getenv("TOURNAMENT_GUILD_ID")
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
@@ -81,6 +82,20 @@ else:
     _registration_channel_id = None
 
 TOURNAMENT_REGISTRATION_CHANNEL_ID: Final[int | None] = _registration_channel_id
+
+if GUILD_ID_RAW:
+    try:
+        _guild_id = int(GUILD_ID_RAW)
+    except ValueError:
+        log.warning(
+            "Invalid TOURNAMENT_GUILD_ID=%s; expected an integer",
+            GUILD_ID_RAW,
+        )
+        _guild_id = None
+else:
+    _guild_id = None
+
+TOURNAMENT_GUILD_ID: Final[int | None] = _guild_id
 
 # ---------- Discord Setup ----------
 intents = discord.Intents.default()
@@ -1340,7 +1355,13 @@ async def simulate_tourney_error_handler(  # pragma: no cover - Discord wiring
 # ---------- Lifecycle ----------
 @bot.event
 async def on_ready() -> None:  # pragma: no cover - Discord lifecycle hook
-    await tree.sync()
+    if TOURNAMENT_GUILD_ID is not None:
+        guild = discord.Object(id=TOURNAMENT_GUILD_ID)
+        await tree.sync(guild=guild)
+        log.info("Commands synced to guild %s", TOURNAMENT_GUILD_ID)
+    else:
+        await tree.sync()
+        log.info("Commands synced globally")
     log.info("Signing in to CoC API for tournament bot...")
     global coc_client
     if coc_client is None:

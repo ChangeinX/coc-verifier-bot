@@ -54,6 +54,7 @@ variable "tournament_bot_image" {
 variable "tournament_discord_token" {}
 variable "tournament_table_name" { default = "coc-tournaments" }
 variable "tournament_registration_channel_id" { default = "" }
+variable "tournament_guild_id" { default = "" }
 variable "vpc_id" {}
 
 data "aws_ecs_task_definition" "bot_latest" {
@@ -367,6 +368,7 @@ resource "aws_ecs_task_definition" "tournament_bot" {
           name  = "TOURNAMENT_REGISTRATION_CHANNEL_ID"
           value = var.tournament_registration_channel_id
         },
+        { name = "TOURNAMENT_GUILD_ID", value = var.tournament_guild_id },
         { name = "AWS_REGION", value = var.aws_region }
       ]
       logConfiguration = {
