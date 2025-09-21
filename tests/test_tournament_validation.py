@@ -13,6 +13,7 @@ from tournament_bot import (
     utc_now_iso,
     validate_max_teams,
     validate_registration_window,
+    validate_team_name,
     validate_team_size,
 )
 
@@ -115,12 +116,16 @@ def test_models_round_trip():
             PlayerEntry(name="PlayerTwo", tag="#BBB222", town_hall=17),
         ],
         registered_at=utc_now_iso(),
+        team_name="Legends",
+        substitute=PlayerEntry(name="PlayerSub", tag="#SUB999", town_hall=16),
     )
     item = registration.to_item()
     restored = TeamRegistration.from_item(item)
     assert restored.guild_id == registration.guild_id
     assert restored.user_id == registration.user_id
     assert [p.tag for p in restored.players] == ["#AAA111", "#BBB222"]
+    assert restored.team_name == "Legends"
+    assert restored.substitute and restored.substitute.tag == "#SUB999"
     assert registration.lines_for_channel[0].startswith("PlayerOne (TH16)")
 
 
@@ -138,3 +143,13 @@ def test_validate_registration_window_enforces_order():
     assert validated_opens < validated_closes
     with pytest.raises(InvalidValueError):
         validate_registration_window(closes, opens)
+
+
+def test_validate_team_name_enforces_length_and_trims():
+    assert validate_team_name("  The Mighty Heroes  ") == "The Mighty Heroes"
+
+    with pytest.raises(InvalidValueError):
+        validate_team_name("hi")
+
+    with pytest.raises(InvalidValueError):
+        validate_team_name("x" * 101)
