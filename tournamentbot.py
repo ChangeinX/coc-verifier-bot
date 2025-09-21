@@ -30,6 +30,7 @@ from tournament_bot import (
     utc_now_iso,
     validate_max_teams,
     validate_registration_window,
+    validate_team_name,
     validate_team_size,
 )
 from tournament_bot.bracket import (
@@ -50,6 +51,7 @@ AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
 REGISTRATION_CHANNEL_ID_RAW: Final[str | None] = os.getenv(
     "TOURNAMENT_REGISTRATION_CHANNEL_ID"
 )
+TOURNAMENT_ADMIN_ROLE_ID: Final[int] = 1_400_887_994_445_205_707
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
@@ -195,7 +197,9 @@ def build_setup_embed(
     return embed
 
 
-def format_lineup_table(players: list[PlayerEntry]) -> str:
+def format_lineup_table(
+    players: list[PlayerEntry], *, substitute: PlayerEntry | None = None
+) -> str:
     headers = ("Player", "TH", "Player Tag", "Clan")
     rows: list[tuple[str, str, str, str]] = []
     for player in players:
@@ -210,6 +214,22 @@ def format_lineup_table(players: list[PlayerEntry]) -> str:
                 player.name,
                 f"TH{player.town_hall}",
                 player.tag,
+                clan_value,
+            )
+        )
+
+    if substitute is not None:
+        clan_parts: list[str] = []
+        if substitute.clan_name:
+            clan_parts.append(substitute.clan_name)
+        if substitute.clan_tag:
+            clan_parts.append(substitute.clan_tag)
+        clan_value = " ".join(clan_parts) if clan_parts else "-"
+        rows.append(
+            (
+                f"{substitute.name} (Sub)",
+                f"TH{substitute.town_hall}",
+                substitute.tag,
                 clan_value,
             )
         )
@@ -231,6 +251,37 @@ def format_lineup_table(players: list[PlayerEntry]) -> str:
     return "\n".join(lines)
 
 
+def is_tournament_admin(member: discord.abc.User) -> bool:
+    roles = getattr(member, "roles", None)
+    if not roles:
+        return False
+    for role in roles:
+        if getattr(role, "id", None) == TOURNAMENT_ADMIN_ROLE_ID:
+            return True
+    return False
+
+
+def resolve_registration_owner(
+    interaction: discord.Interaction,
+    captain: discord.Member | None,
+) -> tuple[discord.Member, bool]:
+    actor = interaction.user
+    actor_id = getattr(actor, "id", None)
+    if actor_id is None:
+        raise RuntimeError("This command can only be used within a server")
+
+    if captain is None or getattr(captain, "id", None) == actor_id:
+        return actor, False
+
+    if not is_tournament_admin(actor):
+        raise PermissionError("Only tournament admins can manage other teams")
+
+    if getattr(captain, "id", None) is None:
+        raise RuntimeError("Unable to identify the selected captain")
+
+    return captain, True
+
+
 def build_registration_embed(
     registration: TeamRegistration,
     *,
@@ -238,30 +289,38 @@ def build_registration_embed(
     closes_at: datetime,
     is_update: bool,
 ) -> discord.Embed:
+    team_title = registration.team_name or "Unnamed Team"
+    verb = "updated" if is_update else "registered"
     embed = discord.Embed(
-        title="Team registration updated!" if is_update else "Team registered!",
+        title=f"Team {verb}: {team_title}",
         description=f"Captain: {registration.user_name}",
         color=discord.Color.green(),
         timestamp=datetime.now(UTC),
     )
-    players_table = format_lineup_table(registration.players)
+    players_table = format_lineup_table(
+        registration.players, substitute=registration.substitute
+    )
     embed.add_field(
         name="Lineup",
         value=f"```\n{players_table}\n```",
         inline=False,
     )
     embed.set_footer(text=f"Teams lock {format_display(closes_at)}")
+    starters = len(registration.players)
+    substitute_text = ""
+    if registration.substitute is not None:
+        substitute_text = " + 1 sub"
     embed.add_field(
         name="Team Size",
-        value=f"{len(registration.players)}/{config.team_size}",
+        value=f"{starters} starters{substitute_text}",
         inline=True,
     )
+    town_halls = {f"TH{player.town_hall}" for player in registration.players}
+    if registration.substitute is not None:
+        town_halls.add(f"TH{registration.substitute.town_hall}")
     embed.add_field(
         name="Town Halls",
-        value=", ".join(
-            sorted({f"TH{player.town_hall}" for player in registration.players})
-        )
-        or "-",
+        value=", ".join(sorted(town_halls)) or "-",
         inline=True,
     )
     return embed
@@ -519,11 +578,12 @@ async def setup_error_handler(  # pragma: no cover - Discord slash command wirin
 
 
 @app_commands.describe(
+    team_name="Team name to display on the bracket and announcements",
     player_tags="Provide player tags separated by spaces or commas (e.g. #ABCD123 #EFGH456)",
 )
 @tree.command(name="registerteam", description="Register a team for the tournament")
 async def register_team_command(  # pragma: no cover - Discord slash command wiring
-    interaction: discord.Interaction, player_tags: str
+    interaction: discord.Interaction, team_name: str, player_tags: str
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -570,14 +630,27 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
         return
 
     try:
+        name = validate_team_name(team_name)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
         tags = parse_player_tags(player_tags)
     except InvalidValueError as exc:
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    if len(tags) != config.team_size:
+    required = config.team_size
+    if len(tags) < required:
         await interaction.response.send_message(
-            f"Exactly {config.team_size} player tags are required for registration.",
+            f"At least {required} player tags are required for registration.",
+            ephemeral=True,
+        )
+        return
+    if len(tags) > required + 1:
+        await interaction.response.send_message(
+            f"You can provide at most {required + 1} player tags including the optional sub.",
             ephemeral=True,
         )
         return
@@ -621,12 +694,17 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
         )
         return
 
+    starters = players[:required]
+    substitute = players[required] if len(players) > required else None
+
     registration = TeamRegistration(
         guild_id=guild.id,
         user_id=interaction.user.id,
         user_name=str(interaction.user),
-        players=players,
+        players=starters,
         registered_at=utc_now_iso(),
+        team_name=name,
+        substitute=substitute,
     )
     storage.save_registration(registration)
 
@@ -650,6 +728,310 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
         )
 
     await interaction.followup.send(confirmation, ephemeral=True)
+
+
+@app_commands.describe(
+    team_name="Team name to store",
+    captain="Team captain to update (admins only)",
+)
+@tree.command(name="teamname", description="Update or add a team name")
+async def team_name_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    team_name: str,
+    captain: discord.Member | None = None,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        name = validate_team_name(team_name)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        owner, acting_for_other = resolve_registration_owner(interaction, captain)
+    except PermissionError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    registration = storage.get_registration(guild.id, owner.id)
+    if registration is None:
+        await interaction.response.send_message(
+            "No registration found for that captain.", ephemeral=True
+        )
+        return
+
+    config = storage.get_config(guild.id)
+    if config is None:
+        await interaction.response.send_message(
+            "Tournament has not been configured yet. Please ask an admin to run /setup.",
+            ephemeral=True,
+        )
+        return
+
+    if registration.team_name == name:
+        await interaction.response.send_message(
+            "Team name is already set to that value.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    updated = TeamRegistration(
+        guild_id=registration.guild_id,
+        user_id=registration.user_id,
+        user_name=registration.user_name,
+        players=list(registration.players),
+        registered_at=registration.registered_at,
+        team_name=name,
+        substitute=registration.substitute,
+    )
+    storage.save_registration(updated)
+
+    try:
+        _, closes_at = config.registration_window()
+    except ValueError:
+        closes_at = datetime.now(UTC)
+
+    embed = build_registration_embed(
+        updated,
+        config=config,
+        closes_at=closes_at,
+        is_update=True,
+    )
+    announcement_error = await post_registration_announcement(guild, embed)
+
+    ack_message = (
+        "Team name updated."
+        if not acting_for_other
+        else "Team name updated for the selected captain."
+    )
+    await interaction.followup.send(ack_message, ephemeral=True)
+
+    if announcement_error:
+        await interaction.followup.send(announcement_error, ephemeral=True)
+
+
+@app_commands.describe(
+    player_tag="Player tag for the substitute",
+    captain="Team captain to update (admins only)",
+)
+@tree.command(name="registersub", description="Add or replace a team substitute")
+async def register_sub_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    player_tag: str,
+    captain: discord.Member | None = None,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    config = storage.get_config(guild.id)
+    if config is None:
+        await interaction.response.send_message(
+            "Tournament has not been configured yet. Please ask an admin to run /setup.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        owner, acting_for_other = resolve_registration_owner(interaction, captain)
+    except PermissionError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    registration = storage.get_registration(guild.id, owner.id)
+    if registration is None:
+        await interaction.response.send_message(
+            "No registration found for that captain.", ephemeral=True
+        )
+        return
+
+    required = config.team_size
+    if len(registration.players) < required:
+        await interaction.response.send_message(
+            f"Team must have at least {required} registered players before adding a sub.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        opens_at, closes_at = config.registration_window()
+    except ValueError:
+        await interaction.response.send_message(
+            "Tournament registration window is missing. Please ping an admin to re-run /setup.",
+            ephemeral=True,
+        )
+        return
+
+    now = datetime.now(UTC)
+    if now < opens_at:
+        await interaction.response.send_message(
+            f"Registration hasn't opened yet. Come back {format_display(opens_at)}.",
+            ephemeral=True,
+        )
+        return
+    if now >= closes_at:
+        await interaction.response.send_message(
+            f"Registration closed {format_display(closes_at)}. Teams are locked—please contact an admin for help.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        tags = parse_player_tags(player_tag)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    if len(tags) != 1:
+        await interaction.response.send_message(
+            "Provide exactly one player tag for the substitute.",
+            ephemeral=True,
+        )
+        return
+
+    sub_tag = tags[0]
+    existing_tags = {player.tag for player in registration.players}
+    if registration.substitute is not None:
+        existing_tags.add(registration.substitute.tag)
+    if sub_tag in existing_tags:
+        await interaction.response.send_message(
+            "That player is already on the team.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        player = (await fetch_players([sub_tag]))[0]
+    except InvalidValueError as exc:
+        await interaction.followup.send(str(exc), ephemeral=True)
+        return
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Unexpected error fetching player data: %s", exc)
+        await interaction.followup.send(
+            "Failed to validate player tag against the Clash of Clans API.",
+            ephemeral=True,
+        )
+        return
+
+    if player.town_hall not in config.allowed_town_halls:
+        await interaction.followup.send(
+            f"This player has an unsupported Town Hall level: TH{player.town_hall}",
+            ephemeral=True,
+        )
+        return
+
+    updated = TeamRegistration(
+        guild_id=registration.guild_id,
+        user_id=registration.user_id,
+        user_name=registration.user_name,
+        players=list(registration.players),
+        registered_at=registration.registered_at,
+        team_name=registration.team_name,
+        substitute=player,
+    )
+    storage.save_registration(updated)
+
+    embed = build_registration_embed(
+        updated,
+        config=config,
+        closes_at=closes_at,
+        is_update=True,
+    )
+    announcement_error = await post_registration_announcement(guild, embed)
+
+    ack_message = (
+        "Substitute registered!"
+        if not acting_for_other
+        else "Substitute registered for the selected captain!"
+    )
+    await interaction.followup.send(ack_message, ephemeral=True)
+    if announcement_error:
+        await interaction.followup.send(announcement_error, ephemeral=True)
+
+
+@tree.command(name="showregistered", description="View registered teams")
+async def show_registered_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    registrations = storage.list_registrations(guild.id)
+    if not registrations:
+        await interaction.response.send_message(
+            "No teams have registered yet.", ephemeral=True
+        )
+        return
+
+    lines: list[str] = []
+    for idx, registration in enumerate(registrations, start=1):
+        team_name = registration.team_name or "Unnamed Team"
+        starters = len(registration.players)
+        sub_text = " + sub" if registration.substitute is not None else ""
+        lines.append(
+            f"{idx}. {team_name} — Captain: {registration.user_name} "
+            f"({starters} starters{sub_text})"
+        )
+
+    max_length = 1800
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    length = 0
+    for line in lines:
+        line_length = len(line) + (0 if not current else 1)
+        if current and length + line_length > max_length:
+            chunks.append(current)
+            current = [line]
+            length = len(line)
+        else:
+            current.append(line)
+            length += line_length
+    if current:
+        chunks.append(current)
+
+    header = "Registered teams:\n"
+    first_message = header + "\n".join(chunks[0])
+    await interaction.response.send_message(first_message, ephemeral=True)
+
+    for chunk in chunks[1:]:
+        await interaction.followup.send("\n".join(chunk), ephemeral=True)
 
 
 @app_commands.default_permissions(administrator=True)

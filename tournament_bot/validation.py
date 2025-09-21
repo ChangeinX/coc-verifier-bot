@@ -88,6 +88,15 @@ def validate_max_teams(max_teams: int) -> int:
     return max_teams
 
 
+def validate_team_name(raw: str) -> str:
+    name = raw.strip()
+    if len(name) < 3:
+        raise InvalidValueError("Team name must be at least 3 characters long")
+    if len(name) > 100:
+        raise InvalidValueError("Team name must be 100 characters or fewer")
+    return name
+
+
 def parse_registration_datetime(raw: str) -> datetime:
     value = raw.strip()
     if not value:
@@ -129,4 +138,5 @@ __all__ = [
     "validate_max_teams",
     "parse_registration_datetime",
     "validate_registration_window",
+    "validate_team_name",
 ]

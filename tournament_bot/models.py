@@ -114,6 +114,8 @@ class TeamRegistration:
     user_name: str
     players: list[PlayerEntry]
     registered_at: str
+    team_name: str | None = None
+    substitute: PlayerEntry | None = None
 
     PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
     SK_TEMPLATE: ClassVar[str] = "TEAM#%s"
@@ -135,6 +137,10 @@ class TeamRegistration:
                 "players": [player.to_dict() for player in self.players],
             }
         )
+        if self.team_name is not None:
+            item["team_name"] = self.team_name
+        if self.substitute is not None:
+            item["substitute"] = self.substitute.to_dict()
         return item
 
     @classmethod
@@ -143,12 +149,21 @@ class TeamRegistration:
         user_id = int(str(item.get("user_id") or str(item["sk"]).split("#", 1)[1]))
         players_data: Iterable[dict[str, object]] = item.get("players", [])  # type: ignore[assignment]
         players = [PlayerEntry.from_dict(data) for data in players_data]
+        team_name_value = item.get("team_name")
+        substitute_data = item.get("substitute")
+        substitute = (
+            PlayerEntry.from_dict(substitute_data)  # type: ignore[arg-type]
+            if isinstance(substitute_data, dict)
+            else None
+        )
         return cls(
             guild_id=guild_id,
             user_id=user_id,
             user_name=str(item.get("user_name", "")),
             players=players,
             registered_at=str(item.get("registered_at", "")),
+            team_name=str(team_name_value) if team_name_value is not None else None,
+            substitute=substitute,
         )
 
     @property
@@ -164,6 +179,18 @@ class TeamRegistration:
             lines.append(
                 f"{player.name} (TH{player.town_hall})\n"
                 f"  - Player Tag: {player.tag}\n"
+                f"  - Clan: {clan_display}"
+            )
+        if self.substitute is not None:
+            clan_parts: list[str] = []
+            if self.substitute.clan_name:
+                clan_parts.append(self.substitute.clan_name)
+            if self.substitute.clan_tag:
+                clan_parts.append(self.substitute.clan_tag)
+            clan_display = " ".join(clan_parts) if clan_parts else "No clan"
+            lines.append(
+                f"{self.substitute.name} (TH{self.substitute.town_hall}) [Sub]\n"
+                f"  - Player Tag: {self.substitute.tag}\n"
                 f"  - Clan: {clan_display}"
             )
         return lines

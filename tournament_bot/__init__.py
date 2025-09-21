@@ -20,6 +20,7 @@ from .validation import (
     parse_town_hall_levels,
     validate_max_teams,
     validate_registration_window,
+    validate_team_name,
     validate_team_size,
 )
 
@@ -41,5 +42,6 @@ __all__ = [
     "parse_town_hall_levels",
     "validate_max_teams",
     "validate_registration_window",
+    "validate_team_name",
     "validate_team_size",
 ]
