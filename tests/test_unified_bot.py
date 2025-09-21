@@ -1,8 +1,9 @@
 """Tests for the unified bot module."""
 
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 
 from bots.unified import EnvironmentConfig, UnifiedRuntime, main
 
@@ -146,8 +147,14 @@ class TestUnifiedRuntime:
     @patch("bots.unified.tournament.configure_runtime")
     @patch("bots.unified.boto3.resource")
     @patch("bots.unified.read_shadow_config")
-    def test_configure_features(self, mock_read_shadow_config, mock_boto3_resource,
-                              mock_tournament_config, mock_giveaway_config, mock_verification_config):
+    def test_configure_features(
+        self,
+        mock_read_shadow_config,
+        mock_boto3_resource,
+        mock_tournament_config,
+        mock_giveaway_config,
+        mock_verification_config,
+    ):
         """Should configure all bot features."""
         mock_read_shadow_config.return_value = MagicMock(enabled=False, channel_id=None)
         mock_boto3_resource.return_value = MagicMock()
@@ -195,7 +202,9 @@ class TestUnifiedRuntime:
     @patch("bots.unified.boto3.resource")
     @patch("bots.unified.read_shadow_config")
     @pytest.mark.asyncio
-    async def test_run_without_shadow_mode(self, mock_read_shadow_config, mock_boto3_resource, mock_coc_client):
+    async def test_run_without_shadow_mode(
+        self, mock_read_shadow_config, mock_boto3_resource, mock_coc_client
+    ):
         """Should run bot and initialize CoC client when not in shadow mode."""
         mock_read_shadow_config.return_value = MagicMock(enabled=False, channel_id=None)
         mock_boto3_resource.return_value = MagicMock()
@@ -226,18 +235,24 @@ class TestUnifiedRuntime:
         runtime.bot.__aexit__ = AsyncMock(return_value=None)
         runtime.bot.start = AsyncMock()
 
-        with patch.object(runtime, 'configure_features') as mock_configure:
+        with patch.object(runtime, "configure_features") as mock_configure:
             await runtime.run()
 
             # Should initialize CoC client and reconfigure features
-            mock_coc_instance.login.assert_called_once_with("test@example.com", "test_password")
-            assert mock_configure.call_count == 2  # Once before, once after CoC client init
+            mock_coc_instance.login.assert_called_once_with(
+                "test@example.com", "test_password"
+            )
+            assert (
+                mock_configure.call_count == 2
+            )  # Once before, once after CoC client init
             runtime.bot.start.assert_called_once_with("test_token")
 
     @patch("bots.unified.boto3.resource")
     @patch("bots.unified.read_shadow_config")
     @pytest.mark.asyncio
-    async def test_run_with_shadow_mode(self, mock_read_shadow_config, mock_boto3_resource):
+    async def test_run_with_shadow_mode(
+        self, mock_read_shadow_config, mock_boto3_resource
+    ):
         """Should run bot in shadow mode without initializing CoC client."""
         mock_read_shadow_config.return_value = MagicMock(enabled=True, channel_id=123)
         mock_boto3_resource.return_value = MagicMock()
@@ -266,7 +281,7 @@ class TestUnifiedRuntime:
         runtime.bot.__aexit__ = AsyncMock(return_value=None)
         runtime.bot.start = AsyncMock()
 
-        with patch.object(runtime, 'configure_features') as mock_configure:
+        with patch.object(runtime, "configure_features") as mock_configure:
             await runtime.run()
 
             # Should not initialize CoC client in shadow mode
