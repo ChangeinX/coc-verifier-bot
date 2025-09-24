@@ -6,6 +6,7 @@ from tournament_bot.bracket import (
     render_bracket,
     set_match_winner,
     simulate_tournament,
+    team_captain_lines,
 )
 
 
@@ -112,6 +113,33 @@ def test_create_bracket_prefers_team_names_for_labels():
     output = render_bracket(bracket)
     assert "Alpha Squad" in output
     assert "Bravo Squad" in output
+
+
+def test_team_captain_lines_include_captains():
+    registrations = [
+        make_reg(1, 0, team_name="Alpha Squad"),
+        make_reg(2, 30, team_name="Bravo Squad"),
+    ]
+
+    bracket = create_bracket_state(7, registrations)
+    lines = team_captain_lines(bracket, registrations)
+
+    assert lines == [
+        "#1 Alpha Squad — Captain: Team1",
+        "#2 Bravo Squad — Captain: Team2",
+    ]
+
+
+def test_team_captain_lines_fall_back_when_registration_missing():
+    registrations = [
+        make_reg(1, 0, team_name="Alpha Squad"),
+        make_reg(2, 30, team_name="Bravo Squad"),
+    ]
+
+    bracket = create_bracket_state(7, registrations)
+    partial = team_captain_lines(bracket, registrations[:1])
+
+    assert any("Unknown captain" in line for line in partial)
 
 
 def test_simulate_tournament_produces_snapshots_and_champion():

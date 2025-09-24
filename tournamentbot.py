@@ -38,6 +38,7 @@ from tournament_bot.bracket import (
     render_bracket,
     set_match_winner,
     simulate_tournament,
+    team_captain_lines,
 )
 from tournament_bot.simulator import build_seeded_registrations
 from verifier_bot import coc_api
@@ -1163,6 +1164,8 @@ async def show_bracket_command(  # pragma: no cover - Discord slash command wiri
         )
         return
 
+    registrations = storage.list_registrations(guild.id)
+
     champion = bracket_champion_name(bracket)
     summary_note = f"Current champion: {champion}" if champion else None
 
@@ -1172,6 +1175,27 @@ async def show_bracket_command(  # pragma: no cover - Discord slash command wiri
         requested_by=interaction.user,
         summary_note=summary_note,
     )
+
+    captain_lines = team_captain_lines(bracket, registrations)
+    if captain_lines:
+        chunks: list[str] = []
+        current: list[str] = []
+        length = 0
+        for line in captain_lines:
+            addition = len(line) + (1 if current else 0)
+            if current and length + addition > 1024:
+                chunks.append("\n".join(current))
+                current = [line]
+                length = len(line)
+            else:
+                current.append(line)
+                length += addition
+        if current:
+            chunks.append("\n".join(current))
+
+        for idx, chunk in enumerate(chunks):
+            field_name = "Teams & Captains" if idx == 0 else "Teams & Captains (cont.)"
+            embed.add_field(name=field_name, value=chunk, inline=False)
 
     try:
         await interaction.response.send_message(embed=embed)

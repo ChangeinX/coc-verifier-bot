@@ -245,6 +245,41 @@ def render_bracket(state: BracketState, *, shrink_completed: bool = False) -> st
     return "\n".join(line.rstrip() for line in lines)
 
 
+def team_captain_lines(
+    state: BracketState, registrations: Sequence[TeamRegistration]
+) -> list[str]:
+    """Return formatted lines pairing seeded teams with their captains."""
+
+    registration_lookup = {
+        registration.user_id: registration for registration in registrations
+    }
+
+    slot_by_team: dict[int, BracketSlot] = {}
+    for match in state.all_matches():
+        for slot in (match.competitor_one, match.competitor_two):
+            if slot.team_id is None:
+                continue
+            existing = slot_by_team.get(slot.team_id)
+            if existing is None:
+                slot_by_team[slot.team_id] = slot
+                continue
+            if existing.seed is None and slot.seed is not None:
+                slot_by_team[slot.team_id] = slot
+
+    def sort_key(slot: BracketSlot) -> tuple[int, str]:
+        seed = slot.seed if slot.seed is not None else 1_000_000
+        return (seed, slot.team_label.lower())
+
+    lines: list[str] = []
+    for slot in sorted(slot_by_team.values(), key=sort_key):
+        registration = registration_lookup.get(slot.team_id)
+        captain = (
+            registration.user_name if registration is not None else "Unknown captain"
+        )
+        lines.append(f"{slot.display()} — Captain: {captain}")
+    return lines
+
+
 def simulate_tournament(
     state: BracketState,
 ) -> tuple[BracketState, list[tuple[str, BracketState]]]:
@@ -277,6 +312,7 @@ def simulate_tournament(
 __all__ = [
     "create_bracket_state",
     "render_bracket",
+    "team_captain_lines",
     "set_match_winner",
     "simulate_tournament",
 ]
