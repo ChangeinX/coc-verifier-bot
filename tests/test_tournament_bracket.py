@@ -9,7 +9,9 @@ from tournament_bot.bracket import (
 )
 
 
-def make_reg(user_id: int, offset_seconds: int) -> TeamRegistration:
+def make_reg(
+    user_id: int, offset_seconds: int, *, team_name: str | None = None
+) -> TeamRegistration:
     registered_at = (
         datetime.fromisoformat("2024-01-01T00:00:00+00:00")
         + timedelta(seconds=offset_seconds)
@@ -26,6 +28,7 @@ def make_reg(user_id: int, offset_seconds: int) -> TeamRegistration:
             )
         ],
         registered_at=registered_at,
+        team_name=team_name,
     )
 
 
@@ -92,6 +95,23 @@ def test_set_match_winner_advances_to_next_round():
         final_match.competitor_two.team_id,
     }
     assert semifinal_winner.team_id in finalist_ids
+
+
+def test_create_bracket_prefers_team_names_for_labels():
+    registrations = [
+        make_reg(1, 0, team_name="Alpha Squad"),
+        make_reg(2, 30, team_name="Bravo Squad"),
+    ]
+
+    bracket = create_bracket_state(7, registrations)
+
+    first_round_match = bracket.rounds[0].matches[0]
+    assert first_round_match.competitor_one.team_label == "Alpha Squad"
+    assert first_round_match.competitor_two.team_label == "Bravo Squad"
+
+    output = render_bracket(bracket)
+    assert "Alpha Squad" in output
+    assert "Bravo Squad" in output
 
 
 def test_simulate_tournament_produces_snapshots_and_champion():

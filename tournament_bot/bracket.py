@@ -47,7 +47,10 @@ def _build_slot_from_registration(
 ) -> BracketSlot:
     if registration is None:
         return BracketSlot(seed=None, team_id=None, team_label="BYE")
-    label = f"{registration.user_name}"
+    label_source = registration.team_name or registration.user_name
+    label = label_source.strip() if label_source else "Unnamed Team"
+    if not label:
+        label = "Unnamed Team"
     return BracketSlot(seed=seed, team_id=registration.user_id, team_label=label)
 
 

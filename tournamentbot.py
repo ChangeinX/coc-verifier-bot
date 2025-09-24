@@ -1139,6 +1139,61 @@ async def create_bracket_error_handler(  # pragma: no cover - Discord slash comm
     )
 
 
+@tree.command(name="showbracket", description="Display the current tournament bracket")
+async def show_bracket_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    bracket = storage.get_bracket(guild.id)
+    if bracket is None:
+        await interaction.response.send_message(
+            "No bracket found. Ask an admin to run /create-bracket.",
+            ephemeral=True,
+        )
+        return
+
+    champion = bracket_champion_name(bracket)
+    summary_note = f"Current champion: {champion}" if champion else None
+
+    embed = build_bracket_embed(
+        bracket,
+        title="Current Tournament Bracket",
+        requested_by=interaction.user,
+        summary_note=summary_note,
+    )
+
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.HTTPException as exc:  # pragma: no cover - defensive
+        log.warning("Failed to send showbracket response: %s", exc)
+        await send_ephemeral(
+            interaction,
+            "Failed to display the bracket. Please try again shortly.",
+        )
+
+
+@show_bracket_command.error
+async def show_bracket_error_handler(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+) -> None:
+    log.exception("Unhandled showbracket error: %s", error)
+    await send_ephemeral(
+        interaction,
+        "An unexpected error occurred while showing the bracket.",
+    )
+
+
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     match_id="Match identifier (e.g. R1M1)",

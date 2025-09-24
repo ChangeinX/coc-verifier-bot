@@ -298,7 +298,9 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
 
     clan_tag = item.get("clan_tag") or CLAN_TAG
     if not clan_tag:
-        log.warning("No clan tag available for %s; cannot validate eligibility", discord_id)
+        log.warning(
+            "No clan tag available for %s; cannot validate eligibility", discord_id
+        )
         return False
 
     try:
