@@ -654,6 +654,7 @@ class TestMembershipCheck:
                 "fetch_player_with_status",
                 new=AsyncMock(return_value=fetch_result),
             ),
+            patch.object(bot, "has_recent_denial", new=AsyncMock(return_value=False)),
         ):
             await bot.membership_check()
 
@@ -787,6 +788,33 @@ class TestBotEvents:
             coc_client_mock.login.assert_called_once_with(
                 bot.COC_EMAIL, bot.COC_PASSWORD
             )
+            start_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_ready_syncs_to_configured_guild(self):
+        """Commands should sync to the configured guild when provided."""
+        mock_user = MagicMock()
+        mock_user.id = 123456
+        mock_user.__str__ = lambda: "TestBot"
+
+        guild_id = 987654321
+
+        with (
+            patch.object(bot, "VERIFIER_GUILD_ID", guild_id),
+            patch.object(bot.tree, "sync", new_callable=AsyncMock) as sync_mock,
+            patch.object(bot, "coc_client") as coc_client_mock,
+            patch.object(bot.membership_check, "start") as start_mock,
+            patch.object(
+                type(bot.bot), "user", new_callable=PropertyMock, return_value=mock_user
+            ),
+        ):
+            coc_client_mock.login = AsyncMock()
+
+            await bot.on_ready()
+
+            sync_mock.assert_awaited_once()
+            _, kwargs = sync_mock.await_args
+            assert kwargs["guild"].id == guild_id
             start_mock.assert_called_once()
 
 
@@ -1092,6 +1120,12 @@ class TestMemberRemovalView:
                 Key={"discord_id": "PENDING_REMOVAL_removal123"}
             )
 
+            # Verify denial marker stored
+            mock_table.put_item.assert_called_once()
+            put_item_args = mock_table.put_item.call_args.kwargs["Item"]
+            assert put_item_args["discord_id"] == "REMOVAL_DENIED_987654321"
+            assert put_item_args["status"] == "DENIED"
+
             # Verify interaction response
             mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
             mock_interaction.followup.send.assert_called_once()
@@ -1258,12 +1292,12 @@ class TestCleanupExpiredPendingRemovals:
     async def test_cleanup_expired_pending_removals_no_expired(self):
         """Test cleanup when there are no expired requests."""
         mock_table = MagicMock()
-        mock_table.scan.return_value = {"Items": []}
+        mock_table.scan.side_effect = [{"Items": []}, {"Items": []}]
 
         with patch.object(bot, "table", mock_table):
             await bot.cleanup_expired_pending_removals()
 
-            mock_table.scan.assert_called_once()
+            assert mock_table.scan.call_count == 2
             mock_table.delete_item.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1276,59 +1310,96 @@ class TestCleanupExpiredPendingRemovals:
         recent_time = datetime.now(UTC) - timedelta(minutes=30)
 
         mock_table = MagicMock()
-        mock_table.scan.return_value = {
-            "Items": [
-                {
-                    "discord_id": "PENDING_REMOVAL_expired1",
-                    "removal_id": "expired1",
-                    "timestamp": expired_time.isoformat(),
-                },
-                {
-                    "discord_id": "PENDING_REMOVAL_recent1",
-                    "removal_id": "recent1",
-                    "timestamp": recent_time.isoformat(),
-                },
-                {
-                    "discord_id": "regular_user_123",  # Not a pending removal
-                    "player_tag": "#PLAYER123",
-                },
-            ]
-        }
+        mock_table.scan.side_effect = [
+            {
+                "Items": [
+                    {
+                        "discord_id": "PENDING_REMOVAL_expired1",
+                        "removal_id": "expired1",
+                        "timestamp": expired_time.isoformat(),
+                    },
+                    {
+                        "discord_id": "PENDING_REMOVAL_recent1",
+                        "removal_id": "recent1",
+                        "timestamp": recent_time.isoformat(),
+                    },
+                ]
+            },
+            {"Items": []},
+        ]
 
         with patch.object(bot, "table", mock_table):
             await bot.cleanup_expired_pending_removals()
 
-            mock_table.scan.assert_called_once()
+            assert mock_table.scan.call_count == 2
             # Should only delete the expired item
             mock_table.delete_item.assert_called_once_with(
                 Key={"discord_id": "PENDING_REMOVAL_expired1"}
             )
 
     @pytest.mark.asyncio
-    async def test_cleanup_expired_pending_removals_invalid_timestamp(self):
-        """Test cleanup handling invalid timestamps."""
+    async def test_cleanup_expired_pending_removals_removes_denied(self):
+        """Ensure expired denial markers are also cleaned up."""
+        from datetime import UTC, datetime, timedelta
+
+        expired_time = datetime.now(UTC) - timedelta(hours=25)
+
         mock_table = MagicMock()
-        mock_table.scan.return_value = {
-            "Items": [
-                {
-                    "discord_id": "PENDING_REMOVAL_invalid1",
-                    "removal_id": "invalid1",
-                    "timestamp": "invalid-timestamp",
-                },
-                {
-                    "discord_id": "PENDING_REMOVAL_invalid2",
-                    "removal_id": "invalid2",
-                    "timestamp": None,
-                },
-            ]
-        }
+        mock_table.scan.side_effect = [
+            {"Items": []},
+            {
+                "Items": [
+                    {
+                        "discord_id": "REMOVAL_DENIED_123456",
+                        "removal_id": "denied1",
+                        "timestamp": expired_time.isoformat(),
+                    }
+                ]
+            },
+        ]
 
         with patch.object(bot, "table", mock_table):
             await bot.cleanup_expired_pending_removals()
 
-            mock_table.scan.assert_called_once()
-            # Should not delete anything due to invalid timestamps
-            mock_table.delete_item.assert_not_called()
+            assert mock_table.scan.call_count == 2
+            mock_table.delete_item.assert_called_once_with(
+                Key={"discord_id": "REMOVAL_DENIED_123456"}
+            )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_expired_pending_removals_invalid_timestamp(self):
+        """Test cleanup handling invalid timestamps."""
+        mock_table = MagicMock()
+        mock_table.scan.side_effect = [
+            {
+                "Items": [
+                    {
+                        "discord_id": "PENDING_REMOVAL_invalid1",
+                        "removal_id": "invalid1",
+                        "timestamp": "invalid-timestamp",
+                    },
+                    {
+                        "discord_id": "PENDING_REMOVAL_invalid2",
+                        "removal_id": "invalid2",
+                        "timestamp": None,
+                    },
+                ]
+            },
+            {"Items": []},
+        ]
+
+        with patch.object(bot, "table", mock_table):
+            await bot.cleanup_expired_pending_removals()
+
+            assert mock_table.scan.call_count == 2
+            # Invalid timestamps should trigger deletion to unblock future checks
+            mock_table.delete_item.assert_any_call(
+                Key={"discord_id": "PENDING_REMOVAL_invalid1"}
+            )
+            mock_table.delete_item.assert_any_call(
+                Key={"discord_id": "PENDING_REMOVAL_invalid2"}
+            )
+            assert mock_table.delete_item.call_count == 2
 
     @pytest.mark.asyncio
     async def test_cleanup_expired_pending_removals_scan_exception(self):
@@ -1384,6 +1455,11 @@ class TestMembershipCheckWithApprovalSystem:
             patch.object(
                 bot,
                 "has_pending_removal",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(
+                bot,
+                "has_recent_denial",
                 new=AsyncMock(return_value=False),
             ),
             patch.object(bot, "send_removal_approval_request") as mock_send_approval,
@@ -1531,6 +1607,92 @@ class TestHasPendingRemoval:
             mock_table.scan.assert_called_once()
 
 
+class TestDeniedRemovalCooldown:
+    """Tests surrounding denied removal cooldown tracking."""
+
+    @pytest.mark.asyncio
+    async def test_record_denied_removal_persists_marker(self):
+        """A denial should write a cooldown marker to the table."""
+        mock_table = MagicMock()
+
+        await approvals.record_denied_removal(
+            mock_table,
+            removal_id="abc123",
+            target_discord_id="123456789",
+            denied_by_id="42",
+            denied_by_name="Moderator",
+        )
+
+        mock_table.put_item.assert_called_once()
+        stored = mock_table.put_item.call_args.kwargs["Item"]
+        assert stored["discord_id"] == "REMOVAL_DENIED_123456789"
+        assert stored["status"] == "DENIED"
+        assert stored["target_discord_id"] == "123456789"
+
+    @pytest.mark.asyncio
+    async def test_has_recent_denial_true(self):
+        """Active denial marker should block new requests."""
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC)
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {"Item": {"timestamp": now.isoformat()}}
+
+        with patch.object(bot, "table", mock_table):
+            result = await bot.has_recent_denial("123456789")
+
+        assert result is True
+        mock_table.delete_item.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_has_recent_denial_expired(self):
+        """Expired denial markers should be cleared automatically."""
+        from datetime import UTC, datetime, timedelta
+
+        expired = datetime.now(UTC) - timedelta(hours=25)
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {"Item": {"timestamp": expired.isoformat()}}
+
+        with patch.object(bot, "table", mock_table):
+            result = await bot.has_recent_denial("123456789")
+
+        assert result is False
+        mock_table.delete_item.assert_called_once_with(
+            Key={"discord_id": "REMOVAL_DENIED_123456789"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_has_recent_denial_invalid_timestamp(self):
+        """Invalid timestamps should not block subsequent checks."""
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {"Item": {"timestamp": "bad"}}
+
+        with patch.object(bot, "table", mock_table):
+            result = await bot.has_recent_denial("123456789")
+
+        assert result is False
+        mock_table.delete_item.assert_called_once_with(
+            Key={"discord_id": "REMOVAL_DENIED_123456789"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_clear_denied_removal(self):
+        """Wrapper should return True when a marker is removed."""
+        mock_table = MagicMock()
+        mock_table.delete_item.return_value = {
+            "Attributes": {"discord_id": "REMOVAL_DENIED_123456789"}
+        }
+
+        with patch.object(bot, "table", mock_table):
+            result = await bot.clear_denied_removal("123456789")
+
+        assert result is True
+        mock_table.delete_item.assert_called_once()
+        delete_kwargs = mock_table.delete_item.call_args.kwargs
+        assert delete_kwargs["Key"] == {"discord_id": "REMOVAL_DENIED_123456789"}
+        assert delete_kwargs.get("ReturnValues") == "ALL_OLD"
+
+
 class TestMembershipCheckDuplicatePrevention:
     """Test that membership_check prevents duplicate removal requests."""
 
@@ -1574,6 +1736,11 @@ class TestMembershipCheckDuplicatePrevention:
             patch.object(
                 bot, "has_pending_removal", new=AsyncMock(return_value=True)
             ),  # Already has pending request
+            patch.object(
+                bot,
+                "has_recent_denial",
+                new=AsyncMock(return_value=False),
+            ),
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
             mock_guild.get_member.return_value = mock_member
@@ -1624,6 +1791,11 @@ class TestMembershipCheckDuplicatePrevention:
             patch.object(
                 bot, "has_pending_removal", new=AsyncMock(return_value=False)
             ),  # No pending request
+            patch.object(
+                bot,
+                "has_recent_denial",
+                new=AsyncMock(return_value=False),
+            ),
             patch.object(bot, "send_removal_approval_request") as mock_send_request,
         ):
             mock_guild.get_member.return_value = mock_member
@@ -1684,6 +1856,11 @@ class TestMembershipCheckDuplicatePrevention:
                 new=AsyncMock(return_value=True),
             ),
             patch.object(
+                bot,
+                "has_recent_denial",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(
                 approvals,
                 "clear_pending_removals_for_target",
                 new=AsyncMock(return_value=1),
@@ -1700,6 +1877,120 @@ class TestMembershipCheckDuplicatePrevention:
             assert "on_remove" in kwargs
             assert callable(kwargs["on_remove"])
             mock_send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_membership_check_skips_when_denial_cooldown_active(self):
+        """Denial cooldown should suppress sending a new removal request."""
+        mock_table = MagicMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER123",
+                    "player_name": "TestPlayer",
+                    "clan_tag": "#CLAN123",
+                }
+            ]
+        }
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
+            patch.object(
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        status="not_found", player=None, exception=None
+                    )
+                ),
+            ),
+            patch.object(bot, "has_pending_removal", new=AsyncMock(return_value=False)),
+            patch.object(
+                bot,
+                "has_recent_denial",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(bot, "send_removal_approval_request") as mock_send_request,
+        ):
+            mock_guild.get_member.return_value = mock_member
+
+            await bot.membership_check()
+
+            mock_send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_membership_check_clears_denial_when_member_in_clan(self):
+        """When member remains in clan, denial cooldown should be cleared."""
+        mock_table = MagicMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "discord_id": "123456789",
+                    "player_tag": "#PLAYER123",
+                    "player_name": "TestPlayer",
+                    "clan_tag": bot.CLAN_TAG,
+                }
+            ]
+        }
+
+        player = MagicMock()
+        player.clan = MagicMock()
+        player.clan.tag = bot.CLAN_TAG
+
+        fetch_result = SimpleNamespace(status="ok", player=player, exception=None)
+
+        with (
+            patch.object(bot, "table", mock_table),
+            patch.object(
+                type(bot.bot),
+                "guilds",
+                new_callable=PropertyMock,
+                return_value=[mock_guild],
+            ),
+            patch.object(
+                bot.coc_api,
+                "fetch_player_with_status",
+                new=AsyncMock(return_value=fetch_result),
+            ),
+            patch.object(bot, "has_pending_removal", new=AsyncMock(return_value=False)),
+            patch.object(
+                bot,
+                "has_recent_denial",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(
+                bot,
+                "clear_denied_removal",
+                new=AsyncMock(return_value=True),
+            ) as clear_denial_mock,
+            patch.object(
+                approvals,
+                "clear_pending_removals_for_target",
+                new=AsyncMock(return_value=0),
+            ) as clear_pending,
+            patch.object(bot, "send_removal_approval_request") as mock_send_request,
+        ):
+            mock_guild.get_member.return_value = mock_member
+
+            await bot.membership_check()
+
+            clear_denial_mock.assert_awaited_once_with("123456789")
+            mock_send_request.assert_not_called()
+            clear_pending.assert_not_called()
 
 
 class TestMembershipCheckAuthFailures:
@@ -2014,6 +2305,8 @@ class TestTimestampFix:
             assert call_args[1]["name"] == "Requested"
             # Verify the value uses static format (contains 'F' timestamp format)
             assert ":F>" in call_args[1]["value"]
+
+            mock_table.put_item.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_update_timestamp_field_to_static_helper(self):

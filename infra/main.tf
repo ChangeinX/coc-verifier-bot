@@ -36,6 +36,7 @@ variable "clan_tag" {}
 variable "feeder_clan_tag" { default = "" }
 variable "verified_role_id" {}
 variable "admin_log_channel_id" { default = "" }
+variable "verifier_guild_id" { default = "" }
 variable "giveaway_bot_image" {
   description = "Optional override for the giveaway bot image tag"
   type        = string
@@ -268,6 +269,10 @@ resource "aws_ecs_task_definition" "bot" {
         { name = "FEEDER_CLAN_TAG", value = var.feeder_clan_tag },
         { name = "VERIFIED_ROLE_ID", value = var.verified_role_id },
         { name = "ADMIN_LOG_CHANNEL_ID", value = var.admin_log_channel_id },
+        {
+          name  = "VERIFIER_GUILD_ID"
+          value = length(var.verifier_guild_id) > 0 ? var.verifier_guild_id : var.tournament_guild_id
+        },
         { name = "DDB_TABLE_NAME", value = aws_dynamodb_table.verifications.name },
         { name = "AWS_REGION", value = var.aws_region }
       ]

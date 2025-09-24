@@ -7,6 +7,10 @@ from typing import Final
 
 import discord
 
+PENDING_REMOVAL_PREFIX: Final[str] = "PENDING_REMOVAL_"
+DENIED_REMOVAL_PREFIX: Final[str] = "REMOVAL_DENIED_"
+
+
 log: Final = logging.getLogger("coc-gateway")
 
 
@@ -46,7 +50,7 @@ class MemberRemovalViewBase(discord.ui.View):
         try:
             table.put_item(
                 Item={
-                    "discord_id": f"PENDING_REMOVAL_{self.removal_id}",
+                    "discord_id": f"{PENDING_REMOVAL_PREFIX}{self.removal_id}",
                     "removal_id": self.removal_id,
                     "target_discord_id": self.discord_id,
                     "player_tag": self.player_tag,
@@ -69,7 +73,9 @@ class MemberRemovalViewBase(discord.ui.View):
         if table is None:
             return
         try:
-            table.delete_item(Key={"discord_id": f"PENDING_REMOVAL_{self.removal_id}"})
+            table.delete_item(
+                Key={"discord_id": f"{PENDING_REMOVAL_PREFIX}{self.removal_id}"}
+            )
             log.info("Removed pending removal %s", self.removal_id)
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to remove pending removal: %s", exc)
@@ -81,7 +87,7 @@ class MemberRemovalViewBase(discord.ui.View):
             return
         try:
             table.update_item(
-                Key={"discord_id": f"PENDING_REMOVAL_{self.removal_id}"},
+                Key={"discord_id": f"{PENDING_REMOVAL_PREFIX}{self.removal_id}"},
                 UpdateExpression="SET message_id = :msg_id, channel_id = :chan_id, guild_id = :guild_id",
                 ExpressionAttributeValues={
                     ":msg_id": str(message.id),
@@ -221,6 +227,13 @@ class MemberRemovalViewBase(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         await self.remove_pending_removal()
+        await record_denied_removal(
+            self._get_table(),
+            removal_id=self.removal_id,
+            target_discord_id=self.discord_id,
+            denied_by_id=str(interaction.user.id),
+            denied_by_name=str(interaction.user),
+        )
 
         log.info(
             "Denied removal of %s (%s) - denied by %s",
@@ -353,54 +366,52 @@ async def send_removal_approval_request(
 
 
 async def cleanup_expired_pending_removals(table) -> None:
-    """Clean up expired pending removal requests (older than 24 hours)."""
+    """Clean up expired removal requests (pending or denied) older than 24 hours."""
     if table is None:
         return
 
     try:
         from boto3.dynamodb.conditions import Attr
 
-        # Use filtered scan to only get pending removal entries
-        response = table.scan(
-            FilterExpression=Attr("discord_id").begins_with("PENDING_REMOVAL_"),
-            ProjectionExpression="discord_id, removal_id, #ts",
-            ExpressionAttributeNames={
-                "#ts": "timestamp"
-            },  # 'timestamp' is a reserved word
-        )
-
-        expired_count = 0
         from bot import APPROVAL_TIMEOUT_SECONDS
 
-        cutoff_time = datetime.now(UTC).timestamp() - APPROVAL_TIMEOUT_SECONDS
+        def cleanup(prefix: str, label: str) -> int:
+            response = table.scan(
+                FilterExpression=Attr("discord_id").begins_with(prefix),
+                ProjectionExpression="discord_id, removal_id, #ts",
+                ExpressionAttributeNames={"#ts": "timestamp"},
+            )
 
-        for item in response.get("Items", []):
-            discord_id = item.get("discord_id", "")
-            timestamp_str = item.get("timestamp")
-            if timestamp_str:
-                try:
-                    timestamp = datetime.fromisoformat(
-                        timestamp_str.replace("Z", "+00:00")
-                    )
-                    if timestamp.timestamp() < cutoff_time:
-                        table.delete_item(Key={"discord_id": discord_id})
-                        expired_count += 1
-                        log.info(
-                            "Cleaned up expired pending removal: %s",
-                            item.get("removal_id", "unknown"),
-                        )
-                except (ValueError, AttributeError) as exc:
-                    log.warning(
-                        "Invalid timestamp in pending removal %s: %s",
-                        discord_id,
-                        exc,
+            expired = 0
+            for item in response.get("Items", []):
+                discord_id = item.get("discord_id", "")
+                timestamp = _parse_timestamp(item.get("timestamp"))
+
+                if timestamp is None:
+                    table.delete_item(Key={"discord_id": discord_id})
+                    continue
+
+                age_seconds = (datetime.now(UTC) - timestamp).total_seconds()
+                if age_seconds >= APPROVAL_TIMEOUT_SECONDS:
+                    table.delete_item(Key={"discord_id": discord_id})
+                    expired += 1
+                    log.info(
+                        "Cleaned up expired %s removal: %s",
+                        label,
+                        item.get("removal_id", "unknown"),
                     )
 
-        if expired_count > 0:
-            log.info("Cleaned up %d expired pending removal requests", expired_count)
+            return expired
+
+        expired_pending = cleanup(PENDING_REMOVAL_PREFIX, "pending")
+        expired_denied = cleanup(DENIED_REMOVAL_PREFIX, "denied")
+
+        total_expired = expired_pending + expired_denied
+        if total_expired:
+            log.info("Cleaned up %d expired removal record(s)", total_expired)
 
     except Exception as exc:  # pylint: disable=broad-except
-        log.exception("Failed to cleanup expired pending removals: %s", exc)
+        log.exception("Failed to cleanup expired removals: %s", exc)
 
 
 async def clear_pending_removals_for_target(
@@ -417,7 +428,7 @@ async def clear_pending_removals_for_target(
         from boto3.dynamodb.conditions import Attr
 
         response = table.scan(
-            FilterExpression=Attr("discord_id").begins_with("PENDING_REMOVAL_")
+            FilterExpression=Attr("discord_id").begins_with(PENDING_REMOVAL_PREFIX)
             & Attr("target_discord_id").eq(target_discord_id),
             ProjectionExpression="discord_id, removal_id",
         )
@@ -457,6 +468,108 @@ async def clear_pending_removals_for_target(
         return 0
 
 
+def _parse_timestamp(timestamp_str: str | None) -> datetime | None:
+    """Parse an ISO formatted timestamp, returning ``None`` on failure."""
+    if not timestamp_str:
+        return None
+
+    try:
+        return datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+    except (ValueError, TypeError) as exc:  # pylint: disable=broad-except
+        log.warning("Invalid timestamp %s: %s", timestamp_str, exc)
+        return None
+
+
+async def record_denied_removal(
+    table,
+    *,
+    removal_id: str,
+    target_discord_id: str,
+    denied_by_id: str | None = None,
+    denied_by_name: str | None = None,
+) -> None:
+    """Persist a denial marker so future checks observe a cooldown."""
+    if table is None:
+        return
+
+    try:
+        now = datetime.now(UTC)
+        item = {
+            "discord_id": f"{DENIED_REMOVAL_PREFIX}{target_discord_id}",
+            "removal_id": removal_id,
+            "target_discord_id": target_discord_id,
+            "timestamp": now.isoformat(),
+            "status": "DENIED",
+        }
+        if denied_by_id:
+            item["denied_by_id"] = denied_by_id
+        if denied_by_name:
+            item["denied_by_name"] = denied_by_name
+
+        table.put_item(Item=item)
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception(
+            "Failed to record denied removal for %s: %s", target_discord_id, exc
+        )
+
+
+async def clear_denied_removal(table, target_discord_id: str) -> bool:
+    """Remove any denial marker for the provided Discord user."""
+    if table is None:
+        return False
+
+    key = {"discord_id": f"{DENIED_REMOVAL_PREFIX}{target_discord_id}"}
+
+    try:
+        response = table.delete_item(Key=key, ReturnValues="ALL_OLD")
+        removed = "Attributes" in response
+        if removed:
+            log.info(
+                "Removed denial marker for %s after clan membership update",
+                target_discord_id,
+            )
+        return removed
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception(
+            "Failed to clear denial marker for %s: %s", target_discord_id, exc
+        )
+        return False
+
+
+async def has_recent_denied_removal(table, target_discord_id: str) -> bool:
+    """Return ``True`` when a denial cooldown is still active."""
+    if table is None:
+        return False
+
+    key = {"discord_id": f"{DENIED_REMOVAL_PREFIX}{target_discord_id}"}
+
+    try:
+        result = table.get_item(Key=key)
+        item = result.get("Item")
+        if not item:
+            return False
+
+        timestamp = _parse_timestamp(item.get("timestamp"))
+        if timestamp is None:
+            # Cannot evaluate; drop the marker so it doesn't block future checks.
+            table.delete_item(Key=key)
+            return False
+
+        from bot import APPROVAL_TIMEOUT_SECONDS
+
+        age_seconds = (datetime.now(UTC) - timestamp).total_seconds()
+        if age_seconds < APPROVAL_TIMEOUT_SECONDS:
+            return True
+
+        # Cooldown expired – remove stale marker.
+        table.delete_item(Key=key)
+        return False
+
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to load denial marker for %s: %s", target_discord_id, exc)
+        return False
+
+
 async def has_pending_removal(table, target_discord_id: str) -> bool:
     """Check if there's already a pending removal request for the given discord_id.
 
@@ -472,7 +585,7 @@ async def has_pending_removal(table, target_discord_id: str) -> bool:
 
         response = table.scan(
             FilterExpression=Attr("target_discord_id").eq(target_discord_id)
-            & Attr("discord_id").begins_with("PENDING_REMOVAL_"),
+            & Attr("discord_id").begins_with(PENDING_REMOVAL_PREFIX),
             ProjectionExpression="discord_id, target_discord_id",
             Limit=1,  # We only need to know if one exists
         )

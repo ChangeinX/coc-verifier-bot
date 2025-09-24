@@ -43,6 +43,19 @@ VERIFIED_ROLE_ID: Final[int | None] = (
 ADMIN_LOG_CHANNEL_ID: Final[int] = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
 DDB_TABLE_NAME: Final[str | None] = os.getenv("DDB_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
+VERIFIER_GUILD_ID_RAW: Final[str | None] = os.getenv("VERIFIER_GUILD_ID") or os.getenv(
+    "TOURNAMENT_GUILD_ID"
+)
+
+_parsed_guild_id: int | None = None
+_guild_id_parse_error: str | None = None
+if VERIFIER_GUILD_ID_RAW:
+    try:
+        _parsed_guild_id = int(VERIFIER_GUILD_ID_RAW)
+    except ValueError:
+        _guild_id_parse_error = VERIFIER_GUILD_ID_RAW
+
+VERIFIER_GUILD_ID: Final[int | None] = _parsed_guild_id
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
@@ -73,6 +86,12 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("coc-gateway")
+
+if _guild_id_parse_error is not None:
+    log.error(
+        "Invalid VERIFIER_GUILD_ID/TOURNAMENT_GUILD_ID value %s; expected integer",
+        _guild_id_parse_error,
+    )
 
 
 async def resolve_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
@@ -134,6 +153,14 @@ async def cleanup_expired_pending_removals() -> None:
 
 async def has_pending_removal(target_discord_id: str) -> bool:
     return await approvals.has_pending_removal(table, target_discord_id)
+
+
+async def clear_denied_removal(target_discord_id: str) -> bool:
+    return await approvals.clear_denied_removal(table, target_discord_id)
+
+
+async def has_recent_denial(target_discord_id: str) -> bool:
+    return await approvals.has_recent_denied_removal(table, target_discord_id)
 
 
 # ---------- Clash API ----------
@@ -531,12 +558,20 @@ async def membership_check() -> None:
 
             stored_clan_tag = item.get("clan_tag")
             pending_exists = await has_pending_removal(item["discord_id"])
+            denial_active = await has_recent_denial(item["discord_id"])
 
             if current_clan_tag is None:
                 # Check if there's already a pending removal request for this member
                 if pending_exists:
                     log.info(
                         "Skipping duplicate removal request for %s - already pending",
+                        member,
+                    )
+                    continue
+
+                if denial_active:
+                    log.info(
+                        "Skipping removal request for %s - denial cooldown active",
                         member,
                     )
                     continue
@@ -570,6 +605,14 @@ async def membership_check() -> None:
                         item["player_tag"],
                     )
 
+                if denial_active:
+                    removed = await clear_denied_removal(item["discord_id"])
+                    if removed:
+                        log.info(
+                            "Cleared denial cooldown for %s - player is back in clan",
+                            member,
+                        )
+
                 if stored_clan_tag and current_clan_tag != stored_clan_tag:
                     try:
                         table.update_item(
@@ -594,7 +637,13 @@ async def membership_check() -> None:
 # ---------- Lifecycle ----------
 @bot.event
 async def on_ready() -> None:
-    await tree.sync()
+    if VERIFIER_GUILD_ID is not None:
+        guild = discord.Object(id=VERIFIER_GUILD_ID)
+        await tree.sync(guild=guild)
+        log.info("Commands synced to guild %s", VERIFIER_GUILD_ID)
+    else:
+        await tree.sync()
+        log.info("Commands synced globally")
 
     # Log startup without credentials for security
     log.info("Signing in to CoC API...")
