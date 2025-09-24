@@ -267,38 +267,39 @@ async def giveaway_exists(giveaway_id: str) -> bool:
 
 
 async def eligible_for_giftcard(discord_id: str) -> bool:
-    if TEST_MODE or ver_table is None or not CLAN_TAG:
-        resp = ver_table.get_item(Key={"discord_id": discord_id})
-        item = resp.get("Item")
-        tag = item.get("player_tag")
-        clan_tag = item.get("clan_tag", CLAN_TAG)
-        log.info(f"TEST_MODE: {TEST_MODE}, tag: {tag}, clan_tag: {clan_tag}")
-        raid_log = await coc_client.get_raid_log(clan_tag, limit=1)
-        entry = raid_log[0]
-        log.info(f"entry: {entry}")
-        member = entry.get_member(tag)
-        log.info(
-            "Capital loot: %s",
-            member.capital_resources_looted if member else "None",
-        )
-        if member is None:
-            return False
-        return member.capital_resources_looted >= 23_000
-    try:
-        resp = ver_table.get_item(Key={"discord_id": discord_id})
-    except Exception as exc:  # pylint: disable=broad-except
-        log.exception("Failed to get verification: %s", exc)
-        return False
-    item = resp.get("Item")
+    item: dict | None = None
+    if ver_table is not None:
+        try:
+            resp = ver_table.get_item(Key={"discord_id": discord_id})
+            item = resp.get("Item")
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to get verification for %s: %s", discord_id, exc)
+    else:
+        if TEST_MODE:
+            log.info(
+                "TEST_MODE: verification table unavailable while checking %s",
+                discord_id,
+            )
+        else:
+            log.warning(
+                "Verification table unavailable; cannot validate %s for gift card",
+                discord_id,
+            )
+
     if not item:
-        return False
-    tag = item.get("player_tag")
-    if not tag:
+        if TEST_MODE:
+            log.info("TEST_MODE: no verification record for %s", discord_id)
         return False
 
-    clan_tag = item.get("clan_tag")
+    tag = item.get("player_tag")
+    if not tag:
+        log.debug("No player tag recorded for %s", discord_id)
+        return False
+
+    clan_tag = item.get("clan_tag") or CLAN_TAG
     if not clan_tag:
-        clan_tag = CLAN_TAG
+        log.warning("No clan tag available for %s; cannot validate eligibility", discord_id)
+        return False
 
     try:
         raid_log = await coc_client.get_raid_log(clan_tag, limit=1)
@@ -306,6 +307,12 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
             return False
         entry = raid_log[0]
         member = entry.get_member(tag)
+        if TEST_MODE:
+            log.info(
+                "TEST_MODE: capital loot check for %s -> %s",
+                discord_id,
+                member.capital_resources_looted if member else "None",
+            )
         if member is None:
             return False
         return member.capital_resources_looted >= 23_000
@@ -314,13 +321,18 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
     return False
 
 
-async def finish_giveaway(gid: str) -> None:
+async def finish_giveaway(
+    gid: str,
+    *,
+    discord_client: discord.Client | None = None,
+    announcement_template: str | None = None,
+) -> list[str]:
     if table is None:
-        return
+        return []
     try:
         meta = table.get_item(Key={"giveaway_id": gid, "user_id": "META"}).get("Item")
         if not meta or meta.get("drawn"):
-            return
+            return []
         run_id = meta.get("run_id", "")
         resp = table.query(
             KeyConditionExpression=conditions.Key("giveaway_id").eq(gid)
@@ -333,10 +345,17 @@ async def finish_giveaway(gid: str) -> None:
         }
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Failed to query giveaway %s: %s", gid, exc)
-        return
+        return []
 
     if gid.startswith("giftcard"):
-        entries = [e for e in entries if await eligible_for_giftcard(e)]
+        filtered_entries: list[str] = []
+        for entry in entries:
+            try:
+                if await eligible_for_giftcard(entry):
+                    filtered_entries.append(entry)
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception("Eligibility check failed for %s: %s", entry, exc)
+        entries = filtered_entries
         winners_needed = 3
         giveaway_type = "giftcard"
     else:
@@ -375,7 +394,8 @@ async def finish_giveaway(gid: str) -> None:
                 f"Selected {len(winners)} winners using random selection for {gid}"
             )
 
-    channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
+    client = discord_client or bot
+    channel = client.get_channel(GIVEAWAY_CHANNEL_ID)
     if isinstance(channel, discord.TextChannel) and meta.get("message_id"):
         try:
             msg = await channel.fetch_message(int(meta["message_id"]))
@@ -428,7 +448,12 @@ async def finish_giveaway(gid: str) -> None:
                 winner_parts.append(f"<@{w}>")
 
         mention = " ".join(winner_parts) if winners else "No valid entries"
-        await channel.send(f"🎉 Giveaway **{gid}** winners: {mention}")
+        announcement = (
+            announcement_template.format(giveaway_id=gid, winners=mention)
+            if announcement_template
+            else f"🎉 Giveaway **{gid}** winners: {mention}"
+        )
+        await channel.send(announcement)
 
     try:
         table.update_item(
@@ -439,31 +464,50 @@ async def finish_giveaway(gid: str) -> None:
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Failed to mark giveaway drawn: %s", exc)
 
+    return winners
+
 
 @tasks.loop(minutes=1 if TEST_MODE else 10)
 async def draw_check() -> None:
     if table is None:
         return
-    try:
-        resp = table.scan(FilterExpression=conditions.Attr("user_id").eq("META"))
-    except Exception as exc:  # pylint: disable=broad-except
-        log.exception("Scan failed: %s", exc)
-        return
-    now = datetime.datetime.now(tz=datetime.UTC)
-    for item in resp.get("Items", []):
-        if item.get("drawn"):
-            continue
-        draw_time_str = item.get("draw_time")
-        if not draw_time_str:
-            continue
+    scan_kwargs: dict[str, object] = {
+        "FilterExpression": conditions.Attr("user_id").eq("META")
+    }
+
+    while True:
         try:
-            draw_time = datetime.datetime.fromisoformat(draw_time_str)
-        except ValueError:
-            continue
-        if draw_time.tzinfo is None:
-            draw_time = draw_time.replace(tzinfo=datetime.UTC)
-        if now >= draw_time:
-            await finish_giveaway(item["giveaway_id"])
+            resp = table.scan(**scan_kwargs)
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Scan failed: %s", exc)
+            return
+
+        now = datetime.datetime.now(tz=datetime.UTC)
+        for item in resp.get("Items", []):
+            if item.get("drawn"):
+                continue
+            draw_time_str = item.get("draw_time")
+            if not draw_time_str:
+                continue
+            try:
+                draw_time = datetime.datetime.fromisoformat(draw_time_str)
+            except ValueError:
+                continue
+            if draw_time.tzinfo is None:
+                draw_time = draw_time.replace(tzinfo=datetime.UTC)
+            if now >= draw_time:
+                gid = item.get("giveaway_id")
+                if not gid:
+                    continue
+                try:
+                    await finish_giveaway(str(gid))
+                except Exception as exc:  # pylint: disable=broad-except
+                    log.exception("Failed to finish giveaway %s: %s", gid, exc)
+
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_key
 
 
 @tasks.loop(hours=24)  # Run daily
