@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 from tournament_bot import PlayerEntry, TeamRegistration
 from tournament_bot.bracket import (
+    apply_team_names,
     create_bracket_state,
     render_bracket,
     set_match_winner,
@@ -122,11 +123,12 @@ def test_team_captain_lines_include_captains():
     ]
 
     bracket = create_bracket_state(7, registrations)
+    apply_team_names(bracket, registrations)
     lines = team_captain_lines(bracket, registrations)
 
     assert lines == [
-        "#1 Alpha Squad — Captain: Team1",
-        "#2 Bravo Squad — Captain: Team2",
+        "#1 Alpha Squad — Captain: <@1> (Team1)",
+        "#2 Bravo Squad — Captain: <@2> (Team2)",
     ]
 
 
@@ -137,9 +139,26 @@ def test_team_captain_lines_fall_back_when_registration_missing():
     ]
 
     bracket = create_bracket_state(7, registrations)
+    apply_team_names(bracket, registrations)
     partial = team_captain_lines(bracket, registrations[:1])
 
     assert any("Unknown captain" in line for line in partial)
+
+
+def test_apply_team_names_updates_existing_bracket_labels():
+    registrations = [make_reg(1, 0), make_reg(2, 30)]
+    bracket = create_bracket_state(7, registrations)
+
+    # team names assigned after bracket creation
+    registrations[0].team_name = "Alpha Squad"
+    registrations[1].team_name = "Bravo Squad"
+
+    updated = apply_team_names(bracket, registrations)
+    assert updated is True
+
+    first_round_match = bracket.rounds[0].matches[0]
+    assert first_round_match.competitor_one.team_label == "Alpha Squad"
+    assert first_round_match.competitor_two.team_label == "Bravo Squad"
 
 
 def test_simulate_tournament_produces_snapshots_and_champion():

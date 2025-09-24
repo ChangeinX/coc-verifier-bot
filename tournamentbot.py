@@ -34,6 +34,7 @@ from tournament_bot import (
     validate_team_size,
 )
 from tournament_bot.bracket import (
+    apply_team_names,
     create_bracket_state,
     render_bracket,
     set_match_winner,
@@ -1086,6 +1087,7 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
 
     existing = storage.get_bracket(guild.id)
     bracket = create_bracket_state(guild.id, registrations)
+    apply_team_names(bracket, registrations)
     storage.save_bracket(bracket)
 
     bye_count = sum(
@@ -1165,6 +1167,12 @@ async def show_bracket_command(  # pragma: no cover - Discord slash command wiri
         return
 
     registrations = storage.list_registrations(guild.id)
+
+    bracket_for_display = bracket.clone()
+    names_changed = apply_team_names(bracket_for_display, registrations)
+    if names_changed:
+        storage.save_bracket(bracket_for_display)
+    bracket = bracket_for_display
 
     champion = bracket_champion_name(bracket)
     summary_note = f"Current champion: {champion}" if champion else None
@@ -1251,6 +1259,10 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
             "No bracket found. Run /create-bracket before selecting winners.",
         )
         return
+
+    registrations = storage.list_registrations(guild.id)
+    if apply_team_names(bracket, registrations):
+        storage.save_bracket(bracket)
 
     match_identifier = match_id.strip().upper()
     match_obj = bracket.find_match(match_identifier)

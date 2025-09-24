@@ -245,6 +245,33 @@ def render_bracket(state: BracketState, *, shrink_completed: bool = False) -> st
     return "\n".join(line.rstrip() for line in lines)
 
 
+def apply_team_names(
+    state: BracketState, registrations: Sequence[TeamRegistration]
+) -> bool:
+    """Update bracket slots to use the latest registered team names."""
+
+    registration_lookup = {
+        registration.user_id: registration for registration in registrations
+    }
+    changed = False
+
+    for match in state.all_matches():
+        for slot in (match.competitor_one, match.competitor_two):
+            if slot.team_id is None:
+                continue
+            registration = registration_lookup.get(slot.team_id)
+            if registration is None:
+                continue
+            label_source = registration.team_name or registration.user_name
+            label = label_source.strip() if label_source else "Unnamed Team"
+            if not label:
+                label = "Unnamed Team"
+            if slot.team_label != label:
+                slot.team_label = label
+                changed = True
+    return changed
+
+
 def team_captain_lines(
     state: BracketState, registrations: Sequence[TeamRegistration]
 ) -> list[str]:
@@ -254,29 +281,36 @@ def team_captain_lines(
         registration.user_id: registration for registration in registrations
     }
 
-    slot_by_team: dict[int, BracketSlot] = {}
+    by_team: dict[int, tuple[int | None, str]] = {}
     for match in state.all_matches():
         for slot in (match.competitor_one, match.competitor_two):
             if slot.team_id is None:
                 continue
-            existing = slot_by_team.get(slot.team_id)
-            if existing is None:
-                slot_by_team[slot.team_id] = slot
-                continue
-            if existing.seed is None and slot.seed is not None:
-                slot_by_team[slot.team_id] = slot
+            seed, label = by_team.get(slot.team_id, (None, slot.team_label))
+            updated_seed = seed
+            if updated_seed is None and slot.seed is not None:
+                updated_seed = slot.seed
+            by_team[slot.team_id] = (updated_seed, slot.team_label)
 
-    def sort_key(slot: BracketSlot) -> tuple[int, str]:
-        seed = slot.seed if slot.seed is not None else 1_000_000
-        return (seed, slot.team_label.lower())
+    def sort_key(item: tuple[int, tuple[int | None, str]]) -> tuple[int, str]:
+        team_id, (seed, label) = item
+        seed_value = seed if seed is not None else 1_000_000
+        return (seed_value, label.lower())
 
     lines: list[str] = []
-    for slot in sorted(slot_by_team.values(), key=sort_key):
-        registration = registration_lookup.get(slot.team_id)
-        captain = (
-            registration.user_name if registration is not None else "Unknown captain"
-        )
-        lines.append(f"{slot.display()} — Captain: {captain}")
+    for team_id, (seed, label) in sorted(by_team.items(), key=sort_key):
+        registration = registration_lookup.get(team_id)
+        team_label = label
+        if registration is not None:
+            label_source = registration.team_name or registration.user_name
+            candidate = label_source.strip() if label_source else "Unnamed Team"
+            team_label = candidate or "Unnamed Team"
+        prefix = f"#{seed} {team_label}" if seed is not None else team_label
+        if registration is not None:
+            captain_text = f"<@{registration.user_id}> ({registration.user_name})"
+        else:
+            captain_text = "Unknown captain"
+        lines.append(f"{prefix} — Captain: {captain_text}")
     return lines
 
 
@@ -312,6 +346,7 @@ def simulate_tournament(
 __all__ = [
     "create_bracket_state",
     "render_bracket",
+    "apply_team_names",
     "team_captain_lines",
     "set_match_winner",
     "simulate_tournament",
