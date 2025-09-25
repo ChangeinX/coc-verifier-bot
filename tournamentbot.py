@@ -17,6 +17,7 @@ from discord.abc import Messageable
 from discord.app_commands import errors as app_errors
 
 from tournament_bot import (
+    BracketSlot,
     BracketState,
     InvalidTownHallError,
     InvalidValueError,
@@ -1229,7 +1230,7 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     match_id="Match identifier (e.g. R1M1)",
-    winner_slot="Winning slot: 1 for the first team, 2 for the second team",
+    winner_captain="Team captain (Discord user) for the winning team",
 )
 @tree.command(
     name="select-round-winner",
@@ -1238,7 +1239,7 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
 async def select_round_winner_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     match_id: str,
-    winner_slot: app_commands.Range[int, 1, 2],
+    winner_captain: discord.Member,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -1261,6 +1262,7 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
         return
 
     registrations = storage.list_registrations(guild.id)
+    registration_lookup = {entry.user_id: entry for entry in registrations}
     if apply_team_names(bracket, registrations):
         storage.save_bracket(bracket)
 
@@ -1273,21 +1275,75 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
         )
         return
 
+    competitors = (
+        (match_obj.competitor_one, 0),
+        (match_obj.competitor_two, 1),
+    )
+
+    missing_competitors = [slot for slot, _ in competitors if slot.team_id is None]
+    if missing_competitors:
+        await send_ephemeral(
+            interaction,
+            (
+                f"Match {match_identifier} does not yet have both teams assigned. "
+                "Record winners for earlier rounds first."
+            ),
+        )
+        return
+
+    selected_slot: BracketSlot | None = None
+    selected_index: int | None = None
+    for slot, index in competitors:
+        if slot.team_id == winner_captain.id:
+            selected_slot = slot
+            selected_index = index
+            break
+
+    if selected_index is None or selected_slot is None:
+        valid_options: list[str] = []
+        for slot, _ in competitors:
+            registration = registration_lookup.get(slot.team_id)
+            team_display = slot.display()
+            if registration is not None:
+                valid_options.append(
+                    f"- {team_display} — Captain: <@{registration.user_id}> ({registration.user_name})"
+                )
+            else:
+                valid_options.append(f"- {team_display}")
+        choices_text = "\n".join(valid_options)
+        await send_ephemeral(
+            interaction,
+            (
+                f"{winner_captain.mention} is not registered as a captain in {match_identifier}.\n"
+                "Valid selections:\n"
+                f"{choices_text}"
+            ),
+        )
+        return
+
     previous_winner = match_obj.winner_index
     try:
-        set_match_winner(bracket, match_identifier, winner_slot)
+        set_match_winner(bracket, match_identifier, selected_index + 1)
     except ValueError as exc:
         await send_ephemeral(interaction, str(exc))
         return
 
     storage.save_bracket(bracket)
     winner_slot_obj = match_obj.winner_slot()
-    if previous_winner == match_obj.winner_index and winner_slot_obj is not None:
-        ack_message = (
-            f"Winner for {match_identifier} remains {winner_slot_obj.display()}."
+    selected_registration = registration_lookup.get(selected_slot.team_id)
+    if winner_slot_obj is not None:
+        captain_text = (
+            f"<@{selected_registration.user_id}> ({selected_registration.user_name})"
+            if selected_registration is not None
+            else winner_captain.mention
         )
+    else:
+        captain_text = winner_captain.mention
+
+    if previous_winner == match_obj.winner_index and winner_slot_obj is not None:
+        ack_message = f"Winner for {match_identifier} remains {winner_slot_obj.display()} (Captain: {captain_text})."
     elif winner_slot_obj is not None:
-        ack_message = f"Recorded {winner_slot_obj.display()} as the winner for {match_identifier}."
+        ack_message = f"Recorded {winner_slot_obj.display()} (Captain: {captain_text}) as the winner for {match_identifier}."
     else:
         ack_message = f"Recorded winner for {match_identifier}."
 
