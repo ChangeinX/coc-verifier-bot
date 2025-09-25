@@ -107,6 +107,27 @@ intents.guilds = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
+GUILD_OBJECT = (
+    discord.Object(id=TOURNAMENT_GUILD_ID) if TOURNAMENT_GUILD_ID is not None else None
+)
+
+
+def tournament_command(*args, **kwargs):
+    """Register a slash command scoped to the configured tournament guild."""
+
+    def decorator(func):
+        command_kwargs = dict(kwargs)
+        if (
+            GUILD_OBJECT is not None
+            and "guild" not in command_kwargs
+            and "guilds" not in command_kwargs
+        ):
+            command_kwargs["guild"] = GUILD_OBJECT
+        return tree.command(*args, **command_kwargs)(func)
+
+    return decorator
+
+
 # ---------- AWS / CoC Clients ----------
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 table = dynamodb.Table(TOURNAMENT_TABLE_NAME) if TOURNAMENT_TABLE_NAME else None
@@ -498,7 +519,7 @@ async def send_ephemeral(interaction: discord.Interaction, message: str) -> None
     registration_opens="When registration opens (UTC, e.g. 2024-05-01T18:00)",
     registration_closes="When registration closes (UTC, e.g. 2024-05-10T22:00)",
 )
-@tree.command(name="setup", description="Configure tournament registration rules")
+@tournament_command(name="setup", description="Configure tournament registration rules")
 async def setup_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     team_size: int,
@@ -599,7 +620,9 @@ async def setup_error_handler(  # pragma: no cover - Discord slash command wirin
     team_name="Team name to display on the bracket and announcements",
     player_tags="Provide player tags separated by spaces or commas (e.g. #ABCD123 #EFGH456)",
 )
-@tree.command(name="registerteam", description="Register a team for the tournament")
+@tournament_command(
+    name="registerteam", description="Register a team for the tournament"
+)
 async def register_team_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction, team_name: str, player_tags: str
 ) -> None:
@@ -752,7 +775,7 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
     team_name="Team name to store",
     captain="Team captain to update (admins only)",
 )
-@tree.command(name="teamname", description="Update or add a team name")
+@tournament_command(name="teamname", description="Update or add a team name")
 async def team_name_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     team_name: str,
@@ -847,7 +870,7 @@ async def team_name_command(  # pragma: no cover - Discord slash command wiring
     player_tag="Player tag for the substitute",
     captain="Team captain to update (admins only)",
 )
-@tree.command(name="registersub", description="Add or replace a team substitute")
+@tournament_command(name="registersub", description="Add or replace a team substitute")
 async def register_sub_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     player_tag: str,
@@ -995,7 +1018,7 @@ async def register_sub_command(  # pragma: no cover - Discord slash command wiri
         await interaction.followup.send(announcement_error, ephemeral=True)
 
 
-@tree.command(name="showregistered", description="View registered teams")
+@tournament_command(name="showregistered", description="View registered teams")
 async def show_registered_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
 ) -> None:
@@ -1053,7 +1076,9 @@ async def show_registered_command(  # pragma: no cover - Discord slash command w
 
 
 @app_commands.default_permissions(administrator=True)
-@tree.command(name="create-bracket", description="Seed registered teams into a bracket")
+@tournament_command(
+    name="create-bracket", description="Seed registered teams into a bracket"
+)
 async def create_bracket_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
 ) -> None:
@@ -1143,7 +1168,9 @@ async def create_bracket_error_handler(  # pragma: no cover - Discord slash comm
     )
 
 
-@tree.command(name="showbracket", description="Display the current tournament bracket")
+@tournament_command(
+    name="showbracket", description="Display the current tournament bracket"
+)
 async def show_bracket_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
 ) -> None:
@@ -1232,7 +1259,7 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
     match_id="Match identifier (e.g. R1M1)",
     winner_captain="Team captain (Discord user) for the winning team",
 )
-@tree.command(
+@tournament_command(
     name="select-round-winner",
     description="Record the winner for a bracket match",
 )
@@ -1387,7 +1414,9 @@ async def select_round_winner_error_handler(  # pragma: no cover - Discord wirin
 
 
 @app_commands.default_permissions(administrator=True)
-@tree.command(name="simulate-tourney", description="Simulate the full tournament flow")
+@tournament_command(
+    name="simulate-tourney", description="Simulate the full tournament flow"
+)
 async def simulate_tourney_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
 ) -> None:
