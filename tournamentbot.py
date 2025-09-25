@@ -17,6 +17,7 @@ from discord.abc import Messageable
 from discord.app_commands import errors as app_errors
 
 from tournament_bot import (
+    BracketMatch,
     BracketSlot,
     BracketState,
     InvalidTownHallError,
@@ -1256,7 +1257,6 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
 
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    match_id="Match identifier (e.g. R1M1)",
     winner_captain="Team captain (Discord user) for the winning team",
 )
 @tournament_command(
@@ -1265,7 +1265,6 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
 )
 async def select_round_winner_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
-    match_id: str,
     winner_captain: discord.Member,
 ) -> None:
     try:
@@ -1293,61 +1292,62 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
     if apply_team_names(bracket, registrations):
         storage.save_bracket(bracket)
 
-    match_identifier = match_id.strip().upper()
-    match_obj = bracket.find_match(match_identifier)
-    if match_obj is None:
-        await send_ephemeral(
-            interaction,
-            f"Match {match_identifier} was not found. Please double-check the ID.",
+    eligible_matches: list[tuple[BracketMatch, BracketSlot, int]] = []
+    for match in bracket.all_matches():
+        if match.winner_index is not None:
+            continue
+        slots = (
+            (match.competitor_one, 0),
+            (match.competitor_two, 1),
         )
+        for slot, index in slots:
+            if slot.team_id != winner_captain.id:
+                continue
+            opponent_slot = slots[1 - index][0]
+            if slot.team_id is None or opponent_slot.team_id is None:
+                continue
+            eligible_matches.append((match, slot, index))
+
+    if not eligible_matches:
+        # Determine if the captain is registered but already advanced or missing.
+        registration = registration_lookup.get(winner_captain.id)
+        if registration is None:
+            await send_ephemeral(
+                interaction,
+                (
+                    f"{winner_captain.mention} is not the registered captain of any team "
+                    "in the current bracket."
+                ),
+            )
+            return
+
+        pending_matches: list[str] = []
+        for match in bracket.all_matches():
+            for slot in (match.competitor_one, match.competitor_two):
+                if slot.team_id == winner_captain.id:
+                    status = "decided" if match.winner_index is not None else "waiting"
+                    pending_matches.append(f"- {match.match_id} ({status})")
+        if pending_matches:
+            match_summary = "\n".join(pending_matches)
+            await send_ephemeral(
+                interaction,
+                (
+                    f"No undecided match found for {winner_captain.mention}.\n"
+                    "Tracked matches:\n"
+                    f"{match_summary}"
+                ),
+            )
+        else:
+            await send_ephemeral(
+                interaction,
+                (f"{winner_captain.mention} does not currently appear in the bracket."),
+            )
         return
 
-    competitors = (
-        (match_obj.competitor_one, 0),
-        (match_obj.competitor_two, 1),
+    match_obj, selected_slot, selected_index = min(
+        eligible_matches, key=lambda item: (item[0].round_index, item[0].match_id)
     )
-
-    missing_competitors = [slot for slot, _ in competitors if slot.team_id is None]
-    if missing_competitors:
-        await send_ephemeral(
-            interaction,
-            (
-                f"Match {match_identifier} does not yet have both teams assigned. "
-                "Record winners for earlier rounds first."
-            ),
-        )
-        return
-
-    selected_slot: BracketSlot | None = None
-    selected_index: int | None = None
-    for slot, index in competitors:
-        if slot.team_id == winner_captain.id:
-            selected_slot = slot
-            selected_index = index
-            break
-
-    if selected_index is None or selected_slot is None:
-        valid_options: list[str] = []
-        for slot, _ in competitors:
-            registration = registration_lookup.get(slot.team_id)
-            team_display = slot.display()
-            if registration is not None:
-                valid_options.append(
-                    f"- {team_display} — Captain: <@{registration.user_id}> ({registration.user_name})"
-                )
-            else:
-                valid_options.append(f"- {team_display}")
-        choices_text = "\n".join(valid_options)
-        await send_ephemeral(
-            interaction,
-            (
-                f"{winner_captain.mention} is not registered as a captain in {match_identifier}.\n"
-                "Valid selections:\n"
-                f"{choices_text}"
-            ),
-        )
-        return
-
+    match_identifier = match_obj.match_id
     previous_winner = match_obj.winner_index
     try:
         set_match_winner(bracket, match_identifier, selected_index + 1)
