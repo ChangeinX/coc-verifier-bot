@@ -46,6 +46,10 @@ variable "giveaway_discord_token" {}
 variable "giveaway_channel_id" {}
 variable "giveaway_table_name" { default = "coc-giveaways" }
 variable "giveaway_test" {}
+variable "giveaway_guild_id" {
+  description = "Optional override for the giveaway bot guild"
+  default     = ""
+}
 variable "subnets" { type = list(string) }
 variable "tournament_bot_image" {
   description = "Optional override for the tournament bot image tag"
@@ -323,6 +327,14 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
         { name = "CLAN_TAG", value = var.clan_tag },
         { name = "FEEDER_CLAN_TAG", value = var.feeder_clan_tag },
         { name = "AWS_REGION", value = var.aws_region },
+        {
+          name  = "TOURNAMENT_GUILD_ID"
+          value = var.giveaway_guild_id != "" ? var.giveaway_guild_id : var.tournament_guild_id
+        },
+        {
+          name  = "GIVEAWAY_GUILD_ID"
+          value = var.giveaway_guild_id != "" ? var.giveaway_guild_id : var.tournament_guild_id
+        },
         { name = "GIVEAWAY_TEST", value = var.giveaway_test },
         { name = "USE_FAIRNESS_SYSTEM", value = "true" }
       ]

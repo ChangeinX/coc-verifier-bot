@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import uuid
+from dataclasses import dataclass
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -12,10 +13,13 @@ import coc
 import discord
 from boto3.dynamodb import conditions
 from discord import app_commands
+from discord.errors import InteractionResponded
 from discord.ext import tasks
 
 # Import fairness system
 from giveaway_fairness import select_fair_winners, update_giveaway_stats
+
+log = logging.getLogger("giveaway-bot")
 
 TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
 GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID"))
@@ -36,6 +40,23 @@ COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 CLAN_TAG: Final[str | None] = os.getenv("CLAN_TAG")
 FEEDER_CLAN_TAG: Final[str | None] = os.getenv("FEEDER_CLAN_TAG")
 DDB_TABLE_NAME: Final[str | None] = os.getenv("DDB_TABLE_NAME")
+GUILD_ID_RAW: Final[str | None] = os.getenv("TOURNAMENT_GUILD_ID") or os.getenv(
+    "GIVEAWAY_GUILD_ID"
+)
+
+if GUILD_ID_RAW:
+    try:
+        _guild_id = int(GUILD_ID_RAW)
+    except ValueError:
+        log.warning(
+            "Invalid guild id %s provided; expected an integer.",
+            GUILD_ID_RAW,
+        )
+        _guild_id = None
+else:
+    _guild_id = None
+
+GIVEAWAY_GUILD_ID: Final[int | None] = _guild_id
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
@@ -52,15 +73,220 @@ intents.guilds = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
+GUILD_OBJECT = (
+    discord.Object(id=GIVEAWAY_GUILD_ID) if GIVEAWAY_GUILD_ID is not None else None
+)
+
+
+def giveaway_command(*args, **kwargs):
+    """Register a giveaway slash command scoped to the configured guild."""
+
+    def decorator(func):
+        command_kwargs = dict(kwargs)
+        if (
+            GUILD_OBJECT is not None
+            and "guild" not in command_kwargs
+            and "guilds" not in command_kwargs
+        ):
+            command_kwargs["guild"] = GUILD_OBJECT
+        return tree.command(*args, **command_kwargs)(func)
+
+    return decorator
+
+
 coc_client = coc.Client()
 
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 table = dynamodb.Table(GIVEAWAY_TABLE_NAME) if GIVEAWAY_TABLE_NAME else None
 ver_table = dynamodb.Table(DDB_TABLE_NAME) if DDB_TABLE_NAME else None
 
-log = logging.getLogger("giveaway-bot")
-
 _views_restored = False
+
+
+@dataclass(slots=True)
+class GiveawayStatistics:
+    """Aggregate view of giveaway performance metrics."""
+
+    total_giveaways: int = 0
+    completed_giveaways: int = 0
+    active_giveaways: int = 0
+    ready_to_draw: int = 0
+    scheduled_giveaways: int = 0
+    total_entries: int = 0
+    average_entries: float = 0.0
+    total_winners_recorded: int = 0
+    giveaways_with_winners: int = 0
+    successful_payouts: int = 0
+
+
+SUCCESSFUL_PAYOUT_VALUES: Final[set[str]] = {
+    "1",
+    "true",
+    "yes",
+    "y",
+    "on",
+    "success",
+    "successful",
+    "complete",
+    "completed",
+    "paid",
+    "payment_complete",
+    "payout_complete",
+    "payout_completed",
+    "settled",
+    "done",
+}
+
+
+def _is_truthy(value: object) -> bool:
+    """Best-effort conversion of DynamoDB truthy values to booleans."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+            "done",
+            "complete",
+            "completed",
+            "finished",
+        }
+    return False
+
+
+def _is_success_state(value: object) -> bool:
+    """Return True when a DynamoDB value represents a successful payout."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in SUCCESSFUL_PAYOUT_VALUES
+    return False
+
+
+def _parse_draw_time(raw: str | None) -> datetime.datetime | None:
+    """Parse stored draw time values into aware datetimes."""
+
+    if not raw:
+        return None
+    try:
+        draw_time = datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if draw_time.tzinfo is None:
+        draw_time = draw_time.replace(tzinfo=datetime.UTC)
+    return draw_time
+
+
+async def _collect_giveaway_statistics() -> GiveawayStatistics:
+    """Aggregate giveaway statistics from DynamoDB."""
+
+    stats = GiveawayStatistics()
+    if table is None:
+        return stats
+
+    now = datetime.datetime.now(tz=datetime.UTC)
+    scan_kwargs: dict[str, object] = {
+        "FilterExpression": conditions.Attr("user_id").eq("META")
+    }
+
+    try:
+        while True:
+            response = table.scan(**scan_kwargs)
+            items = response.get("Items", [])
+            for item in items:
+                giveaway_id = item.get("giveaway_id")
+                if not giveaway_id:
+                    continue
+
+                stats.total_giveaways += 1
+                drawn = _is_truthy(item.get("drawn"))
+                if drawn:
+                    stats.completed_giveaways += 1
+                else:
+                    stats.active_giveaways += 1
+                    draw_time = _parse_draw_time(item.get("draw_time"))
+                    if draw_time is not None:
+                        if now >= draw_time:
+                            stats.ready_to_draw += 1
+                        else:
+                            stats.scheduled_giveaways += 1
+
+                if any(
+                    _is_success_state(item.get(field))
+                    for field in (
+                        "payout_status",
+                        "payout_confirmed",
+                        "payout_complete",
+                    )
+                ):
+                    stats.successful_payouts += 1
+
+                run_id = item.get("run_id")
+                if isinstance(run_id, str) and run_id:
+                    try:
+                        entry_resp = table.query(
+                            KeyConditionExpression=conditions.Key("giveaway_id").eq(
+                                giveaway_id
+                            )
+                            & conditions.Key("user_id").begins_with(f"{run_id}#")
+                        )
+                        participants = {
+                            entry.get("user_id", "").split("#", 1)[1]
+                            for entry in entry_resp.get("Items", [])
+                            if entry.get("user_id", "").startswith(f"{run_id}#")
+                        }
+                        stats.total_entries += len(participants)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        log.exception(
+                            "Failed to count entries for giveaway %s: %s",
+                            giveaway_id,
+                            exc,
+                        )
+
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to scan giveaway metadata: %s", exc)
+
+    winner_giveaways: set[str] = set()
+    history_kwargs: dict[str, object] = {
+        "KeyConditionExpression": conditions.Key("giveaway_id").eq("WINNER_HISTORY")
+        & conditions.Key("user_id").begins_with("HISTORY#")
+    }
+
+    try:
+        while True:
+            history_resp = table.query(**history_kwargs)
+            history_items = history_resp.get("Items", [])
+            stats.total_winners_recorded += len(history_items)
+            for winner_item in history_items:
+                original = winner_item.get("original_giveaway_id")
+                if original:
+                    winner_giveaways.add(str(original))
+
+            last_key = history_resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            history_kwargs["ExclusiveStartKey"] = last_key
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to load winner history: %s", exc)
+
+    stats.giveaways_with_winners = len(winner_giveaways)
+    if stats.total_giveaways:
+        stats.average_entries = stats.total_entries / stats.total_giveaways
+
+    return stats
 
 
 class GiveawayView(discord.ui.View):
@@ -637,7 +863,85 @@ async def restore_persistent_giveaway_views() -> None:
         log.info("Restored %s persistent giveaway views", restored)
 
 
-@tree.command(
+@giveaway_command(name="stats", description="Show giveaway statistics")
+async def giveaway_stats(interaction: discord.Interaction) -> None:
+    """Show aggregated giveaway statistics to the requesting user."""
+
+    if table is None:
+        await interaction.response.send_message(
+            "Giveaway database is not configured.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except InteractionResponded:
+        pass
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to defer stats interaction: %s", exc)
+        try:
+            await interaction.response.send_message(
+                "Failed to retrieve giveaway statistics.",
+                ephemeral=True,
+            )
+        except InteractionResponded:
+            await interaction.followup.send(
+                "Failed to retrieve giveaway statistics.", ephemeral=True
+            )
+        return
+
+    try:
+        stats = await _collect_giveaway_statistics()
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to collect giveaway statistics: %s", exc)
+        await interaction.followup.send(
+            "Failed to retrieve giveaway statistics.", ephemeral=True
+        )
+        return
+
+    pending_payouts = max(stats.completed_giveaways - stats.successful_payouts, 0)
+    entries_value = (
+        f"{stats.total_entries} (avg {stats.average_entries:.1f})"
+        if stats.total_entries
+        else "0"
+    )
+
+    embed = discord.Embed(
+        title="Giveaway Statistics",
+        colour=discord.Color.blurple(),
+        timestamp=datetime.datetime.now(tz=datetime.UTC),
+    )
+
+    if not stats.total_giveaways:
+        embed.description = "No giveaway records were found."
+
+    embed.add_field(
+        name="Total Giveaways", value=str(stats.total_giveaways), inline=True
+    )
+    embed.add_field(name="Completed", value=str(stats.completed_giveaways), inline=True)
+    embed.add_field(name="Active", value=str(stats.active_giveaways), inline=True)
+    embed.add_field(name="Ready To Draw", value=str(stats.ready_to_draw), inline=True)
+    embed.add_field(name="Scheduled", value=str(stats.scheduled_giveaways), inline=True)
+    embed.add_field(
+        name="Successful Payouts", value=str(stats.successful_payouts), inline=True
+    )
+    embed.add_field(name="Pending Payouts", value=str(pending_payouts), inline=True)
+    embed.add_field(
+        name="Giveaways With Winners",
+        value=str(stats.giveaways_with_winners),
+        inline=True,
+    )
+    embed.add_field(
+        name="Winners Logged", value=str(stats.total_winners_recorded), inline=True
+    )
+    embed.add_field(name="Entries Recorded", value=entries_value, inline=False)
+    embed.set_footer(text="Data pulled from giveaway tracking records")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@giveaway_command(
     name="fairness_stats", description="Show giveaway fairness statistics (Admin only)"
 )
 async def fairness_stats(interaction: discord.Interaction) -> None:
@@ -711,7 +1015,7 @@ async def fairness_stats(interaction: discord.Interaction) -> None:
         )
 
 
-@tree.command(
+@giveaway_command(
     name="reset_population_pity", description="Reset pity for all users (Admin only)"
 )
 async def reset_population_pity(
@@ -763,7 +1067,7 @@ async def reset_population_pity(
         )
 
 
-@tree.command(
+@giveaway_command(
     name="fairness_decay", description="Apply time-based pity decay (Admin only)"
 )
 async def apply_fairness_decay(interaction: discord.Interaction) -> None:
@@ -801,7 +1105,12 @@ async def apply_fairness_decay(interaction: discord.Interaction) -> None:
 
 @bot.event
 async def on_ready() -> None:
-    await tree.sync()
+    if GUILD_OBJECT is not None:
+        await tree.sync(guild=GUILD_OBJECT)
+        log.info("Commands synced to guild %s", GIVEAWAY_GUILD_ID)
+    else:
+        await tree.sync()
+        log.info("Commands synced globally")
     await coc_client.login(COC_EMAIL, COC_PASSWORD)
     await restore_persistent_giveaway_views()
     schedule_check.start()

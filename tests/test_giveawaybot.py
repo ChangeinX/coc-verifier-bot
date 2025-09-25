@@ -856,3 +856,150 @@ class TestMainFunction:
 
             coc_client_mock.login.assert_called_once_with("fake_email", "fake_password")
             start_mock.assert_called_once_with("fake_token")
+
+
+class TestGiveawayStatsCommand:
+    """Tests for the /stats giveaway command."""
+
+    @pytest.mark.asyncio
+    async def test_stats_command_without_table(self):
+        """Command should short-circuit when the table is not configured."""
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+
+        with patch.object(giveawaybot, "table", None):
+            await giveawaybot.giveaway_stats.callback(interaction)
+
+        interaction.response.send_message.assert_called_once_with(
+            "Giveaway database is not configured.", ephemeral=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_stats_command_success(self):
+        """Command should render an embed with aggregated statistics."""
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        mock_stats = giveawaybot.GiveawayStatistics(
+            total_giveaways=10,
+            completed_giveaways=8,
+            active_giveaways=2,
+            ready_to_draw=1,
+            scheduled_giveaways=1,
+            total_entries=120,
+            average_entries=12.0,
+            total_winners_recorded=15,
+            giveaways_with_winners=8,
+            successful_payouts=5,
+        )
+
+        with (
+            patch.object(giveawaybot, "table", object()),
+            patch.object(
+                giveawaybot,
+                "_collect_giveaway_statistics",
+                new=AsyncMock(return_value=mock_stats),
+            ),
+        ):
+            await giveawaybot.giveaway_stats.callback(interaction)
+
+        interaction.response.defer.assert_called_once_with(ephemeral=True)
+        interaction.response.send_message.assert_not_called()
+
+        interaction.followup.send.assert_called_once()
+        kwargs = interaction.followup.send.call_args.kwargs
+        assert kwargs["ephemeral"] is True
+        embed = kwargs["embed"]
+
+        fields = {field.name: field.value for field in embed.fields}
+        assert fields["Total Giveaways"] == "10"
+        assert fields["Successful Payouts"] == "5"
+        assert fields["Pending Payouts"] == "3"
+        assert fields["Entries Recorded"] == "120 (avg 12.0)"
+
+        assert not embed.description
+
+    @pytest.mark.asyncio
+    async def test_collect_stats_without_table(self):
+        """Helper should return zeroed statistics when table is missing."""
+
+        with patch.object(giveawaybot, "table", None):
+            stats = await giveawaybot._collect_giveaway_statistics()
+
+        assert stats.total_giveaways == 0
+        assert stats.completed_giveaways == 0
+
+    @pytest.mark.asyncio
+    async def test_collect_stats_with_sample_data(self):
+        """Helper should aggregate statistics from stored giveaways."""
+
+        now = datetime.datetime.now(tz=datetime.UTC)
+        past = (now - datetime.timedelta(hours=2)).isoformat()
+        future = (now + datetime.timedelta(hours=3)).isoformat()
+
+        scan_items = [
+            {
+                "giveaway_id": "giveaway-complete",
+                "run_id": "run1",
+                "drawn": "1",
+                "payout_status": "COMPLETED",
+            },
+            {
+                "giveaway_id": "giveaway-ready",
+                "run_id": "run2",
+                "draw_time": past,
+            },
+            {
+                "giveaway_id": "giveaway-scheduled",
+                "run_id": "run3",
+                "draw_time": future,
+            },
+        ]
+
+        class FakeTable:
+            def __init__(self) -> None:
+                self.responses = [
+                    {"Items": scan_items},
+                    {
+                        "Items": [
+                            {"user_id": "run1#111"},
+                            {"user_id": "run1#222"},
+                        ]
+                    },
+                    {"Items": [{"user_id": "run2#333"}]},
+                    {"Items": []},
+                    {
+                        "Items": [
+                            {
+                                "user_id": "HISTORY#2024-01-01T00:00:00Z#abcd",
+                                "original_giveaway_id": "giveaway-complete",
+                            }
+                        ]
+                    },
+                ]
+
+            def scan(self, **_kwargs):
+                return self.responses.pop(0)
+
+            def query(self, **_kwargs):
+                return self.responses.pop(0)
+
+        with patch.object(giveawaybot, "table", FakeTable()):
+            stats = await giveawaybot._collect_giveaway_statistics()
+
+        assert stats.total_giveaways == 3
+        assert stats.completed_giveaways == 1
+        assert stats.active_giveaways == 2
+        assert stats.ready_to_draw == 1
+        assert stats.scheduled_giveaways == 1
+        assert stats.total_entries == 3
+        assert stats.average_entries == pytest.approx(1.0)
+        assert stats.successful_payouts == 1
+        assert stats.total_winners_recorded == 1
+        assert stats.giveaways_with_winners == 1
