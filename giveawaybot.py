@@ -103,6 +103,19 @@ def _extract_allowed_roles(meta: dict | None) -> set[int]:
     return roles
 
 
+def _resolve_allowed_roles(meta: dict | None, giveaway_id: str) -> set[int]:
+    """Determine allowed roles, falling back for legacy giveaways."""
+
+    roles = _extract_allowed_roles(meta)
+    if roles:
+        return roles
+
+    if giveaway_id.startswith("manual-"):
+        return set(MANUAL_GIVEAWAY_ALLOWED_ROLES)
+
+    return set(RECURRING_GIVEAWAY_ALLOWED_ROLES)
+
+
 def _user_has_allowed_role(user: discord.abc.User, allowed_roles: set[int]) -> bool:
     """Return True if the user has at least one allowed role."""
 
@@ -575,7 +588,7 @@ class GiveawayView(discord.ui.View):
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to fetch giveaway metadata: %s", exc)
 
-        allowed_roles = _extract_allowed_roles(meta)
+        allowed_roles = _resolve_allowed_roles(meta, self.giveaway_id)
         if allowed_roles and not _user_has_allowed_role(
             interaction.user, allowed_roles
         ):

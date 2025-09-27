@@ -101,14 +101,26 @@ class TestGiveawayView:
 
         # Mock interaction
         interaction = AsyncMock(spec=discord.Interaction)
-        interaction.user.id = 123456789
+        member = MagicMock(spec=discord.Member)
+        role = MagicMock()
+        role.id = next(iter(giveawaybot.RECURRING_GIVEAWAY_ALLOWED_ROLES))
+        member.roles = [role]
+        member.id = 123456789
+        interaction.user = member
         # Ensure send_message is awaitable
         interaction.response.send_message = AsyncMock()
 
         # Mock table
         mock_table = MagicMock()
         mock_table.query.return_value = {"Items": []}
-        mock_table.get_item.return_value = {"Item": {"message_id": "999888777"}}
+        mock_table.get_item.return_value = {
+            "Item": {
+                "message_id": "999888777",
+                "allowed_role_ids": [
+                    str(next(iter(giveawaybot.RECURRING_GIVEAWAY_ALLOWED_ROLES)))
+                ],
+            }
+        }
 
         # Button not used in callback tests
 
@@ -137,11 +149,23 @@ class TestGiveawayView:
         view = giveawaybot.GiveawayView("test-giveaway", "run123")
 
         interaction = AsyncMock(spec=discord.Interaction)
-        interaction.user.id = 123456789
+        member = MagicMock(spec=discord.Member)
+        role = MagicMock()
+        role.id = next(iter(giveawaybot.RECURRING_GIVEAWAY_ALLOWED_ROLES))
+        member.roles = [role]
+        member.id = 123456789
+        interaction.user = member
         interaction.response.send_message = AsyncMock()
         # Button not used in callback tests
 
         mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {
+                "allowed_role_ids": [
+                    str(next(iter(giveawaybot.RECURRING_GIVEAWAY_ALLOWED_ROLES)))
+                ]
+            }
+        }
         # Simulate conditional check failure (already exists)
         from botocore.exceptions import ClientError
 
@@ -157,9 +181,9 @@ class TestGiveawayView:
         ):
             await view.enter.callback(interaction)
 
-            interaction.response.send_message.assert_called_once_with(
-                "You're already entered! (2 entries)", ephemeral=True
-            )
+        interaction.response.send_message.assert_called_once_with(
+            "You're already entered! (2 entries)", ephemeral=True
+        )
 
     @pytest.mark.asyncio
     async def test_enter_button_restricted_role_missing(self):
@@ -224,6 +248,66 @@ class TestGiveawayView:
         )
         interaction.response.send_message.assert_awaited_once_with(
             "You're entered! (5 entries)", ephemeral=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_enter_button_manual_fallback_blocks_roleless(self):
+        """Legacy manual giveaways still enforce manual role requirements."""
+        view = giveawaybot.GiveawayView("manual-test", "run123")
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        member = MagicMock(spec=discord.Member)
+        member.id = 999888777
+        member.roles = []
+        interaction.user = member
+        interaction.response.send_message = AsyncMock()
+
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {"Item": {}}
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(
+                view, "_update_entry_count", new_callable=AsyncMock, return_value=0
+            ),
+        ):
+            await view.enter.callback(interaction)
+
+        mock_table.put_item.assert_not_called()
+        interaction.response.send_message.assert_awaited_once_with(
+            "You do not have the required role to enter this giveaway.",
+            ephemeral=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_enter_button_recurring_fallback_allows_member(self):
+        """Legacy recurring giveaways fall back to recurring allowed roles."""
+        view = giveawaybot.GiveawayView("goldpass-2025-10", "run987")
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        member = MagicMock(spec=discord.Member)
+        role = MagicMock()
+        role.id = next(iter(giveawaybot.RECURRING_GIVEAWAY_ALLOWED_ROLES))
+        member.roles = [role]
+        member.id = 222333444
+        interaction.user = member
+        interaction.response.send_message = AsyncMock()
+
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {"Item": {}}
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(
+                view, "_update_entry_count", new_callable=AsyncMock, return_value=3
+            ),
+        ):
+            await view.enter.callback(interaction)
+
+        mock_table.put_item.assert_called_once()
+        interaction.response.send_message.assert_awaited_once_with(
+            "You're entered! (3 entries)",
+            ephemeral=True,
         )
 
 
