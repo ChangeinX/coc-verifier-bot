@@ -161,6 +161,71 @@ class TestGiveawayView:
                 "You're already entered! (2 entries)", ephemeral=True
             )
 
+    @pytest.mark.asyncio
+    async def test_enter_button_restricted_role_missing(self):
+        """Users without allowed roles cannot enter restricted giveaways."""
+        view = giveawaybot.GiveawayView("test-giveaway", "run123")
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.user = MagicMock(spec=discord.Member)
+        interaction.user.id = 987654321
+        interaction.user.roles = []
+        interaction.response.send_message = AsyncMock()
+
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {"allowed_role_ids": ["1392517649350791208"]}
+        }
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(
+                view, "_update_entry_count", new_callable=AsyncMock, return_value=1
+            ),
+        ):
+            await view.enter.callback(interaction)
+
+        mock_table.put_item.assert_not_called()
+        interaction.response.send_message.assert_awaited_once_with(
+            "You do not have the required role to enter this giveaway.",
+            ephemeral=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_enter_button_restricted_role_allowed(self):
+        """Users with allowed roles can enter restricted giveaways."""
+        view = giveawaybot.GiveawayView("test-giveaway", "run123")
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        member = MagicMock(spec=discord.Member)
+        role = MagicMock()
+        role.id = 1392517649350791208
+        member.roles = [role]
+        member.id = 111222333
+        interaction.user = member
+        interaction.response.send_message = AsyncMock()
+
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {"allowed_role_ids": ["1392517649350791208"]}
+        }
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(
+                view, "_update_entry_count", new_callable=AsyncMock, return_value=5
+            ),
+        ):
+            await view.enter.callback(interaction)
+
+        mock_table.put_item.assert_called_once_with(
+            Item={"giveaway_id": "test-giveaway", "user_id": "run123#111222333"},
+            ConditionExpression="attribute_not_exists(user_id)",
+        )
+        interaction.response.send_message.assert_awaited_once_with(
+            "You're entered! (5 entries)", ephemeral=True
+        )
+
 
 class TestGiveawayCreation:
     """Test giveaway creation functionality."""
@@ -242,6 +307,10 @@ class TestGiveawayCreation:
             assert call_args["run_id"] == "mock-uuid-hex"
             assert call_args["winners"] == 1
             assert call_args["channel_id"] == str(mock_channel.id)
+            assert call_args["allowed_role_ids"] == [
+                str(role_id)
+                for role_id in sorted(giveawaybot.RECURRING_GIVEAWAY_ALLOWED_ROLES)
+            ]
 
     @pytest.mark.asyncio
     async def test_create_giveaway_test_mode(self):
@@ -343,6 +412,7 @@ class TestManualCreateGiveaway:
         assert kwargs["winners"] == 2
         assert kwargs["prize_label"] == "2 × Gold Passes"
         assert kwargs["channel_id"] == giveawaybot.CREATE_GIVEAWAY_CHANNEL_ID
+        assert kwargs["allowed_role_ids"] == giveawaybot.MANUAL_GIVEAWAY_ALLOWED_ROLES
         assert kwargs["created_by"] == interaction.user.id
 
         draw_time = args[3]
@@ -367,6 +437,7 @@ class TestManualCreateGiveaway:
         assert args[3] is None
         assert kwargs["entry_goal"] == 150
         assert kwargs["winners"] == 1
+        assert kwargs["allowed_role_ids"] == giveawaybot.MANUAL_GIVEAWAY_ALLOWED_ROLES
 
 
 class TestGiveawayIDGeneration:

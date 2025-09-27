@@ -5,6 +5,7 @@ import os
 import random
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final, cast
 from zoneinfo import ZoneInfo
@@ -55,7 +56,68 @@ async def _get_text_channel(
 
     return _ensure_messageable_channel(fetched)
 
+
 log = logging.getLogger("giveaway-bot")
+
+MANUAL_GIVEAWAY_ALLOWED_ROLES: Final[frozenset[int]] = frozenset(
+    {
+        1418998037929525338,
+        1392517649350791208,
+    }
+)
+RECURRING_GIVEAWAY_ALLOWED_ROLES: Final[frozenset[int]] = frozenset(
+    {
+        1392517649350791208,
+    }
+)
+
+
+def _normalize_allowed_roles(allowed_role_ids: Iterable[int] | None) -> list[str]:
+    """Convert allowed role IDs to a sorted string list for storage."""
+
+    roles: set[int] = set(
+        allowed_role_ids
+        if allowed_role_ids is not None
+        else RECURRING_GIVEAWAY_ALLOWED_ROLES
+    )
+    normalized: list[str] = [str(role_id) for role_id in sorted(roles)]
+    return normalized
+
+
+def _extract_allowed_roles(meta: dict | None) -> set[int]:
+    """Read allowed role IDs from giveaway metadata."""
+
+    if not meta:
+        return set()
+
+    raw_roles = meta.get("allowed_role_ids")
+    if not isinstance(raw_roles, list):
+        return set()
+
+    roles: set[int] = set()
+    for value in raw_roles:
+        try:
+            roles.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return roles
+
+
+def _user_has_allowed_role(user: discord.abc.User, allowed_roles: set[int]) -> bool:
+    """Return True if the user has at least one allowed role."""
+
+    if not allowed_roles:
+        return True
+
+    if isinstance(user, discord.Member):
+        for role in getattr(user, "roles", []):
+            try:
+                if role.id in allowed_roles:
+                    return True
+            except AttributeError:
+                continue
+    return False
+
 
 TOKEN: Final[str | None] = os.getenv("DISCORD_TOKEN")
 GIVEAWAY_CHANNEL_ID: Final[int] = int(os.getenv("GIVEAWAY_CHANNEL_ID"))
@@ -504,6 +566,24 @@ class GiveawayView(discord.ui.View):
                 "Database not configured", ephemeral=True
             )
             return
+
+        meta: dict | None = None
+        try:
+            meta = table.get_item(
+                Key={"giveaway_id": self.giveaway_id, "user_id": "META"}
+            ).get("Item")
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to fetch giveaway metadata: %s", exc)
+
+        allowed_roles = _extract_allowed_roles(meta)
+        if allowed_roles and not _user_has_allowed_role(
+            interaction.user, allowed_roles
+        ):
+            await interaction.response.send_message(
+                "You do not have the required role to enter this giveaway.",
+                ephemeral=True,
+            )
+            return
         try:
             table.put_item(
                 Item={
@@ -565,6 +645,7 @@ async def create_giveaway(
     created_by: int | None = None,
     draw_conditions: list[str] | None = None,
     channel_id: int | None = None,
+    allowed_role_ids: Iterable[int] | None = None,
 ) -> None:
     """Create and announce a giveaway message."""
     if table is None or not bot.guilds:
@@ -619,6 +700,9 @@ async def create_giveaway(
             "winners": winners,
             "channel_id": str(getattr(channel, "id", resolved_channel_id)),
         }
+        allowed_role_strings = _normalize_allowed_roles(allowed_role_ids)
+        if allowed_role_strings:
+            item["allowed_role_ids"] = allowed_role_strings
         if draw_time is not None:
             item["draw_time"] = draw_time.isoformat()
         if entry_goal is not None:
@@ -659,6 +743,7 @@ async def schedule_check() -> None:
                 "🏆 Gold Pass Giveaway",
                 "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
                 datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=1),
+                allowed_role_ids=RECURRING_GIVEAWAY_ALLOWED_ROLES,
             )
 
     # Gift card every Thursday
@@ -680,6 +765,7 @@ async def schedule_check() -> None:
                     "or Gold Passes if PayPal isn't available."
                 ),
                 draw_time,
+                allowed_role_ids=RECURRING_GIVEAWAY_ALLOWED_ROLES,
             )
 
 
@@ -1124,6 +1210,7 @@ async def seed_initial_giveaways() -> None:
         "\U0001f3c6 Gold Pass Giveaway",
         "Click the button to enter for a chance to win a Clash of Clans Gold Pass!",
         datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(days=1),
+        allowed_role_ids=RECURRING_GIVEAWAY_ALLOWED_ROLES,
     )
 
     # Gift card giveaway drawn on the upcoming Sunday at 18:00 Central
@@ -1138,6 +1225,7 @@ async def seed_initial_giveaways() -> None:
         "If you earned at least 23,000 capital raid loot: "
         "Enter for a chance to win a $10 gift card! Up to 3 winners.",
         draw_time,
+        allowed_role_ids=RECURRING_GIVEAWAY_ALLOWED_ROLES,
     )
 
 
@@ -1312,6 +1400,7 @@ async def manual_create_giveaway(
             prize_label=prize_label,
             created_by=created_by_id,
             channel_id=CREATE_GIVEAWAY_CHANNEL_ID,
+            allowed_role_ids=MANUAL_GIVEAWAY_ALLOWED_ROLES,
         )
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Failed to create manual giveaway: %s", exc)
@@ -1610,12 +1699,14 @@ async def on_ready() -> None:
             "🏆 Gold Pass Giveaway (Test)",
             "Test mode giveaway! Click to enter.",
             datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(minutes=1),
+            allowed_role_ids=RECURRING_GIVEAWAY_ALLOWED_ROLES,
         )
         await create_giveaway(
             weekly_giveaway_id(datetime.date.today()),
             "🎁 $10 Gift Card Giveaway (Test)",
             "Test mode gift card giveaway!",
             datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(minutes=1),
+            allowed_role_ids=RECURRING_GIVEAWAY_ALLOWED_ROLES,
         )
 
 
