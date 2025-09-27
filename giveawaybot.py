@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import boto3
 import coc
 import discord
+import discord.abc
 from boto3.dynamodb import conditions
 from discord import app_commands
 from discord.errors import InteractionResponded
@@ -19,6 +20,40 @@ from discord.ext import tasks
 
 # Import fairness system
 from giveaway_fairness import select_fair_winners, update_giveaway_stats
+
+
+def _ensure_messageable_channel(channel: object) -> discord.abc.Messageable | None:
+    """Return the channel if it can accept messages, otherwise ``None``."""
+
+    if channel is None:
+        return None
+
+    if isinstance(channel, discord.TextChannel):
+        return channel
+
+    send = getattr(channel, "send", None)
+    if callable(send):
+        return channel
+
+    return None
+
+
+async def _get_text_channel(
+    client: discord.Client, channel_id: int
+) -> discord.abc.Messageable | None:
+    """Resolve a text-capable channel, fetching it if necessary."""
+
+    cached = _ensure_messageable_channel(client.get_channel(channel_id))
+    if cached is not None:
+        return cached
+
+    try:
+        fetched = await client.fetch_channel(channel_id)
+    except discord.DiscordException as exc:  # pragma: no cover - network failure
+        log.warning("Failed to fetch channel %s: %s", channel_id, exc)
+        return None
+
+    return _ensure_messageable_channel(fetched)
 
 log = logging.getLogger("giveaway-bot")
 
@@ -539,9 +574,10 @@ async def create_giveaway(
             minutes=1
         )
     resolved_channel_id = channel_id or GIVEAWAY_CHANNEL_ID
-    channel = bot.get_channel(resolved_channel_id)
-    if not isinstance(channel, discord.TextChannel):
-        log.warning("Giveaway channel not found or not text")
+
+    channel = await _get_text_channel(bot, resolved_channel_id)
+    if channel is None:
+        log.warning("Giveaway channel %s is not accessible", resolved_channel_id)
         return
     run_id = uuid.uuid4().hex
     view = GiveawayView(giveaway_id, run_id)
@@ -581,7 +617,7 @@ async def create_giveaway(
             "message_id": str(msg.id),
             "run_id": run_id,
             "winners": winners,
-            "channel_id": str(resolved_channel_id),
+            "channel_id": str(getattr(channel, "id", resolved_channel_id)),
         }
         if draw_time is not None:
             item["draw_time"] = draw_time.isoformat()

@@ -206,6 +206,8 @@ class TestGiveawayCreation:
         mock_message = MagicMock()
         mock_message.id = 999888777
         mock_channel.send.return_value = mock_message
+        mock_channel.id = giveawaybot.GIVEAWAY_CHANNEL_ID
+        mock_channel.id = giveawaybot.GIVEAWAY_CHANNEL_ID
 
         mock_table = MagicMock()
 
@@ -239,7 +241,7 @@ class TestGiveawayCreation:
             assert call_args["message_id"] == "999888777"
             assert call_args["run_id"] == "mock-uuid-hex"
             assert call_args["winners"] == 1
-            assert call_args["channel_id"] == str(giveawaybot.GIVEAWAY_CHANNEL_ID)
+            assert call_args["channel_id"] == str(mock_channel.id)
 
     @pytest.mark.asyncio
     async def test_create_giveaway_test_mode(self):

@@ -41,6 +41,7 @@ Configure the environment separately for each bot. All bots require AWS credenti
 ### Giveaway bot (`giveawaybot.py`)
 - `DISCORD_TOKEN` - giveaway bot token.
 - `GIVEAWAY_CHANNEL_ID` - channel hosting giveaway posts.
+- `GIVEAWAY_CREATE_CHANNEL_ID` (optional) - channel dedicated to manual giveaways.
 - `GIVEAWAY_TABLE_NAME` - DynamoDB table for giveaway entries.
 - `COC_EMAIL`, `COC_PASSWORD`, `CLAN_TAG`, `FEEDER_CLAN_TAG` - reused for fairness checks.
 - `DDB_TABLE_NAME` - verification table, used to confirm member eligibility.
