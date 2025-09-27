@@ -238,6 +238,8 @@ class TestGiveawayCreation:
             assert call_args["user_id"] == "META"
             assert call_args["message_id"] == "999888777"
             assert call_args["run_id"] == "mock-uuid-hex"
+            assert call_args["winners"] == 1
+            assert call_args["channel_id"] == str(giveawaybot.GIVEAWAY_CHANNEL_ID)
 
     @pytest.mark.asyncio
     async def test_create_giveaway_test_mode(self):
@@ -270,6 +272,99 @@ class TestGiveawayCreation:
 
             # In test mode, draw time should be adjusted to 1 minute from now
             mock_channel.send.assert_called_once()
+
+
+class TestManualCreateGiveaway:
+    """Tests for the manual /create-giveaway command."""
+
+    def _build_interaction(self, has_role: bool = True) -> discord.Interaction:
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = MagicMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.followup = MagicMock()
+        interaction.followup.send = AsyncMock()
+
+        member = MagicMock(spec=discord.Member)
+        member.id = 4242
+        role = MagicMock()
+        role.id = giveawaybot.CREATE_GIVEAWAY_ROLE_ID
+        member.roles = [role] if has_role else []
+        interaction.user = member
+        return interaction
+
+    @pytest.mark.asyncio
+    async def test_manual_create_requires_role(self):
+        interaction = self._build_interaction(has_role=False)
+
+        with patch.object(giveawaybot, "table", MagicMock()):
+            await giveawaybot.manual_create_giveaway.callback(interaction, 1, "6h")
+
+        interaction.response.send_message.assert_called_once()
+        interaction.response.defer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_manual_create_invalid_trigger(self):
+        interaction = self._build_interaction()
+
+        with patch.object(giveawaybot, "table", MagicMock()):
+            await giveawaybot.manual_create_giveaway.callback(
+                interaction, 1, "not-a-trigger"
+            )
+
+        interaction.response.send_message.assert_called_once()
+        interaction.response.defer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_manual_create_success_time_and_entries(self):
+        interaction = self._build_interaction()
+
+        before_call = datetime.datetime.now(tz=datetime.UTC)
+
+        with (
+            patch.object(giveawaybot, "table", MagicMock()),
+            patch.object(
+                giveawaybot, "create_giveaway", new_callable=AsyncMock
+            ) as create_mock,
+        ):
+            await giveawaybot.manual_create_giveaway.callback(
+                interaction, 2, "12h", "200"
+            )
+
+        interaction.response.defer.assert_called_once()
+        interaction.followup.send.assert_called_once()
+
+        assert create_mock.await_count == 1
+        awaited_call = create_mock.await_args
+        args, kwargs = awaited_call.args, awaited_call.kwargs
+        assert kwargs["entry_goal"] == 200
+        assert kwargs["winners"] == 2
+        assert kwargs["prize_label"] == "2 × Gold Passes"
+        assert kwargs["channel_id"] == giveawaybot.CREATE_GIVEAWAY_CHANNEL_ID
+        assert kwargs["created_by"] == interaction.user.id
+
+        draw_time = args[3]
+        assert isinstance(draw_time, datetime.datetime)
+        delta_seconds = (draw_time - before_call).total_seconds()
+        assert pytest.approx(delta_seconds, abs=5) == 12 * 3600
+
+    @pytest.mark.asyncio
+    async def test_manual_create_entries_only(self):
+        interaction = self._build_interaction()
+
+        with (
+            patch.object(giveawaybot, "table", MagicMock()),
+            patch.object(
+                giveawaybot, "create_giveaway", new_callable=AsyncMock
+            ) as create_mock,
+        ):
+            await giveawaybot.manual_create_giveaway.callback(interaction, 1, "150")
+
+        awaited_call = create_mock.await_args
+        args, kwargs = awaited_call.args, awaited_call.kwargs
+        assert args[3] is None
+        assert kwargs["entry_goal"] == 150
+        assert kwargs["winners"] == 1
 
 
 class TestGiveawayIDGeneration:
@@ -570,6 +665,11 @@ class TestFinishGiveaway:
 
             # Should announce winner
             mock_channel.send.assert_called_once()
+            send_kwargs = mock_channel.send.call_args.kwargs
+            assert "embed" in send_kwargs
+            winner_embed = send_kwargs["embed"]
+            assert isinstance(winner_embed, discord.Embed)
+            assert any(field.name == "Total Entries" for field in winner_embed.fields)
             # Should mark as drawn
             mock_table.update_item.assert_called_once()
 
@@ -616,6 +716,11 @@ class TestFinishGiveaway:
 
             # Should announce winners (up to 3 eligible users)
             mock_channel.send.assert_called_once()
+            send_kwargs = mock_channel.send.call_args.kwargs
+            assert "embed" in send_kwargs
+            winner_embed = send_kwargs["embed"]
+            assert isinstance(winner_embed, discord.Embed)
+            assert any(field.name == "Prize" for field in winner_embed.fields)
 
 
 class TestDrawCheck:

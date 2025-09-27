@@ -3,9 +3,10 @@ import datetime
 import logging
 import os
 import random
+import re
 import uuid
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 from zoneinfo import ZoneInfo
 
 import boto3
@@ -57,6 +58,27 @@ else:
     _guild_id = None
 
 GIVEAWAY_GUILD_ID: Final[int | None] = _guild_id
+
+_create_role_raw = os.getenv("GIVEAWAY_CREATE_ROLE_ID", "1400887994445205707")
+try:
+    CREATE_GIVEAWAY_ROLE_ID: Final[int] = int(_create_role_raw)
+except (TypeError, ValueError):
+    log.warning(
+        "Invalid giveaway create role id %s provided; privilege checks disabled.",
+        _create_role_raw,
+    )
+    CREATE_GIVEAWAY_ROLE_ID = 0
+
+_create_channel_raw = os.getenv("GIVEAWAY_CREATE_CHANNEL_ID", str(GIVEAWAY_CHANNEL_ID))
+try:
+    CREATE_GIVEAWAY_CHANNEL_ID: Final[int] = int(_create_channel_raw)
+except (TypeError, ValueError):
+    log.warning(
+        "Invalid giveaway create channel id %s provided; defaulting to %s.",
+        _create_channel_raw,
+        GIVEAWAY_CHANNEL_ID,
+    )
+    CREATE_GIVEAWAY_CHANNEL_ID = GIVEAWAY_CHANNEL_ID
 
 REQUIRED_VARS = (
     "DISCORD_TOKEN",
@@ -184,6 +206,68 @@ def _parse_draw_time(raw: str | None) -> datetime.datetime | None:
     if draw_time.tzinfo is None:
         draw_time = draw_time.replace(tzinfo=datetime.UTC)
     return draw_time
+
+
+def _coerce_int(value: object) -> int | None:
+    """Attempt to coerce DynamoDB scalar values into integers."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("-"):
+            numeric = raw[1:]
+            sign = -1
+        else:
+            numeric = raw
+            sign = 1
+        if numeric.isdigit():
+            return sign * int(numeric)
+    return None
+
+
+_TRIGGER_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-z]*)\s*$", re.IGNORECASE)
+
+
+def _parse_trigger_token(raw: str) -> tuple[str, datetime.timedelta | int]:
+    """Parse user-provided trigger tokens.
+
+    Returns a tuple containing the trigger type ("time" or "entries") and the
+    parsed payload (datetime.timedelta for time-based triggers, int for entry goals).
+    """
+
+    match = _TRIGGER_PATTERN.match(raw)
+    if not match:
+        raise ValueError("Trigger must be a number optionally followed by a unit")
+
+    value_str, unit = match.groups()
+    unit = unit.lower()
+    try:
+        value = float(value_str)
+    except ValueError as exc:  # pragma: no cover - regex already validates digits
+        raise ValueError("Invalid numeric value for trigger") from exc
+
+    if value <= 0:
+        raise ValueError("Trigger values must be greater than zero")
+
+    if unit in {"", "entry", "entries"}:
+        if not value_str.isdigit():
+            raise ValueError("Entry goals must be whole numbers")
+        return "entries", int(value_str)
+
+    if unit in {"h", "hr", "hrs", "hour", "hours"}:
+        return "time", datetime.timedelta(hours=value)
+    if unit in {"m", "min", "mins", "minute", "minutes"}:
+        return "time", datetime.timedelta(minutes=value)
+    if unit in {"d", "day", "days"}:
+        return "time", datetime.timedelta(days=value)
+
+    raise ValueError("Unrecognized trigger unit; use hours (h) or provide entries")
 
 
 async def _collect_giveaway_statistics() -> GiveawayStatistics:
@@ -318,16 +402,59 @@ class GiveawayView(discord.ui.View):
             meta = table.get_item(
                 Key={"giveaway_id": self.giveaway_id, "user_id": "META"}
             ).get("Item")
+            entry_goal_val: int | None = None
             if meta and meta.get("message_id"):
-                channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
+                stored_channel_id_raw = meta.get("channel_id")
+                if (
+                    isinstance(stored_channel_id_raw, str)
+                    and stored_channel_id_raw.isdigit()
+                ):
+                    stored_channel_id = int(stored_channel_id_raw)
+                elif isinstance(stored_channel_id_raw, int):
+                    stored_channel_id = stored_channel_id_raw
+                else:
+                    stored_channel_id = GIVEAWAY_CHANNEL_ID
+
+                channel = bot.get_channel(stored_channel_id)
                 if isinstance(channel, discord.TextChannel):
                     try:
                         msg = await channel.fetch_message(int(meta["message_id"]))
                         embed = msg.embeds[0] if msg.embeds else discord.Embed()
-                        embed.set_footer(text=f"{count} entries")
+                        footer_text = f"{count} entries"
+                        entry_goal_raw = meta.get("entry_goal")
+                        if isinstance(entry_goal_raw, str) and entry_goal_raw.isdigit():
+                            entry_goal_val = int(entry_goal_raw)
+                        elif isinstance(entry_goal_raw, (int, float)):
+                            entry_goal_val = int(entry_goal_raw)
+                        if entry_goal_val is not None:
+                            footer_text = f"{count} / {entry_goal_val} entries"
+
+                        embed.set_footer(text=footer_text)
+
+                        for idx, field in enumerate(embed.fields):
+                            if field.name == "Entries":
+                                embed.set_field_at(
+                                    idx,
+                                    name="Entries",
+                                    value=footer_text,
+                                    inline=field.inline,
+                                )
+                                break
+                        else:
+                            embed.add_field(
+                                name="Entries", value=footer_text, inline=True
+                            )
                         await msg.edit(embed=embed)
                     except Exception as exc:  # pylint: disable=broad-except
                         log.exception("Failed to update entry count: %s", exc)
+            if (
+                meta
+                and meta.get("entry_goal")
+                and not _is_truthy(meta.get("drawn"))
+                and entry_goal_val is not None
+                and count >= entry_goal_val
+            ):
+                asyncio.create_task(finish_giveaway(self.giveaway_id))
             return count
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to query entry count: %s", exc)
@@ -392,41 +519,81 @@ class GiveawayView(discord.ui.View):
 
 
 async def create_giveaway(
-    giveaway_id: str, title: str, description: str, draw_time: datetime.datetime
+    giveaway_id: str,
+    title: str,
+    description: str,
+    draw_time: datetime.datetime | None,
+    *,
+    entry_goal: int | None = None,
+    winners: int = 1,
+    prize_label: str | None = None,
+    created_by: int | None = None,
+    draw_conditions: list[str] | None = None,
+    channel_id: int | None = None,
 ) -> None:
     """Create and announce a giveaway message."""
     if table is None or not bot.guilds:
         return
-    if TEST_MODE:
+    if TEST_MODE and draw_time is not None:
         draw_time = datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(
             minutes=1
         )
-    channel = bot.get_channel(GIVEAWAY_CHANNEL_ID)
+    resolved_channel_id = channel_id or GIVEAWAY_CHANNEL_ID
+    channel = bot.get_channel(resolved_channel_id)
     if not isinstance(channel, discord.TextChannel):
         log.warning("Giveaway channel not found or not text")
         return
     run_id = uuid.uuid4().hex
     view = GiveawayView(giveaway_id, run_id)
-    draw_time = (
-        draw_time if draw_time.tzinfo else draw_time.replace(tzinfo=datetime.UTC)
+    if draw_time is not None and draw_time.tzinfo is None:
+        draw_time = draw_time.replace(tzinfo=datetime.UTC)
+    embed_timestamp = draw_time or datetime.datetime.now(tz=datetime.UTC)
+    embed = discord.Embed(
+        title=title, description=description, timestamp=embed_timestamp
     )
-    ts = int(draw_time.timestamp())
-    embed = discord.Embed(title=title, description=description, timestamp=draw_time)
-    embed.add_field(name="Draw Time", value=f"<t:{ts}:F> (<t:{ts}:R>)", inline=False)
+
+    draw_parts: list[str] = []
+    if draw_time is not None:
+        ts = int(draw_time.timestamp())
+        draw_parts.append(f"Time: <t:{ts}:F> (<t:{ts}:R>)")
+    if entry_goal is not None:
+        draw_parts.append(f"Entries: {entry_goal}")
+    if draw_conditions:
+        draw_parts.extend(draw_conditions)
+
+    if prize_label:
+        embed.add_field(name="Prize", value=prize_label, inline=True)
+    if draw_parts:
+        embed.add_field(name="Draws When", value="\n".join(draw_parts), inline=False)
+
+    entry_value = "0 entries"
+    if entry_goal is not None:
+        entry_value = f"0 / {entry_goal} entries"
+    embed.add_field(name="Entries", value=entry_value, inline=True)
     embed.set_footer(text="0 entries")
     msg = await channel.send(embed=embed, view=view)
     # Register the view so the interaction survives bot restarts
     bot.add_view(view, message_id=msg.id)
     try:
-        table.put_item(
-            Item={
-                "giveaway_id": giveaway_id,
-                "user_id": "META",
-                "message_id": str(msg.id),
-                "draw_time": draw_time.isoformat(),
-                "run_id": run_id,
-            }
-        )
+        item: dict[str, object] = {
+            "giveaway_id": giveaway_id,
+            "user_id": "META",
+            "message_id": str(msg.id),
+            "run_id": run_id,
+            "winners": winners,
+            "channel_id": str(resolved_channel_id),
+        }
+        if draw_time is not None:
+            item["draw_time"] = draw_time.isoformat()
+        if entry_goal is not None:
+            item["entry_goal"] = int(entry_goal)
+        if prize_label:
+            item["prize_label"] = prize_label
+        if draw_parts:
+            item["draw_conditions"] = draw_parts
+        if created_by is not None:
+            item["created_by"] = str(created_by)
+        table.put_item(Item=item)
     except Exception as exc:  # pylint: disable=broad-except
         log.exception("Failed to store meta: %s", exc)
 
@@ -559,7 +726,7 @@ async def finish_giveaway(
         return []
     try:
         meta = table.get_item(Key={"giveaway_id": gid, "user_id": "META"}).get("Item")
-        if not meta or meta.get("drawn"):
+        if not meta or _is_truthy(meta.get("drawn")):
             return []
         run_id = meta.get("run_id", "")
         resp = table.query(
@@ -575,55 +742,81 @@ async def finish_giveaway(
         log.exception("Failed to query giveaway %s: %s", gid, exc)
         return []
 
+    stored_winners = _coerce_int(meta.get("winners"))
+    entry_goal = _coerce_int(meta.get("entry_goal"))
+    prize_label = (
+        meta.get("prize_label") if isinstance(meta.get("prize_label"), str) else None
+    )
+    draw_conditions_meta = meta.get("draw_conditions")
+    created_by = meta.get("created_by")
+
     if gid.startswith("giftcard"):
+        giveaway_type = "giftcard"
+        winners_needed = stored_winners or 3
+    else:
+        giveaway_type = "goldpass"
+        winners_needed = stored_winners or 1
+
+    winners_needed = max(winners_needed, 1)
+
+    entries_list = list(entries)
+
+    if giveaway_type == "giftcard":
         filtered_entries: list[str] = []
-        for entry in entries:
+        for entry in entries_list:
             try:
                 if await eligible_for_giftcard(entry):
                     filtered_entries.append(entry)
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Eligibility check failed for %s: %s", entry, exc)
-        entries = filtered_entries
-        winners_needed = 3
-        giveaway_type = "giftcard"
-    else:
-        entries = list(entries)
-        winners_needed = 1
-        giveaway_type = "goldpass"
+        entries_list = filtered_entries
 
-    if not entries:
+    if not entries_list:
         winners: list[str] = []
     else:
         if USE_FAIRNESS_SYSTEM:
             try:
                 # Use fairness system for winner selection
                 winners = await select_fair_winners(
-                    table, entries, giveaway_type, winners_needed
+                    table, entries_list, giveaway_type, winners_needed
                 )
                 log.info(
                     f"Selected {len(winners)} winners using fairness system for {gid}"
                 )
 
                 # Update statistics for all participants and winners
-                await update_giveaway_stats(table, winners, entries, gid, giveaway_type)
+                await update_giveaway_stats(
+                    table, winners, entries_list, gid, giveaway_type
+                )
 
             except Exception as exc:
                 log.exception(
                     f"Fairness system failed for {gid}, falling back to random: {exc}"
                 )
                 # Fallback to original random selection
-                random.shuffle(entries)
-                winners = entries[: min(winners_needed, len(entries))]
+                random.shuffle(entries_list)
+                winners = entries_list[: min(winners_needed, len(entries_list))]
         else:
             # Original random selection (backward compatibility)
-            random.shuffle(entries)
-            winners = entries[: min(winners_needed, len(entries))]
+            random.shuffle(entries_list)
+            winners = entries_list[: min(winners_needed, len(entries_list))]
             log.info(
                 f"Selected {len(winners)} winners using random selection for {gid}"
             )
 
     client = discord_client or bot
-    channel = client.get_channel(GIVEAWAY_CHANNEL_ID)
+    stored_channel_id_raw = meta.get("channel_id")
+    if isinstance(stored_channel_id_raw, str) and stored_channel_id_raw.isdigit():
+        channel_id = int(stored_channel_id_raw)
+    elif isinstance(stored_channel_id_raw, int):
+        channel_id = stored_channel_id_raw
+    else:
+        channel_id = GIVEAWAY_CHANNEL_ID
+
+    channel = client.get_channel(channel_id)
+
+    entries_total = len(entries_list)
+
     if isinstance(channel, discord.TextChannel) and meta.get("message_id"):
         try:
             msg = await channel.fetch_message(int(meta["message_id"]))
@@ -643,16 +836,34 @@ async def finish_giveaway(
                     draw_time = datetime.datetime.fromisoformat(draw_time_str)
                     ts = int(draw_time.timestamp())
                     for idx, field in enumerate(embed.fields):
-                        if field.name == "Draw Time":
+                        if field.name in {"Draw Time", "Draws When"}:
+                            value = f"<t:{ts}:F>"
+                            if field.name == "Draws When" and entry_goal is not None:
+                                value = f"Time: <t:{ts}:F>\nEntries: {entry_goal}"
                             embed.set_field_at(
                                 idx,
-                                name="Draw Time",
-                                value=f"<t:{ts}:F>",
+                                name=field.name,
+                                value=value,
                                 inline=field.inline,
                             )
                             break
                 except Exception as exc:  # pylint: disable=broad-except
                     log.exception("Failed to update draw time field: %s", exc)
+
+            entries_text = f"{entries_total} entries"
+            if entry_goal is not None:
+                entries_text = f"{entries_total} / {entry_goal} entries"
+
+            for idx, field in enumerate(embed.fields):
+                if field.name == "Entries":
+                    embed.set_field_at(
+                        idx, name="Entries", value=entries_text, inline=field.inline
+                    )
+                    break
+            else:
+                embed.add_field(name="Entries", value=entries_text, inline=True)
+
+            embed.set_footer(text=entries_text)
             embed.timestamp = None
 
             await msg.edit(embed=embed, view=view)
@@ -675,13 +886,91 @@ async def finish_giveaway(
             else:
                 winner_parts.append(f"<@{w}>")
 
-        mention = " ".join(winner_parts) if winners else "No valid entries"
-        announcement = (
-            announcement_template.format(giveaway_id=gid, winners=mention)
-            if announcement_template
-            else f"🎉 Giveaway **{gid}** winners: {mention}"
-        )
-        await channel.send(announcement)
+        if announcement_template:
+            mention = " ".join(winner_parts) if winners else "No valid entries"
+            announcement = announcement_template.format(
+                giveaway_id=gid, winners=mention
+            )
+            await channel.send(announcement)
+        else:
+            now_ts = datetime.datetime.now(tz=datetime.UTC)
+            base_title = None
+            if msg.embeds:
+                base_title = msg.embeds[0].title
+            title = (
+                f"🎉 {base_title} Winners"
+                if base_title
+                else f"🎉 Giveaway {gid} Winners"
+            )
+            description = (
+                "\n".join(winner_parts)
+                if winners
+                else "No valid entries were eligible for this draw."
+            )
+            announcement_embed = discord.Embed(
+                title=title,
+                description=description,
+                colour=discord.Color.gold() if winners else discord.Color.orange(),
+                timestamp=now_ts,
+            )
+
+            if prize_label:
+                announcement_embed.add_field(
+                    name="Prize", value=prize_label, inline=True
+                )
+            else:
+                default_prize = (
+                    f"{winners_needed} × Gold Pass"
+                    if giveaway_type == "goldpass"
+                    else "$10 Gift Card"
+                )
+                announcement_embed.add_field(
+                    name="Prize", value=default_prize, inline=True
+                )
+
+            announcement_embed.add_field(
+                name="Winners Drawn", value=str(len(winners)), inline=True
+            )
+            announcement_embed.add_field(
+                name="Total Entries", value=str(entries_total), inline=True
+            )
+
+            if draw_conditions_meta:
+                if isinstance(draw_conditions_meta, list):
+                    draw_cond_text = "\n".join(str(val) for val in draw_conditions_meta)
+                else:
+                    draw_cond_text = str(draw_conditions_meta)
+                announcement_embed.add_field(
+                    name="Draw Conditions", value=draw_cond_text, inline=False
+                )
+            elif entry_goal is not None or meta.get("draw_time"):
+                parts: list[str] = []
+                if meta.get("draw_time"):
+                    try:
+                        draw_dt = datetime.datetime.fromisoformat(
+                            str(meta.get("draw_time"))
+                        )
+                        ts = int(
+                            draw_dt.replace(
+                                tzinfo=draw_dt.tzinfo or datetime.UTC
+                            ).timestamp()
+                        )
+                        parts.append(f"Time: <t:{ts}:F>")
+                    except Exception:  # pragma: no cover - best effort
+                        pass
+                if entry_goal is not None:
+                    parts.append(f"Entries: {entry_goal}")
+                if parts:
+                    announcement_embed.add_field(
+                        name="Draw Conditions", value="\n".join(parts), inline=False
+                    )
+
+            if created_by:
+                announcement_embed.add_field(
+                    name="Created By", value=f"<@{created_by}>", inline=False
+                )
+
+            await channel.send(embed=announcement_embed)
 
     try:
         table.update_item(
@@ -861,6 +1150,155 @@ async def restore_persistent_giveaway_views() -> None:
     _views_restored = True
     if restored:
         log.info("Restored %s persistent giveaway views", restored)
+
+
+@giveaway_command(
+    name="create_giveaway",
+    description="Create a manual gold pass giveaway",
+)
+@app_commands.describe(
+    passes="Number of gold passes to award",
+    first_trigger="Primary trigger, e.g. 12h or 200 (entries)",
+    second_trigger="Optional secondary trigger (time or entries)",
+)
+async def manual_create_giveaway(
+    interaction: discord.Interaction,
+    passes: app_commands.Range[int, 1, 10],
+    first_trigger: str,
+    second_trigger: str | None = None,
+) -> None:
+    """Create a manual giveaway gated to the giveaway management role."""
+
+    if table is None:
+        await interaction.response.send_message(
+            "Giveaway database is not configured.",
+            ephemeral=True,
+        )
+        return
+
+    user = interaction.user
+    created_by_id = getattr(user, "id", None)
+    if CREATE_GIVEAWAY_ROLE_ID and (
+        not isinstance(user, discord.Member)
+        or not any(
+            role.id == CREATE_GIVEAWAY_ROLE_ID for role in getattr(user, "roles", [])
+        )
+    ):
+        await interaction.response.send_message(
+            "You do not have permission to create giveaways.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        trigger_kind, trigger_value = _parse_trigger_token(first_trigger)
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    time_delta: datetime.timedelta | None = None
+    entry_goal: int | None = None
+
+    if trigger_kind == "time":
+        time_delta = cast(datetime.timedelta, trigger_value)
+    else:
+        entry_goal = cast(int, trigger_value)
+
+    if second_trigger:
+        try:
+            second_kind, second_value = _parse_trigger_token(second_trigger)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        if second_kind == "time":
+            if time_delta is not None:
+                await interaction.response.send_message(
+                    "Provide at most one time-based trigger.", ephemeral=True
+                )
+                return
+            time_delta = cast(datetime.timedelta, second_value)
+        else:
+            if entry_goal is not None:
+                await interaction.response.send_message(
+                    "Provide at most one entry goal trigger.", ephemeral=True
+                )
+                return
+            entry_goal = cast(int, second_value)
+
+    if time_delta is None and entry_goal is None:
+        await interaction.response.send_message(
+            "Provide a draw time (e.g. 12h) and/or entry goal (e.g. 200).",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except InteractionResponded:
+        pass
+
+    draw_time: datetime.datetime | None = None
+    if time_delta is not None:
+        draw_time = datetime.datetime.now(tz=datetime.UTC) + time_delta
+
+    giveaway_id = (
+        f"manual-{datetime.datetime.now(tz=datetime.UTC):%Y%m%d%H%M%S}-"
+        f"{uuid.uuid4().hex[:6]}"
+    )
+
+    prize_label = "1 × Gold Pass" if passes == 1 else f"{passes} × Gold Passes"
+    description_lines = [
+        f"Click the button to enter for {prize_label}.",
+        f"We'll draw {passes} winner{'s' if passes != 1 else ''}.",
+    ]
+    if entry_goal is not None:
+        description_lines.append(f"Draws once we reach {entry_goal} entries.")
+    if time_delta is not None:
+        hours = time_delta.total_seconds() / 3600
+        if hours >= 24:
+            time_text = f"{hours / 24:g} days"
+        elif hours >= 1:
+            time_text = f"{hours:g} hours"
+        else:
+            minutes = time_delta.total_seconds() / 60
+            time_text = f"{minutes:g} minutes"
+        description_lines.append(f"Or automatically in {time_text}.")
+    description = "\n".join(description_lines)
+
+    try:
+        await create_giveaway(
+            giveaway_id,
+            "🎟️ Gold Pass Giveaway",
+            description,
+            draw_time,
+            entry_goal=entry_goal,
+            winners=passes,
+            prize_label=prize_label,
+            created_by=created_by_id,
+            channel_id=CREATE_GIVEAWAY_CHANNEL_ID,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to create manual giveaway: %s", exc)
+        await interaction.followup.send(
+            "Failed to create the giveaway. Check the logs for details.",
+            ephemeral=True,
+        )
+        return
+
+    summary_parts: list[str] = []
+    if draw_time is not None:
+        ts = int(draw_time.replace(tzinfo=draw_time.tzinfo or datetime.UTC).timestamp())
+        summary_parts.append(f"draws at <t:{ts}:F>")
+    if entry_goal is not None:
+        summary_parts.append(f"draws after {entry_goal} entries")
+    summary = " or ".join(summary_parts)
+
+    summary_text = f" It {summary}." if summary else ""
+
+    await interaction.followup.send(
+        f"Giveaway `{giveaway_id}` created for {prize_label}.{summary_text}",
+        ephemeral=True,
+    )
 
 
 @giveaway_command(name="stats", description="Show giveaway statistics")

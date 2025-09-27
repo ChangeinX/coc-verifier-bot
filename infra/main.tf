@@ -44,6 +44,16 @@ variable "giveaway_bot_image" {
 }
 variable "giveaway_discord_token" {}
 variable "giveaway_channel_id" {}
+variable "giveaway_create_role_id" {
+  description = "Role ID permitted to create manual giveaways"
+  type        = string
+  default     = "1400887994445205707"
+}
+variable "giveaway_create_channel_id" {
+  description = "Channel ID used for manual giveaway announcements"
+  type        = string
+  default     = "1421311734714728589"
+}
 variable "giveaway_table_name" { default = "coc-giveaways" }
 variable "giveaway_test" {}
 variable "giveaway_guild_id" {
@@ -320,6 +330,11 @@ resource "aws_ecs_task_definition" "giveaway_bot" {
       environment = [
         { name = "DISCORD_TOKEN", value = var.giveaway_discord_token },
         { name = "GIVEAWAY_CHANNEL_ID", value = var.giveaway_channel_id },
+        {
+          name  = "GIVEAWAY_CREATE_CHANNEL_ID"
+          value = var.giveaway_create_channel_id != "" ? var.giveaway_create_channel_id : var.giveaway_channel_id
+        },
+        { name = "GIVEAWAY_CREATE_ROLE_ID", value = var.giveaway_create_role_id },
         { name = "GIVEAWAY_TABLE_NAME", value = var.giveaway_table_name },
         { name = "DDB_TABLE_NAME", value = aws_dynamodb_table.verifications.name },
         { name = "COC_EMAIL", value = var.coc_email },
