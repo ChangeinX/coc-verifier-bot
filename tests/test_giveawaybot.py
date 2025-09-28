@@ -811,12 +811,14 @@ class TestFinishGiveaway:
         mock_embed = MagicMock()
         mock_embed.fields = []
         mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
         mock_channel.fetch_message.return_value = mock_message
 
         with (
             patch.object(giveawaybot, "table", mock_table),
             patch.object(giveawaybot.bot, "get_channel", return_value=mock_channel),
             patch("random.shuffle"),
+            patch.object(giveawaybot, "update_giveaway_stats", new_callable=AsyncMock),
         ):
             await giveawaybot.finish_giveaway("goldpass-2024-01")
 
@@ -868,6 +870,7 @@ class TestFinishGiveaway:
                 giveawaybot, "eligible_for_giftcard", side_effect=mock_eligibility
             ),
             patch("random.shuffle"),
+            patch.object(giveawaybot, "update_giveaway_stats", new_callable=AsyncMock),
         ):
             await giveawaybot.finish_giveaway("giftcard-2024-01-01")
 
@@ -878,6 +881,51 @@ class TestFinishGiveaway:
             winner_embed = send_kwargs["embed"]
             assert isinstance(winner_embed, discord.Embed)
             assert any(field.name == "Prize" for field in winner_embed.fields)
+
+    @pytest.mark.asyncio
+    async def test_finish_giveaway_fills_missing_winners(self):
+        """Ensure fallback fills winners when fairness under-selects."""
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {
+                "run_id": "run123",
+                "message_id": "999888777",
+                "draw_time": "2024-01-01T12:00:00+00:00",
+                "winners": "2",
+            }
+        }
+        mock_table.query.return_value = {
+            "Items": [
+                {"user_id": "run123#111"},
+                {"user_id": "run123#222"},
+                {"user_id": "run123#333"},
+            ]
+        }
+
+        mock_channel = AsyncMock(spec=discord.TextChannel)
+        mock_message = MagicMock()
+        mock_embed = MagicMock()
+        mock_embed.fields = []
+        mock_message.embeds = [mock_embed]
+        mock_channel.fetch_message.return_value = mock_message
+
+        fairness_mock = AsyncMock(return_value=["111"])
+        stats_mock = AsyncMock()
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(giveawaybot.bot, "get_channel", return_value=mock_channel),
+            patch.object(giveawaybot, "select_fair_winners", fairness_mock),
+            patch.object(giveawaybot, "update_giveaway_stats", stats_mock),
+            patch.object(giveawaybot, "ver_table", MagicMock()),
+            patch("random.shuffle", side_effect=lambda lst: None),
+        ):
+            winners = await giveawaybot.finish_giveaway("manual-2024-test")
+
+        assert len(winners) == 2
+        stats_mock.assert_awaited_once()
+        stats_args = stats_mock.await_args.args
+        assert stats_args[1] == winners
 
 
 class TestDrawCheck:

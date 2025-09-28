@@ -906,38 +906,53 @@ async def finish_giveaway(
                 log.exception("Eligibility check failed for %s: %s", entry, exc)
         entries_list = filtered_entries
 
-    if not entries_list:
-        winners: list[str] = []
-    else:
+    winners: list[str] = []
+    if entries_list:
+        selected: list[str] | None = None
         if USE_FAIRNESS_SYSTEM:
             try:
-                # Use fairness system for winner selection
-                winners = await select_fair_winners(
+                selected = await select_fair_winners(
                     table, entries_list, giveaway_type, winners_needed
                 )
                 log.info(
-                    f"Selected {len(winners)} winners using fairness system for {gid}"
+                    f"Selected {len(selected)} winners using fairness system for {gid}"
                 )
-
-                # Update statistics for all participants and winners
-                await update_giveaway_stats(
-                    table, winners, entries_list, gid, giveaway_type
-                )
-
             except Exception as exc:
                 log.exception(
                     f"Fairness system failed for {gid}, falling back to random: {exc}"
                 )
-                # Fallback to original random selection
-                random.shuffle(entries_list)
-                winners = entries_list[: min(winners_needed, len(entries_list))]
-        else:
-            # Original random selection (backward compatibility)
+
+        if not selected:
             random.shuffle(entries_list)
-            winners = entries_list[: min(winners_needed, len(entries_list))]
+            selected = entries_list[: min(winners_needed, len(entries_list))]
             log.info(
-                f"Selected {len(winners)} winners using random selection for {gid}"
+                f"Selected {len(selected)} winners using random selection for {gid}"
             )
+
+        winners = list(dict.fromkeys(selected))
+
+        if len(winners) < winners_needed:
+            remaining_candidates = [
+                discord_id for discord_id in entries_list if discord_id not in winners
+            ]
+            if remaining_candidates:
+                random.shuffle(remaining_candidates)
+                fill_count = min(
+                    winners_needed - len(winners), len(remaining_candidates)
+                )
+                winners.extend(remaining_candidates[:fill_count])
+                log.info(
+                    "Filled giveaway %s with %s fallback winner(s)",
+                    gid,
+                    fill_count,
+                )
+
+        try:
+            await update_giveaway_stats(
+                table, winners, entries_list, gid, giveaway_type
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to update giveaway stats for %s: %s", gid, exc)
 
     client = discord_client or bot
     stored_channel_id_raw = meta.get("channel_id")
