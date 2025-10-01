@@ -486,7 +486,9 @@ class TestVerifyCommand:
             patch.object(bot, "get_player", return_value=mock_player),
             patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
             patch.object(bot, "table", mock_table),
-            patch.object(bot, "resolve_log_channel", new_callable=AsyncMock) as mock_resolve,
+            patch.object(
+                bot, "resolve_log_channel", new_callable=AsyncMock
+            ) as mock_resolve,
         ):
             mock_resolve.return_value = log_channel
             await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
