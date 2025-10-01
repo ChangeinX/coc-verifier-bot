@@ -294,7 +294,7 @@ class TestClashAPIFunctions:
 
 
 class TestVerifyCommand:
-    """Test the /verify command functionality."""
+    """Test the /verifyclan command functionality."""
 
     @pytest.fixture
     def mock_interaction(self):
@@ -303,6 +303,7 @@ class TestVerifyCommand:
         interaction.user = MagicMock(spec=discord.Member)
         interaction.user.id = 123456789
         interaction.user.name = "TestUser"
+        interaction.user.mention = "@TestUser"
         interaction.user.add_roles = AsyncMock()
         interaction.guild = MagicMock(spec=discord.Guild)
         interaction.guild.id = 987654321
@@ -344,7 +345,7 @@ class TestVerifyCommand:
                 bot, "resolve_log_channel", new_callable=AsyncMock, return_value=None
             ),
         ):
-            await bot.verify.callback(mock_interaction, "#PLAYER1")
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
 
             # Verify interaction responses
             mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
@@ -381,7 +382,7 @@ class TestVerifyCommand:
             get_player_mock.return_value = mock_player
 
             # Test with lowercase and no # prefix
-            await bot.verify.callback(mock_interaction, "player1")
+            await bot.verifyclan.callback(mock_interaction, "player1")
             get_player_mock.assert_called_with("#PLAYER1")
 
     @pytest.mark.asyncio
@@ -406,7 +407,7 @@ class TestVerifyCommand:
         ):
             get_player_mock.return_value = mock_player
 
-            await bot.verify.callback(mock_interaction, "#PLAYER1")
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
 
             mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
             mock_interaction.followup.send.assert_called_once_with(
@@ -422,10 +423,83 @@ class TestVerifyCommand:
             assert stored_item["clan_tag"] == "#FEEDERCLAN"
 
     @pytest.mark.asyncio
+    async def test_verify_player_not_in_configured_clans(self, mock_interaction):
+        """Test verification failure when player is in an unconfigured clan."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_player.tag = "#PLAYER1"
+        mock_player.name = "TestPlayer"
+        mock_clan = MagicMock()
+        mock_clan.tag = "#OTHERCLAN"
+        mock_player.clan = mock_clan
+
+        with (
+            patch.object(bot, "get_player", return_value=mock_player),
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "FEEDER_CLAN_TAG", "#FEEDERCLAN"),
+        ):
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
+
+            mock_interaction.followup.send.assert_called_once_with(
+                "❌ Verification failed – you are not listed in any of our clans.",
+                ephemeral=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_missing_verified_role_id(self, mock_interaction):
+        """Test verification fails when the verified role ID is not configured."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_player.tag = "#PLAYER1"
+        mock_player.name = "TestPlayer"
+        mock_clan = MagicMock()
+        mock_clan.tag = "#TESTCLAN"
+        mock_player.clan = mock_clan
+
+        with (
+            patch.object(bot, "get_player", return_value=mock_player),
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "VERIFIED_ROLE_ID", None),
+        ):
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
+
+            mock_interaction.followup.send.assert_called_once_with(
+                "Setup error: verified role not configured – contact an admin.",
+                ephemeral=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_logs_to_channel(self, mock_interaction, mock_role):
+        """Test verification logs to the configured admin channel when available."""
+        mock_player = MagicMock(spec=coc.Player)
+        mock_player.tag = "#PLAYER1"
+        mock_player.name = "TestPlayer"
+        mock_clan = MagicMock()
+        mock_clan.tag = "#TESTCLAN"
+        mock_player.clan = mock_clan
+
+        mock_table = MagicMock()
+        log_channel = MagicMock()
+        log_channel.send = AsyncMock()
+
+        mock_interaction.guild.get_role.return_value = mock_role
+
+        with (
+            patch.object(bot, "get_player", return_value=mock_player),
+            patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
+            patch.object(bot, "table", mock_table),
+            patch.object(bot, "resolve_log_channel", new_callable=AsyncMock) as mock_resolve,
+        ):
+            mock_resolve.return_value = log_channel
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
+
+            log_channel.send.assert_awaited_once_with(
+                "@TestUser verified with tag #PLAYER1."
+            )
+
+    @pytest.mark.asyncio
     async def test_verify_not_clan_member(self, mock_interaction):
         """Test verification fails when player is not in clan."""
         with patch.object(bot, "get_player", return_value=None):
-            await bot.verify.callback(mock_interaction, "#PLAYER1")
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
 
             mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
             mock_interaction.followup.send.assert_called_once_with(
@@ -448,7 +522,7 @@ class TestVerifyCommand:
             patch.object(bot, "get_player", return_value=mock_player),
             patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
         ):
-            await bot.verify.callback(mock_interaction, "#PLAYER1")
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
 
             mock_interaction.followup.send.assert_called_once_with(
                 "Setup error: verified role not found – contact an admin.",
@@ -477,7 +551,7 @@ class TestVerifyCommand:
             patch.object(bot, "get_player", return_value=mock_player),
             patch.object(bot, "CLAN_TAG", "#TESTCLAN"),
         ):
-            await bot.verify.callback(mock_interaction, "#PLAYER1")
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
 
             mock_interaction.followup.send.assert_called_once_with(
                 "🚫 Bot lacks **Manage Roles** permission or the role hierarchy is incorrect.",
@@ -495,7 +569,7 @@ class TestVerifyCommand:
             # Simulate player not found due to auth error
             mock_get_player.return_value = None
 
-            await bot.verify.callback(mock_interaction, "#PLAYER1")
+            await bot.verifyclan.callback(mock_interaction, "#PLAYER1")
 
             # Should show the generic "player not found" message - the re-auth happens transparently
             mock_interaction.followup.send.assert_called_once_with(

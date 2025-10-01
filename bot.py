@@ -313,13 +313,13 @@ async def cancel_pending_removal_message(
         )
 
 
-# ---------- /verify command ----------
+# ---------- /verifyclan command ----------
 @tree.command(
-    name="verify",
+    name="verifyclan",
     description="Verify yourself as a clan member by providing your player tag.",
 )
 @app_commands.describe(player_tag="Your Clash of Clans player tag, e.g. #ABCD123")
-async def verify(interaction: discord.Interaction, player_tag: str) -> None:
+async def verifyclan(interaction: discord.Interaction, player_tag: str) -> None:
     await interaction.response.defer(ephemeral=True)
 
     player_tag = player_tag.strip().upper()

@@ -77,7 +77,7 @@ To run inside Docker, build the appropriate image (`Dockerfile`, `Dockerfile.giv
 - `/registerteam` - players supply their Clash tags (space/comma separated). The bot validates each player through the Clash of Clans API and stores the registration in DynamoDB. Successful registrations are broadcast in the channel as `discord user | player name | player tag` lines.
 
 ## 7. Verification commands
-- `/verify <player_tag>` - link a Discord user to their Clash of Clans account.
+- `/verifyclan <player_tag>` - link a Discord user to their Clash of Clans account.
 - `/whois @member` - show the in-game name for a Discord user (visible only to the requester).
 
 The verification bot also runs periodic membership checks and can remove members that leave the clan after an approval workflow.
