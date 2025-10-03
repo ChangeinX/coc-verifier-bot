@@ -580,6 +580,49 @@ class TestVerifyCommand:
             )
 
 
+class TestCommandRegistration:
+    """Ensure slash commands are registered with the correct scope."""
+
+    def test_verifier_command_scopes_to_guild(self, monkeypatch):
+        """When a verifier guild is configured, commands should be guild scoped."""
+
+        guild_object = discord.Object(id=123456789)
+        mock_tree_command = MagicMock()
+
+        monkeypatch.setattr(bot, "VERIFIER_GUILD_OBJECT", guild_object)
+        monkeypatch.setattr(bot.tree, "command", mock_tree_command)
+
+        decorator = bot.verifier_command(name="example")
+
+        async def example_command(interaction):  # pragma: no cover - placeholder
+            del interaction
+
+        decorator(example_command)
+
+        mock_tree_command.assert_called_once()
+        _, kwargs = mock_tree_command.call_args
+        assert kwargs["guild"] is guild_object
+
+    def test_verifier_command_no_scope_without_guild(self, monkeypatch):
+        """Without a guild configured, commands remain global."""
+
+        mock_tree_command = MagicMock()
+
+        monkeypatch.setattr(bot, "VERIFIER_GUILD_OBJECT", None)
+        monkeypatch.setattr(bot.tree, "command", mock_tree_command)
+
+        decorator = bot.verifier_command(name="example")
+
+        async def example_command(interaction):  # pragma: no cover - placeholder
+            del interaction
+
+        decorator(example_command)
+
+        mock_tree_command.assert_called_once()
+        _, kwargs = mock_tree_command.call_args
+        assert "guild" not in kwargs and "guilds" not in kwargs
+
+
 class TestWhoisCommand:
     """Test the /whois command functionality."""
 

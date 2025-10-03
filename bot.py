@@ -74,6 +74,27 @@ intents.members = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
+VERIFIER_GUILD_OBJECT = (
+    discord.Object(id=VERIFIER_GUILD_ID) if VERIFIER_GUILD_ID is not None else None
+)
+
+
+def verifier_command(*args, **kwargs):
+    """Register a slash command, scoping to the verifier guild when configured."""
+
+    def decorator(func):
+        command_kwargs = dict(kwargs)
+        if (
+            VERIFIER_GUILD_OBJECT is not None
+            and "guild" not in command_kwargs
+            and "guilds" not in command_kwargs
+        ):
+            command_kwargs["guild"] = VERIFIER_GUILD_OBJECT
+        return tree.command(*args, **command_kwargs)(func)
+
+    return decorator
+
+
 # ---------- AWS / CoC clients ----------
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 table = dynamodb.Table(DDB_TABLE_NAME) if DDB_TABLE_NAME else None
@@ -314,7 +335,7 @@ async def cancel_pending_removal_message(
 
 
 # ---------- /verifyclan command ----------
-@tree.command(
+@verifier_command(
     name="verifyclan",
     description="Verify yourself as a clan member by providing your player tag.",
 )
@@ -415,7 +436,9 @@ async def verifyclan(interaction: discord.Interaction, player_tag: str) -> None:
 
 
 # ---------- /whois command ----------
-@tree.command(name="whois", description="Get the clan player name for a Discord user")
+@verifier_command(
+    name="whois", description="Get the clan player name for a Discord user"
+)
 @app_commands.describe(member="Member to look up")
 async def whois(interaction: discord.Interaction, member: discord.Member) -> None:
     await interaction.response.defer(ephemeral=True)
@@ -442,7 +465,7 @@ async def whois(interaction: discord.Interaction, member: discord.Member) -> Non
 
 
 # ---------- /recruited command ----------
-@tree.command(
+@verifier_command(
     name="recruited",
     description="Announce a recruited player with tag and source.",
 )
