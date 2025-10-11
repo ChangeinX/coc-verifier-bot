@@ -173,6 +173,20 @@ def test_build_registration_embed_includes_team_name_and_substitute():
     assert "+ 1 sub" in team_size_field.value
 
 
+def test_infer_division_defaults_single_level():
+    name, allowed, team_size = tournamentbot.infer_division_defaults("th12-1v1")
+    assert name == "TH12 1V1"
+    assert allowed == [12]
+    assert team_size == 1
+
+
+def test_infer_division_defaults_range():
+    name, allowed, team_size = tournamentbot.infer_division_defaults("th12-17")
+    assert name == "TH12 17"
+    assert allowed == list(range(12, 18))
+    assert team_size == 5
+
+
 def test_is_tournament_admin_checks_role_membership():
     admin_role = SimpleNamespace(id=tournamentbot.TOURNAMENT_ADMIN_ROLE_ID)
     member = SimpleNamespace(roles=[admin_role])

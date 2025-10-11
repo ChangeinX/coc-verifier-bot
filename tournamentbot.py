@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import Final
 
@@ -233,6 +234,10 @@ class SetupView(discord.ui.View):
         self.guild_id = guild_id
         self.requester_id = requester_id
         self.message: discord.Message | None = None
+        self.preset_select = DivisionPresetSelect(self)
+        self.existing_select: ExistingDivisionSelect | None = None
+        self.add_item(self.preset_select)
+        self._ensure_existing_select()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.requester_id or is_tournament_admin(
@@ -246,6 +251,7 @@ class SetupView(discord.ui.View):
         return False
 
     async def refresh(self) -> None:
+        self._ensure_existing_select()
         if self.message is None:
             return
         series = storage.get_series(self.guild_id)
@@ -266,6 +272,41 @@ class SetupView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
+    def _ensure_existing_select(self) -> None:
+        divisions = storage.list_division_configs(self.guild_id)
+        if divisions:
+            options = [
+                discord.SelectOption(
+                    label=cfg.division_name,
+                    value=cfg.division_id,
+                    description=cfg.division_id,
+                )
+                for cfg in divisions[:25]
+            ]
+            if self.existing_select is None:
+                self.existing_select = ExistingDivisionSelect(self, options)
+                self.add_item(self.existing_select)
+            else:
+                self.existing_select.refresh_options(options)
+        elif self.existing_select is not None:
+            self.remove_item(self.existing_select)
+            self.existing_select = None
+
+    async def open_division_modal(
+        self, interaction: discord.Interaction, division_id: str | None
+    ) -> None:
+        existing = (
+            storage.get_config(self.guild_id, division_id)
+            if division_id is not None
+            else None
+        )
+        modal = DivisionConfigModal(
+            self,
+            division_id=division_id,
+            existing_config=existing,
+        )
+        await interaction.response.send_modal(modal)
+
     @discord.ui.button(
         label="Update Registration Window",
         style=discord.ButtonStyle.primary,
@@ -277,13 +318,13 @@ class SetupView(discord.ui.View):
         await interaction.response.send_modal(RegistrationWindowModal(self, series))
 
     @discord.ui.button(
-        label="Add/Update Division",
+        label="Custom Division",
         style=discord.ButtonStyle.secondary,
     )
     async def add_division(  # type: ignore[override]
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
-        await interaction.response.send_modal(DivisionConfigModal(self))
+        await self.open_division_modal(interaction, None)
 
 
 class RegistrationWindowModal(discord.ui.Modal):
@@ -328,34 +369,137 @@ class RegistrationWindowModal(discord.ui.Modal):
         await self._setup_view.refresh()
 
 
-class DivisionConfigModal(discord.ui.Modal):
+class DivisionPresetSelect(discord.ui.Select):
+    PRESET_OPTIONS = [
+        discord.SelectOption(label="TH12 1v1", value="th12-1v1"),
+        discord.SelectOption(label="TH13 1v1", value="th13-1v1"),
+        discord.SelectOption(label="TH14 1v1", value="th14-1v1"),
+        discord.SelectOption(label="TH15 1v1", value="th15-1v1"),
+    ]
+
     def __init__(self, setup_view: SetupView) -> None:
+        super().__init__(
+            placeholder="Quick add a division…",
+            min_values=1,
+            max_values=1,
+            options=self.PRESET_OPTIONS,
+        )
+        self._setup_view = setup_view
+
+    async def callback(
+        self, interaction: discord.Interaction
+    ) -> None:  # pragma: no cover - UI wiring
+        division_id = normalize_division_value(self.values[0])
+        existing = storage.get_config(self._setup_view.guild_id, division_id)
+        if existing is not None:
+            await interaction.response.send_message(
+                f"Division {existing.division_name} already exists. Use the edit selector to modify it.",
+                ephemeral=True,
+            )
+            return
+
+        display_name, allowed_th, team_size = infer_division_defaults(division_id)
+        if not allowed_th:
+            allowed_th = [16, 17]
+        config = TournamentConfig(
+            guild_id=self._setup_view.guild_id,
+            division_id=division_id,
+            division_name=display_name or division_id.upper(),
+            team_size=team_size,
+            allowed_town_halls=allowed_th,
+            max_teams=32,
+            updated_by=interaction.user.id,
+            updated_at=utc_now_iso(),
+        )
+        storage.save_config(config)
+        await interaction.response.send_message(
+            f"Division {config.division_name} created.", ephemeral=True
+        )
+        await self._setup_view.refresh()
+
+
+class ExistingDivisionSelect(discord.ui.Select):
+    def __init__(
+        self, setup_view: SetupView, options: list[discord.SelectOption]
+    ) -> None:
+        super().__init__(
+            placeholder="Edit an existing division…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self._setup_view = setup_view
+
+    def refresh_options(self, options: list[discord.SelectOption]) -> None:
+        self.options = options
+
+    async def callback(
+        self, interaction: discord.Interaction
+    ) -> None:  # pragma: no cover - UI wiring
+        division_id = self.values[0]
+        await self._setup_view.open_division_modal(interaction, division_id)
+
+
+class DivisionConfigModal(discord.ui.Modal):
+    def __init__(
+        self,
+        setup_view: SetupView,
+        *,
+        division_id: str | None = None,
+        existing_config: TournamentConfig | None = None,
+    ) -> None:
         super().__init__(title="Add or Update Division")
         self._setup_view = setup_view
+        defaults = infer_division_defaults(division_id) if division_id else ("", [], 1)
+        if existing_config is not None:
+            defaults = (
+                existing_config.division_name,
+                existing_config.allowed_town_halls,
+                existing_config.team_size,
+            )
+        display_default = defaults[0]
+        allowed_default = " ".join(str(level) for level in defaults[1])
+        team_size_default = str(defaults[2])
+        self._locked_division_id = (
+            existing_config.division_id if existing_config is not None else None
+        )
+        division_default = self._locked_division_id or (
+            division_id if division_id is not None else ""
+        )
         self.division_id_input = discord.ui.TextInput(
-            label="Division ID",
-            placeholder="th12",
+            label=(
+                "Division ID (cannot be changed)"
+                if self._locked_division_id
+                else "Division ID"
+            ),
+            placeholder="th12-1v1",
             min_length=2,
             max_length=32,
+            default=division_default,
         )
         self.division_name_input = discord.ui.TextInput(
             label="Display Name",
-            placeholder="TH12 Division",
+            placeholder="TH12 1v1",
             required=False,
+            default=display_default,
         )
         self.team_size_input = discord.ui.TextInput(
             label="Team Size",
             placeholder="1",
-            default="1",
+            default=team_size_default,
         )
         self.allowed_th_input = discord.ui.TextInput(
             label="Allowed Town Halls",
             placeholder="12 13",
+            required=False,
+            default=allowed_default,
         )
         self.max_teams_input = discord.ui.TextInput(
             label="Maximum Teams",
             placeholder="32",
-            default="32",
+            default=(
+                str(existing_config.max_teams) if existing_config is not None else "32"
+            ),
         )
         for item in (
             self.division_id_input,
@@ -367,13 +511,22 @@ class DivisionConfigModal(discord.ui.Modal):
             self.add_item(item)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        try:
-            division_id = normalize_division_value(self.division_id_input.value)
-        except InvalidValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
-            return
+        if self._locked_division_id is not None:
+            division_id = self._locked_division_id
+        else:
+            try:
+                division_id = normalize_division_value(self.division_id_input.value)
+            except InvalidValueError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
 
-        division_name = self.division_name_input.value.strip() or division_id.upper()
+        inferred_name, inferred_th, inferred_team_size = infer_division_defaults(
+            division_id
+        )
+
+        division_name = self.division_name_input.value.strip()
+        if not division_name:
+            division_name = inferred_name or division_id.upper()
 
         try:
             team_size_raw = int(self.team_size_input.value)
@@ -385,7 +538,16 @@ class DivisionConfigModal(discord.ui.Modal):
 
         try:
             team_size = validate_team_size(team_size_raw)
-            allowed_th = parse_town_hall_levels(self.allowed_th_input.value)
+            allowed_th_raw = self.allowed_th_input.value.strip()
+            allowed_th = (
+                parse_town_hall_levels(allowed_th_raw)
+                if allowed_th_raw
+                else inferred_th
+            )
+            if not allowed_th:
+                raise InvalidTownHallError(
+                    "Unable to infer allowed Town Halls; please specify them explicitly."
+                )
             max_teams_raw = int(self.max_teams_input.value)
             max_teams = validate_max_teams(max_teams_raw)
         except (InvalidValueError, InvalidTownHallError) as exc:
@@ -501,6 +663,37 @@ def normalize_division_value(raw: str) -> str:
             "Division is required. Please select a tournament division."
         )
     return value
+
+
+def infer_division_defaults(division_id: str | None) -> tuple[str, list[int], int]:
+    if not division_id:
+        return ("", [], 1)
+    text = division_id.lower()
+    display_name = division_id.upper().replace("-", " ")
+
+    start = None
+    end = None
+    if text.startswith("th"):
+        match = re.match(r"th(\d+)", text)
+        if match:
+            start = int(match.group(1))
+            remainder = text[match.end() :]
+            if remainder.startswith("-"):
+                tail = remainder[1:]
+                tail_match = re.fullmatch(r"(?:th)?(\d+)", tail)
+                if tail_match:
+                    end = int(tail_match.group(1))
+
+    allowed: list[int] = []
+    if start is not None:
+        if end is not None:
+            low, high = sorted((start, end))
+            allowed = list(range(low, high + 1))
+        else:
+            allowed = [start]
+
+    team_size = 1 if "1v1" in text else 5
+    return (display_name, allowed, team_size)
 
 
 async def division_autocomplete(
