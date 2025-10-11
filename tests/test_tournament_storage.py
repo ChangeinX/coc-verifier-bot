@@ -155,6 +155,9 @@ def test_config_round_trip():
     restored = storage.get_config(config.guild_id, config.division_id)
     assert restored == config
 
+    configs = storage.list_division_configs(config.guild_id)
+    assert [cfg.division_id for cfg in configs] == ["th13"]
+
 
 def test_config_missing_returns_none():
     storage, _ = build_storage()

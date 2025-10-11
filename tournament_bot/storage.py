@@ -48,7 +48,11 @@ class TournamentStorage:
             Select="ALL_ATTRIBUTES",
         )
         items = resp.get("Items", [])
-        configs = [TournamentConfig.from_item(item) for item in items]
+        configs = [
+            TournamentConfig.from_item(item)
+            for item in items
+            if str(item.get("sk", "")).endswith("#CONFIG")
+        ]
         configs.sort(key=lambda cfg: (cfg.division_name.lower(), cfg.division_id))
         return configs
 
