@@ -2152,6 +2152,9 @@ async def _simulate_tourney_division_autocomplete(
 async def on_ready() -> None:  # pragma: no cover - Discord lifecycle hook
     if TOURNAMENT_GUILD_ID is not None:
         guild = discord.Object(id=TOURNAMENT_GUILD_ID)
+        # Remove any previously-synced global commands so only the guild copy remains.
+        tree.clear_commands(guild=None)
+        await tree.sync(guild=None)
         await tree.sync(guild=guild)
         log.info("Commands synced to guild %s", TOURNAMENT_GUILD_ID)
     else:
