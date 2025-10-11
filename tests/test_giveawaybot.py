@@ -764,6 +764,27 @@ class TestEligibilityCheck:
             result = await giveawaybot.eligible_for_giftcard("123456789")
             assert result is False
 
+    @pytest.mark.asyncio
+    async def test_eligible_for_giftcard_transient_error(self):
+        """Transient Clash API failures should propagate for retry handling."""
+        mock_ver_table = MagicMock()
+        mock_ver_table.get_item.return_value = {
+            "Item": {"player_tag": "#PLAYER1", "clan_tag": "#CLAN"}
+        }
+
+        with (
+            patch.object(giveawaybot, "ver_table", mock_ver_table),
+            patch.object(giveawaybot, "coc_client") as mock_coc_client,
+        ):
+            mock_coc_client.get_raid_log = AsyncMock(
+                side_effect=giveawaybot.Maintenance(
+                    None, {"message": "maintenance"}
+                )
+            )
+
+            with pytest.raises(giveawaybot.TransientRaidLogError):
+                await giveawaybot.eligible_for_giftcard("123456789")
+
 
 class TestFinishGiveaway:
     """Test giveaway finishing functionality."""
@@ -881,6 +902,77 @@ class TestFinishGiveaway:
             winner_embed = send_kwargs["embed"]
             assert isinstance(winner_embed, discord.Embed)
             assert any(field.name == "Prize" for field in winner_embed.fields)
+
+    @pytest.mark.asyncio
+    async def test_finish_giveaway_reschedules_after_transient_error(self):
+        """Gift card giveaways should retry after transient eligibility failures."""
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {
+                "run_id": "run123",
+                "message_id": "999888777",
+                "draw_time": "2024-01-01T12:00:00+00:00",
+            }
+        }
+        mock_table.query.return_value = {
+            "Items": [
+                {"user_id": "run123#111"},
+            ]
+        }
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(
+                giveawaybot,
+                "eligible_for_giftcard",
+                AsyncMock(side_effect=giveawaybot.TransientRaidLogError("down")),
+            ),
+            patch.object(giveawaybot.bot, "get_channel") as get_channel_mock,
+        ):
+            start = datetime.datetime.now(tz=datetime.UTC)
+            winners = await giveawaybot.finish_giveaway("giftcard-2024-01-01")
+
+        assert winners == []
+        get_channel_mock.assert_not_called()
+        mock_table.update_item.assert_called_once()
+
+        update_kwargs = mock_table.update_item.call_args.kwargs
+        assert update_kwargs["UpdateExpression"].startswith("SET draw_time = :dt")
+
+        scheduled_iso = update_kwargs["ExpressionAttributeValues"][":dt"]
+        scheduled_time = datetime.datetime.fromisoformat(scheduled_iso)
+        assert scheduled_time.tzinfo is not None
+        assert scheduled_time >= start + datetime.timedelta(minutes=59)
+
+    @pytest.mark.asyncio
+    async def test_finish_giveaway_logs_when_reschedule_fails(self):
+        """Ensure failures to reschedule still stop the draw and get logged."""
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {
+                "run_id": "run123",
+                "message_id": "999888777",
+                "draw_time": "2024-01-01T12:00:00+00:00",
+            }
+        }
+        mock_table.query.return_value = {"Items": [{"user_id": "run123#111"}]}
+        mock_table.update_item.side_effect = RuntimeError("ddb down")
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(
+                giveawaybot,
+                "eligible_for_giftcard",
+                AsyncMock(side_effect=giveawaybot.TransientRaidLogError("down")),
+            ),
+            patch.object(giveawaybot.log, "exception") as log_exception_mock,
+            patch.object(giveawaybot.log, "error") as log_error_mock,
+        ):
+            winners = await giveawaybot.finish_giveaway("giftcard-2024-01-01")
+
+        assert winners == []
+        log_exception_mock.assert_called_once()
+        log_error_mock.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_finish_giveaway_fills_missing_winners(self):

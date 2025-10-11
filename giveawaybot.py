@@ -12,6 +12,26 @@ from zoneinfo import ZoneInfo
 
 import boto3
 import coc
+
+try:  # pragma: no cover - fallback for tests without full coc package
+    from coc.errors import GatewayError, HTTPException, Maintenance
+except ModuleNotFoundError:  # pragma: no cover - simple stubs for offline tests
+    class _DummyCocError(Exception):
+        """Fallback error type used when coc.errors is unavailable."""
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            super().__init__(*_args)
+
+    class GatewayError(_DummyCocError):
+        pass
+
+    class HTTPException(_DummyCocError):
+        def __init__(self, status: int | None = None, *_args, **_kwargs) -> None:
+            super().__init__(status, *_args, **_kwargs)
+            self.status = status
+
+    class Maintenance(_DummyCocError):
+        pass
 import discord
 import discord.abc
 from boto3.dynamodb import conditions
@@ -301,6 +321,53 @@ def _is_success_state(value: object) -> bool:
         return value != 0
     if isinstance(value, str):
         return value.strip().lower() in SUCCESSFUL_PAYOUT_VALUES
+    return False
+
+
+_TRANSIENT_HTTP_STATUSES: Final[set[int]] = {500, 502, 503, 504}
+GIVEAWAY_RETRY_DELAY: Final[datetime.timedelta] = datetime.timedelta(hours=1)
+
+
+class TransientRaidLogError(RuntimeError):
+    """Raised when raid log retrieval fails due to a transient API issue."""
+
+
+def _reschedule_giveaway_draw(gid: str) -> datetime.datetime | None:
+    """Reschedule a giveaway draw after a transient eligibility failure."""
+
+    if table is None:
+        return None
+
+    resume_at = datetime.datetime.now(tz=datetime.UTC) + GIVEAWAY_RETRY_DELAY
+    iso_timestamp = resume_at.isoformat()
+
+    try:
+        table.update_item(
+            Key={"giveaway_id": gid, "user_id": "META"},
+            UpdateExpression="SET draw_time = :dt REMOVE drawn",
+            ExpressionAttributeValues={":dt": iso_timestamp},
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to reschedule giveaway %s for retry: %s", gid, exc)
+        return None
+
+    log.info(
+        "Rescheduled giveaway %s to %s after transient raid log error",
+        gid,
+        iso_timestamp,
+    )
+    return resume_at
+
+
+def _is_transient_coc_error(exc: Exception) -> bool:
+    """Return True when a Clash of Clans API error is transient."""
+
+    if isinstance(exc, (Maintenance, GatewayError)):
+        return True
+    if isinstance(exc, HTTPException):
+        status = getattr(exc, "status", None)
+        if isinstance(status, int) and status in _TRANSIENT_HTTP_STATUSES:
+            return True
     return False
 
 
@@ -847,6 +914,13 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
             return False
         return member.capital_resources_looted >= 23_000
     except Exception as exc:  # pylint: disable=broad-except
+        if _is_transient_coc_error(exc):
+            log.warning(
+                "Raid log temporarily unavailable for clan %s; retrying in one hour",
+                clan_tag,
+                exc_info=exc,
+            )
+            raise TransientRaidLogError(clan_tag) from exc
         log.exception("Raid log check failed for clan %s: %s", clan_tag, exc)
     return False
 
@@ -902,6 +976,14 @@ async def finish_giveaway(
             try:
                 if await eligible_for_giftcard(entry):
                     filtered_entries.append(entry)
+            except TransientRaidLogError:
+                rescheduled_at = _reschedule_giveaway_draw(gid)
+                if rescheduled_at is None:
+                    log.error(
+                        "Unable to reschedule giveaway %s after transient error",
+                        gid,
+                    )
+                return []
             except Exception as exc:  # pylint: disable=broad-except
                 log.exception("Eligibility check failed for %s: %s", entry, exc)
         entries_list = filtered_entries
