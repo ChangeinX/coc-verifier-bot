@@ -8,6 +8,7 @@ from .models import (
     PlayerEntry,
     TeamRegistration,
     TournamentConfig,
+    TournamentSeries,
     utc_now_iso,
 )
 from .storage import TournamentStorage
@@ -27,6 +28,7 @@ from .validation import (
 __all__ = [
     "PlayerEntry",
     "TeamRegistration",
+    "TournamentSeries",
     "TournamentConfig",
     "BracketSlot",
     "BracketMatch",

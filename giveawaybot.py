@@ -16,6 +16,7 @@ import coc
 try:  # pragma: no cover - fallback for tests without full coc package
     from coc.errors import GatewayError, HTTPException, Maintenance
 except ModuleNotFoundError:  # pragma: no cover - simple stubs for offline tests
+
     class _DummyCocError(Exception):
         """Fallback error type used when coc.errors is unavailable."""
 
@@ -32,6 +33,8 @@ except ModuleNotFoundError:  # pragma: no cover - simple stubs for offline tests
 
     class Maintenance(_DummyCocError):
         pass
+
+
 import discord
 import discord.abc
 from boto3.dynamodb import conditions

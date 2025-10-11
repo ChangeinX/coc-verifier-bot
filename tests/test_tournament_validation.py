@@ -6,6 +6,7 @@ from tournament_bot import (
     PlayerEntry,
     TeamRegistration,
     TournamentConfig,
+    TournamentSeries,
     normalize_player_tag,
     parse_player_tags,
     parse_registration_datetime,
@@ -59,6 +60,7 @@ def test_parse_town_hall_levels_rejects_non_numeric():
 
 
 def test_validate_team_size_enforces_increment():
+    assert validate_team_size(1) == 1
     assert validate_team_size(10) == 10
     with pytest.raises(InvalidValueError):
         validate_team_size(9)
@@ -66,7 +68,9 @@ def test_validate_team_size_enforces_increment():
 
 def test_validate_team_size_rejects_too_small_and_large():
     with pytest.raises(InvalidValueError):
-        validate_team_size(4)
+        validate_team_size(0)
+    with pytest.raises(InvalidValueError):
+        validate_team_size(2)
     with pytest.raises(InvalidValueError):
         validate_team_size(55)
 
@@ -91,24 +95,36 @@ def test_normalize_player_tag_variants():
 
 
 def test_models_round_trip():
-    config = TournamentConfig(
+    series = TournamentSeries(
         guild_id=123,
-        team_size=5,
-        allowed_town_halls=[16, 17],
-        max_teams=10,
         registration_opens_at="2024-02-01T12:00:00.000Z",
         registration_closes_at="2024-02-05T18:00:00.000Z",
         updated_by=42,
         updated_at=utc_now_iso(),
     )
-    config_item = config.to_item()
-    assert TournamentConfig.from_item(config_item) == config
-    opens_at, closes_at = config.registration_window()
+    series_item = series.to_item()
+    restored_series = TournamentSeries.from_item(series_item)
+    assert restored_series == series
+    opens_at, closes_at = restored_series.registration_window()
     assert opens_at.day == 1
     assert closes_at.day == 5
 
+    config = TournamentConfig(
+        guild_id=123,
+        division_id="th16",
+        division_name="TH16",
+        team_size=5,
+        allowed_town_halls=[16, 17],
+        max_teams=10,
+        updated_by=42,
+        updated_at=utc_now_iso(),
+    )
+    config_item = config.to_item()
+    assert TournamentConfig.from_item(config_item) == config
+
     registration = TeamRegistration(
         guild_id=123,
+        division_id="th16",
         user_id=456,
         user_name="User#1234",
         players=[
@@ -122,6 +138,7 @@ def test_models_round_trip():
     item = registration.to_item()
     restored = TeamRegistration.from_item(item)
     assert restored.guild_id == registration.guild_id
+    assert restored.division_id == registration.division_id
     assert restored.user_id == registration.user_id
     assert [p.tag for p in restored.players] == ["#AAA111", "#BBB222"]
     assert restored.team_name == "Legends"

@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
         help="Guild ID to embed in generated registrations",
     )
     parser.add_argument(
+        "--division",
+        type=str,
+        default="th12",
+        help="Division ID to assign to generated registrations",
+    )
+    parser.add_argument(
         "--no-bracket",
         action="store_true",
         help="Skip printing the rendered bracket (snapshots are still noted)",
@@ -82,13 +88,14 @@ async def main_async() -> None:
             email,
             password,
             args.guild_id,
+            args.division,
             seed_file=args.seed_file,
             base_time=base_time,
         )
     finally:
         await client.close()
 
-    bracket = create_bracket_state(args.guild_id, registrations)
+    bracket = create_bracket_state(args.guild_id, args.division, registrations)
     final_state, snapshots = simulate_tournament(bracket)
 
     print_snapshots(snapshots)

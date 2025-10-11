@@ -10,6 +10,8 @@ import tournament_bot.simulator as sim
 import tournament_bot.tourney_simulator as cli
 from tournament_bot.bracket import create_bracket_state
 
+DIVISION = "th12"
+
 
 def test_load_seed_tags_success(tmp_path):
     seed_file = tmp_path / "seed.txt"
@@ -79,7 +81,12 @@ def test_build_registrations_produces_unique_entries():
         sim.SeededPlayer("Golf", "#G", 15, 4800, 190, None, None),
     ]
 
-    registrations = sim.build_registrations(players, guild_id=42, base_time=base_time)
+    registrations = sim.build_registrations(
+        players,
+        guild_id=42,
+        division_id=DIVISION,
+        base_time=base_time,
+    )
 
     assert len(registrations) == 2
     assert registrations[0].user_id == 1
@@ -100,6 +107,7 @@ def test_build_registrations_shuffle_uses_rng():
     registrations = sim.build_registrations(
         players,
         guild_id=5,
+        division_id=DIVISION,
         base_time=base_time,
         shuffle=True,
         rng=rng,
@@ -167,9 +175,10 @@ def test_cli_helpers(capsys):
             sim.SeededPlayer("India", "#I", 16, 5200, 210, None, None),
         ],
         guild_id=1,
+        division_id=DIVISION,
         base_time=datetime(2025, 1, 1, tzinfo=UTC),
     )
-    bracket = create_bracket_state(1, registrations)
+    bracket = create_bracket_state(1, DIVISION, registrations)
     cli.render_final_bracket(bracket)
     rendered = capsys.readouterr().out
     assert "Final Bracket" in rendered
@@ -184,6 +193,7 @@ async def test_cli_main_async(monkeypatch, tmp_path, capsys):
         seed_file=seed_file,
         guild_id=7,
         base_time="2025-01-01T00:00:00.000Z",
+        division=DIVISION,
         no_bracket=True,
     )
 
@@ -215,6 +225,7 @@ async def test_cli_main_async(monkeypatch, tmp_path, capsys):
         email,
         password,
         guild_id,
+        division_id,
         seed_file=None,
         base_time=None,
         shuffle=False,
@@ -235,6 +246,7 @@ async def test_cli_main_async(monkeypatch, tmp_path, capsys):
         return sim.build_registrations(
             seeded,
             guild_id,
+            division_id,
             base_time=base_time,
             shuffle=shuffle,
             rng=rng,

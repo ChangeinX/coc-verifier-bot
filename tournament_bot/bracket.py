@@ -123,7 +123,7 @@ def _auto_resolve(state: BracketState) -> None:
 
 
 def create_bracket_state(
-    guild_id: int, registrations: Sequence[TeamRegistration]
+    guild_id: int, division_id: str, registrations: Sequence[TeamRegistration]
 ) -> BracketState:
     if len(registrations) < 2:
         raise ValueError("At least two teams are required to create a bracket")
@@ -190,7 +190,12 @@ def create_bracket_state(
         )
         previous_round_matches = next_round_matches
 
-    state = BracketState(guild_id=guild_id, created_at=utc_now_iso(), rounds=rounds)
+    state = BracketState(
+        guild_id=guild_id,
+        division_id=division_id,
+        created_at=utc_now_iso(),
+        rounds=rounds,
+    )
     _auto_resolve(state)
     return state
 

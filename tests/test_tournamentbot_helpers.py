@@ -3,24 +3,45 @@ from types import SimpleNamespace
 import pytest
 
 import tournamentbot
-from tournament_bot import PlayerEntry, TeamRegistration, TournamentConfig, utc_now_iso
+from tournament_bot import (
+    PlayerEntry,
+    TeamRegistration,
+    TournamentConfig,
+    TournamentSeries,
+    utc_now_iso,
+)
 
 
-def test_format_config_message_includes_details():
-    config = TournamentConfig(
+def test_build_setup_overview_embed_lists_divisions():
+    series = TournamentSeries(
         guild_id=1,
-        team_size=10,
-        allowed_town_halls=[16, 17],
-        max_teams=20,
         registration_opens_at="2024-05-01T18:00:00.000Z",
         registration_closes_at="2024-05-10T18:00:00.000Z",
-        updated_by=0,
+        updated_by=7,
         updated_at="2024-01-01T00:00:00.000Z",
     )
-    message = tournamentbot.format_config_message(config)
-    assert "Team size: 10" in message
-    assert "Allowed Town Halls: 16, 17" in message
-    assert "Registration: May 01, 2024 18:00 UTC — May 10, 2024 18:00 UTC" in message
+    config = TournamentConfig(
+        guild_id=1,
+        division_id="th15",
+        division_name="TH15",
+        team_size=5,
+        allowed_town_halls=[15, 16],
+        max_teams=32,
+        updated_by=7,
+        updated_at="2024-01-01T00:00:00.000Z",
+    )
+
+    embed = tournamentbot.build_setup_overview_embed(series, [config])
+
+    registration_field = next(
+        field for field in embed.fields if field.name == "Registration Window"
+    )
+    assert "May" in registration_field.value
+    division_field = next(
+        field for field in embed.fields if field.name.startswith("TH15 (th15)")
+    )
+    assert "Team size: 5" in division_field.value
+    assert "Allowed TH: 15, 16" in division_field.value
 
 
 def test_ensure_guild_validates_presence():
@@ -71,18 +92,18 @@ async def test_build_seeded_registrations_for_guild(monkeypatch):
     monkeypatch.setattr(tournamentbot, "COC_PASSWORD", "password")
     monkeypatch.setattr(tournamentbot, "coc_client", SimpleNamespace(), raising=False)
 
-    async def fake_build(client, email, password, guild_id, **kwargs):
+    async def fake_build(client, email, password, guild_id, division_id, **kwargs):
         assert client is tournamentbot.coc_client
         assert email == "email"
         assert password == "password"
         assert guild_id == 99
+        assert division_id == "th12"
         assert kwargs.get("shuffle") is True
-
         return ["registration"]
 
     monkeypatch.setattr(tournamentbot, "build_seeded_registrations", fake_build)
 
-    result = await tournamentbot.build_seeded_registrations_for_guild(99)
+    result = await tournamentbot.build_seeded_registrations_for_guild(99, "th12")
 
     assert result == ["registration"]
 
@@ -109,6 +130,7 @@ def test_build_registration_embed_includes_team_name_and_substitute():
     substitute = PlayerEntry(name="Bench", tag="#SUB1", town_hall=15)
     registration = TeamRegistration(
         guild_id=1,
+        division_id="th15",
         user_id=2,
         user_name="Captain",
         players=players,
@@ -118,24 +140,34 @@ def test_build_registration_embed_includes_team_name_and_substitute():
     )
     config = TournamentConfig(
         guild_id=1,
+        division_id="th15",
+        division_name="TH15",
         team_size=5,
         allowed_town_halls=[15, 16],
         max_teams=8,
+        updated_by=1,
+        updated_at="2024-01-01T00:00:00.000Z",
+    )
+    series = TournamentSeries(
+        guild_id=1,
         registration_opens_at="2024-01-01T00:00:00.000Z",
         registration_closes_at="2024-01-05T00:00:00.000Z",
         updated_by=1,
         updated_at="2024-01-01T00:00:00.000Z",
     )
 
-    closes_at = tournamentbot.parse_registration_datetime("2024-01-05T00:00")
     embed = tournamentbot.build_registration_embed(
         registration,
         config=config,
-        closes_at=closes_at,
+        series=series,
         is_update=False,
     )
 
     assert "Legends" in embed.title
+    required_field = next(
+        field for field in embed.fields if field.name == "Team Size (Required)"
+    )
+    assert required_field.value == "5"
     team_size_field = next(field for field in embed.fields if field.name == "Team Size")
     assert "5 starters" in team_size_field.value
     assert "+ 1 sub" in team_size_field.value
@@ -157,7 +189,7 @@ def make_member(user_id: int, *, roles: list[object] | None = None) -> SimpleNam
     return SimpleNamespace(id=user_id, roles=roles or [])
 
 
-def test_resolve_registration_owner_self(monkeypatch):
+def test_resolve_registration_owner_self():
     actor = make_member(10)
     interaction = SimpleNamespace(user=actor)
 

@@ -73,8 +73,15 @@ DISCORD_TOKEN=... TOURNAMENT_TABLE_NAME=... python tournamentbot.py
 To run inside Docker, build the appropriate image (`Dockerfile`, `Dockerfile.giveaway`, or `Dockerfile.tournament`) and pass the same environment variables with `docker run`.
 
 ## 6. Tournament commands
-- `/setup` (admin only) - set team size (increments of 5), allowed Town Hall levels, and the maximum number of teams (increments of 2).
-- `/registerteam` - players supply their Clash tags (space/comma separated). The bot validates each player through the Clash of Clans API and stores the registration in DynamoDB. Successful registrations are broadcast in the channel as `discord user | player name | player tag` lines.
+- `/setup` (admin only) now opens an interactive view: configure the shared registration window, then add/update divisions (e.g. `th12`, `th13`). Each division manages its own team size, allowed Town Hall levels, and maximum teams.
+- `/registerteam division:<id> team_name:<text> player_tags:<tags>` – captains register for a specific division. Divisions with a required team size of `1` automatically block substitutes.
+- `/teamname division:<id> team_name:<text>` – rename an existing team in the selected division (admins can target a different captain).
+- `/registersub division:<id> player_tag:<tag>` – add or replace a substitute when the division supports teams larger than one.
+- `/showregistered division:<id>` – list the registered teams for the division.
+- `/create-bracket division:<id>` (admin only) – seed the bracket for the division.
+- `/showbracket division:<id>` – display the current bracket state.
+- `/select-round-winner division:<id> winner_captain:<user>` (admin only) – advance a team within the division bracket.
+- `/simulate-tourney division:<id>` (admin only) – run an automated bracket simulation for the division; falls back to seeded data when no live registrations exist.
 
 ## 7. Verification commands
 - `/verifyclan <player_tag>` - link a Discord user to their Clash of Clans account.

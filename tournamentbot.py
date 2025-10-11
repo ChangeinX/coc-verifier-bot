@@ -25,6 +25,7 @@ from tournament_bot import (
     PlayerEntry,
     TeamRegistration,
     TournamentConfig,
+    TournamentSeries,
     TournamentStorage,
     parse_player_tags,
     parse_registration_datetime,
@@ -153,7 +154,9 @@ async def ensure_coc_client() -> coc.Client:
     return coc_client
 
 
-async def build_seeded_registrations_for_guild(guild_id: int) -> list[TeamRegistration]:
+async def build_seeded_registrations_for_guild(
+    guild_id: int, division_id: str
+) -> list[TeamRegistration]:
     """Fetch live player data and build seeded tournament registrations."""
     if not COC_EMAIL or not COC_PASSWORD:
         raise RuntimeError(
@@ -165,6 +168,7 @@ async def build_seeded_registrations_for_guild(guild_id: int) -> list[TeamRegist
         COC_EMAIL,
         COC_PASSWORD,
         guild_id,
+        division_id=division_id,
         shuffle=True,
     )
 
@@ -173,68 +177,236 @@ def format_display(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%b %d, %Y %H:%M UTC")
 
 
-def format_config_message(
-    config: TournamentConfig,
-    *,
-    opens_at: datetime | None = None,
-    closes_at: datetime | None = None,
-) -> str:
-    if opens_at is None or closes_at is None:
-        try:
-            opens_at, closes_at = config.registration_window()
-        except (ValueError, AttributeError):
-            opens_at = closes_at = None
-
-    allowed = ", ".join(str(level) for level in config.allowed_town_halls)
-    window = (
-        f"{format_display(opens_at)} — {format_display(closes_at)}"
-        if opens_at and closes_at
-        else "Not configured"
-    )
-    return (
-        "Tournament configuration updated.\n"
-        f"- Registration: {window}\n"
-        f"- Team size: {config.team_size}\n"
-        f"- Allowed Town Halls: {allowed}\n"
-        f"- Maximum teams: {config.max_teams}"
-    )
-
-
-def build_setup_embed(
-    config: TournamentConfig,
-    *,
-    opens_at: datetime,
-    closes_at: datetime,
-    requested_by: discord.abc.User,
+def build_setup_overview_embed(
+    series: TournamentSeries | None, divisions: list[TournamentConfig]
 ) -> discord.Embed:
     embed = discord.Embed(
-        title="Clash Time!",
-        description="Registration window is locked. Rally your squad!",
-        color=discord.Color.orange(),
-        timestamp=closes_at,
+        title="Tournament Setup",
+        description="Configure registration windows and divisions for this guild.",
+        color=discord.Color.teal(),
+        timestamp=datetime.now(UTC),
     )
-    embed.add_field(
-        name="Registration Window",
-        value=f"{format_display(opens_at)} — {format_display(closes_at)}",
-        inline=False,
+
+    if series is not None:
+        opens_at, closes_at = series.registration_window()
+        embed.add_field(
+            name="Registration Window",
+            value=f"{format_display(opens_at)} — {format_display(closes_at)}",
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Registration Window",
+            value="Not configured",
+            inline=False,
+        )
+
+    if divisions:
+        for config in divisions:
+            allowed = ", ".join(str(level) for level in config.allowed_town_halls)
+            details = (
+                f"Team size: {config.team_size}\n"
+                f"Max teams: {config.max_teams}\n"
+                f"Allowed TH: {allowed or 'None'}"
+            )
+            embed.add_field(
+                name=f"{config.division_name} ({config.division_id})",
+                value=details,
+                inline=False,
+            )
+    else:
+        embed.add_field(
+            name="Divisions",
+            value="No divisions configured yet.",
+            inline=False,
+        )
+
+    embed.set_footer(
+        text="Use the buttons below to update the registration window and divisions."
     )
-    embed.add_field(
-        name="Team Size",
-        value=f"{config.team_size} players",
-        inline=True,
-    )
-    embed.add_field(
-        name="Allowed Town Halls",
-        value=", ".join(str(level) for level in config.allowed_town_halls),
-        inline=True,
-    )
-    embed.add_field(
-        name="Max Teams",
-        value=str(config.max_teams),
-        inline=True,
-    )
-    embed.set_footer(text=f"Configured by {requested_by}")
     return embed
+
+
+class SetupView(discord.ui.View):
+    def __init__(self, guild_id: int, requester_id: int) -> None:
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.requester_id = requester_id
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id or is_tournament_admin(
+            interaction.user
+        ):
+            return True
+        await interaction.response.send_message(
+            "Only tournament admins may use this setup session.",
+            ephemeral=True,
+        )
+        return False
+
+    async def refresh(self) -> None:
+        if self.message is None:
+            return
+        series = storage.get_series(self.guild_id)
+        divisions = storage.list_division_configs(self.guild_id)
+        embed = build_setup_overview_embed(series, divisions)
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning("Failed to refresh setup view: %s", exc)
+
+    async def on_timeout(self) -> None:  # pragma: no cover - UI timeout
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(
+        label="Update Registration Window",
+        style=discord.ButtonStyle.primary,
+    )
+    async def update_window(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        series = storage.get_series(self.guild_id)
+        await interaction.response.send_modal(RegistrationWindowModal(self, series))
+
+    @discord.ui.button(
+        label="Add/Update Division",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def add_division(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(DivisionConfigModal(self))
+
+
+class RegistrationWindowModal(discord.ui.Modal):
+    def __init__(self, setup_view: SetupView, series: TournamentSeries | None) -> None:
+        super().__init__(title="Update Registration Window")
+        self._setup_view = setup_view
+        default_opens = series.registration_opens_at if series else ""
+        default_closes = series.registration_closes_at if series else ""
+        self.opens_input = discord.ui.TextInput(
+            label="Opens (UTC)",
+            default=default_opens,
+            placeholder="2024-05-01T18:00",
+        )
+        self.closes_input = discord.ui.TextInput(
+            label="Closes (UTC)",
+            default=default_closes,
+            placeholder="2024-05-10T22:00",
+        )
+        self.add_item(self.opens_input)
+        self.add_item(self.closes_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            opens_at = parse_registration_datetime(self.opens_input.value)
+            closes_at = parse_registration_datetime(self.closes_input.value)
+            opens_at, closes_at = validate_registration_window(opens_at, closes_at)
+        except InvalidValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        series = TournamentSeries(
+            guild_id=self._setup_view.guild_id,
+            registration_opens_at=isoformat_utc(opens_at),
+            registration_closes_at=isoformat_utc(closes_at),
+            updated_by=interaction.user.id,
+            updated_at=utc_now_iso(),
+        )
+        storage.save_series(series)
+        await interaction.response.send_message(
+            "Registration window updated.", ephemeral=True
+        )
+        await self._setup_view.refresh()
+
+
+class DivisionConfigModal(discord.ui.Modal):
+    def __init__(self, setup_view: SetupView) -> None:
+        super().__init__(title="Add or Update Division")
+        self._setup_view = setup_view
+        self.division_id_input = discord.ui.TextInput(
+            label="Division ID",
+            placeholder="th12",
+            min_length=2,
+            max_length=32,
+        )
+        self.division_name_input = discord.ui.TextInput(
+            label="Display Name",
+            placeholder="TH12 Division",
+            required=False,
+        )
+        self.team_size_input = discord.ui.TextInput(
+            label="Team Size",
+            placeholder="1",
+            default="1",
+        )
+        self.allowed_th_input = discord.ui.TextInput(
+            label="Allowed Town Halls",
+            placeholder="12 13",
+        )
+        self.max_teams_input = discord.ui.TextInput(
+            label="Maximum Teams",
+            placeholder="32",
+            default="32",
+        )
+        for item in (
+            self.division_id_input,
+            self.division_name_input,
+            self.team_size_input,
+            self.allowed_th_input,
+            self.max_teams_input,
+        ):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            division_id = normalize_division_value(self.division_id_input.value)
+        except InvalidValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        division_name = self.division_name_input.value.strip() or division_id.upper()
+
+        try:
+            team_size_raw = int(self.team_size_input.value)
+        except ValueError:
+            await interaction.response.send_message(
+                "Team size must be a whole number.", ephemeral=True
+            )
+            return
+
+        try:
+            team_size = validate_team_size(team_size_raw)
+            allowed_th = parse_town_hall_levels(self.allowed_th_input.value)
+            max_teams_raw = int(self.max_teams_input.value)
+            max_teams = validate_max_teams(max_teams_raw)
+        except (InvalidValueError, InvalidTownHallError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        config = TournamentConfig(
+            guild_id=self._setup_view.guild_id,
+            division_id=division_id,
+            division_name=division_name,
+            team_size=team_size,
+            allowed_town_halls=allowed_th,
+            max_teams=max_teams,
+            updated_by=interaction.user.id,
+            updated_at=utc_now_iso(),
+        )
+        storage.save_config(config)
+        await interaction.response.send_message(
+            f"Division {division_name} saved.", ephemeral=True
+        )
+        await self._setup_view.refresh()
 
 
 def format_lineup_table(
@@ -322,20 +494,65 @@ def resolve_registration_owner(
     return captain, True
 
 
+def normalize_division_value(raw: str) -> str:
+    value = raw.strip().lower()
+    if not value:
+        raise InvalidValueError(
+            "Division is required. Please select a tournament division."
+        )
+    return value
+
+
+async def division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    guild = interaction.guild
+    if guild is None:
+        return []
+
+    try:
+        storage.ensure_table()
+    except RuntimeError:
+        return []
+
+    division_ids = storage.list_division_ids(guild.id)
+    if not division_ids:
+        return []
+
+    current_lower = current.strip().lower()
+    matches = [
+        division_id
+        for division_id in division_ids
+        if not current_lower or current_lower in division_id.lower()
+    ]
+    if not matches:
+        matches = division_ids
+
+    choices: list[app_commands.Choice[str]] = []
+    for division_id in matches[:25]:
+        choices.append(app_commands.Choice(name=division_id.upper(), value=division_id))
+    return choices
+
+
 def build_registration_embed(
     registration: TeamRegistration,
     *,
     config: TournamentConfig,
-    closes_at: datetime,
+    series: TournamentSeries,
     is_update: bool,
 ) -> discord.Embed:
+    _, closes_at = series.registration_window()
     team_title = registration.team_name or "Unnamed Team"
     verb = "updated" if is_update else "registered"
     embed = discord.Embed(
-        title=f"Team {verb}: {team_title}",
+        title=f"{config.division_name} | Team {verb}: {team_title}",
         description=f"Captain: {registration.user_name}",
         color=discord.Color.green(),
         timestamp=datetime.now(UTC),
+    )
+    embed.add_field(name="Division", value=config.division_name, inline=True)
+    embed.add_field(
+        name="Team Size (Required)", value=str(config.team_size), inline=True
     )
     players_table = format_lineup_table(
         registration.players, substitute=registration.substitute
@@ -359,9 +576,7 @@ def build_registration_embed(
     if registration.substitute is not None:
         town_halls.add(f"TH{registration.substitute.town_hall}")
     embed.add_field(
-        name="Town Halls",
-        value=", ".join(sorted(town_halls)) or "-",
-        inline=True,
+        name="Town Halls", value=", ".join(sorted(town_halls)) or "-", inline=True
     )
     return embed
 
@@ -513,36 +728,13 @@ async def send_ephemeral(interaction: discord.Interaction, message: str) -> None
 
 # ---------- Slash Commands ----------
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(
-    team_size="Number of players per team (increments of 5)",
-    allowed_town_halls="Comma or space separated Town Hall levels (e.g. 16 17)",
-    max_teams="Maximum teams allowed (increments of 2)",
-    registration_opens="When registration opens (UTC, e.g. 2024-05-01T18:00)",
-    registration_closes="When registration closes (UTC, e.g. 2024-05-10T22:00)",
-)
 @tournament_command(name="setup", description="Configure tournament registration rules")
 async def setup_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
-    team_size: int,
-    allowed_town_halls: str,
-    max_teams: int,
-    registration_opens: str,
-    registration_closes: str,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
-        team_size_validated = validate_team_size(team_size)
-        allowed_levels = parse_town_hall_levels(allowed_town_halls)
-        max_teams_validated = validate_max_teams(max_teams)
-        opens_at_input = parse_registration_datetime(registration_opens)
-        closes_at_input = parse_registration_datetime(registration_closes)
-        opens_at, closes_at = validate_registration_window(
-            opens_at_input, closes_at_input
-        )
-    except (InvalidValueError, InvalidTownHallError) as exc:
-        await interaction.response.send_message(str(exc), ephemeral=True)
-        return
-    except RuntimeError as exc:  # pragma: no cover - safety check
+    except RuntimeError as exc:
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
@@ -552,42 +744,16 @@ async def setup_command(  # pragma: no cover - Discord slash command wiring
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    if closes_at <= datetime.now(UTC):
-        await interaction.response.send_message(
-            "Registration end must be in the future.",
-            ephemeral=True,
-        )
-        return
+    series = storage.get_series(guild.id)
+    divisions = storage.list_division_configs(guild.id)
+    embed = build_setup_overview_embed(series, divisions)
+    view = SetupView(guild.id, interaction.user.id)
 
-    config = TournamentConfig(
-        guild_id=guild.id,
-        team_size=team_size_validated,
-        allowed_town_halls=allowed_levels,
-        max_teams=max_teams_validated,
-        registration_opens_at=isoformat_utc(opens_at),
-        registration_closes_at=isoformat_utc(closes_at),
-        updated_by=interaction.user.id,
-        updated_at=utc_now_iso(),
-    )
-    storage.save_config(config)
-
-    ack_message = format_config_message(config, opens_at=opens_at, closes_at=closes_at)
-    await interaction.response.send_message(ack_message, ephemeral=True)
-
-    channel = interaction.channel
-    if isinstance(channel, Messageable):
-        embed = build_setup_embed(
-            config,
-            opens_at=opens_at,
-            closes_at=closes_at,
-            requested_by=interaction.user,
-        )
-        try:
-            await channel.send(embed=embed)
-        except discord.HTTPException as exc:  # pragma: no cover - network failure
-            log.warning("Failed to send setup announcement: %s", exc)
-    else:
-        log.debug("Skipping channel announcement; channel not messageable")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    try:
+        view.message = await interaction.original_response()
+    except discord.HTTPException:  # pragma: no cover - defensive
+        view.message = None
 
 
 @setup_command.error
@@ -618,6 +784,7 @@ async def setup_error_handler(  # pragma: no cover - Discord slash command wirin
 
 
 @app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
     team_name="Team name to display on the bracket and announcements",
     player_tags="Provide player tags separated by spaces or commas (e.g. #ABCD123 #EFGH456)",
 )
@@ -625,7 +792,10 @@ async def setup_error_handler(  # pragma: no cover - Discord slash command wirin
     name="registerteam", description="Register a team for the tournament"
 )
 async def register_team_command(  # pragma: no cover - Discord slash command wiring
-    interaction: discord.Interaction, team_name: str, player_tags: str
+    interaction: discord.Interaction,
+    division: str,
+    team_name: str,
+    player_tags: str,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -639,23 +809,29 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    config = storage.get_config(guild.id)
-    if config is None:
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    series = storage.get_series(guild.id)
+    if series is None:
         await interaction.response.send_message(
-            "Tournament has not been configured yet. Please ask an admin to run /setup.",
+            "Tournament registration window is not configured. Please ask an admin to run /setup.",
             ephemeral=True,
         )
         return
 
-    try:
-        opens_at, closes_at = config.registration_window()
-    except ValueError:
-        log.error("Configuration for guild %s is missing registration window", guild.id)
+    config = storage.get_config(guild.id, division_id)
+    if config is None:
         await interaction.response.send_message(
-            "Tournament registration window is missing. Please ping an admin to re-run /setup.",
+            "That division is not configured. Please ask an admin to add it via /setup.",
             ephemeral=True,
         )
         return
+
+    opens_at, closes_at = series.registration_window()
 
     now = datetime.now(UTC)
     if now < opens_at:
@@ -690,15 +866,24 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
             ephemeral=True,
         )
         return
-    if len(tags) > required + 1:
+    max_allowed = required if required <= 1 else required + 1
+    if len(tags) > max_allowed:
+        if required <= 1:
+            await interaction.response.send_message(
+                "Substitutes are not supported for this division.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             f"You can provide at most {required + 1} player tags including the optional sub.",
             ephemeral=True,
         )
         return
 
-    existing_registration = storage.get_registration(guild.id, interaction.user.id)
-    current_count = storage.registration_count(guild.id)
+    existing_registration = storage.get_registration(
+        guild.id, division_id, interaction.user.id
+    )
+    current_count = storage.registration_count(guild.id, division_id)
     if existing_registration is None and current_count >= config.max_teams:
         await interaction.response.send_message(
             "The registration limit has been reached. Please contact an admin.",
@@ -741,6 +926,7 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
 
     registration = TeamRegistration(
         guild_id=guild.id,
+        division_id=division_id,
         user_id=interaction.user.id,
         user_name=str(interaction.user),
         players=starters,
@@ -753,7 +939,7 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
     embed = build_registration_embed(
         registration,
         config=config,
-        closes_at=closes_at,
+        series=series,
         is_update=existing_registration is not None,
     )
 
@@ -773,12 +959,14 @@ async def register_team_command(  # pragma: no cover - Discord slash command wir
 
 
 @app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
     team_name="Team name to store",
     captain="Team captain to update (admins only)",
 )
 @tournament_command(name="teamname", description="Update or add a team name")
 async def team_name_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
+    division: str,
     team_name: str,
     captain: discord.Member | None = None,
 ) -> None:
@@ -809,14 +997,35 @@ async def team_name_command(  # pragma: no cover - Discord slash command wiring
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    registration = storage.get_registration(guild.id, owner.id)
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    series = storage.get_series(guild.id)
+    if series is None:
+        await interaction.response.send_message(
+            "Tournament registration window is not configured. Please ask an admin to run /setup.",
+            ephemeral=True,
+        )
+        return
+
+    registration = storage.get_registration(guild.id, division_id, owner.id)
     if registration is None:
         await interaction.response.send_message(
             "No registration found for that captain.", ephemeral=True
         )
         return
 
-    config = storage.get_config(guild.id)
+    if registration.division_id != division_id:
+        await interaction.response.send_message(
+            "That captain is not registered for the selected division.",
+            ephemeral=True,
+        )
+        return
+
+    config = storage.get_config(guild.id, division_id)
     if config is None:
         await interaction.response.send_message(
             "Tournament has not been configured yet. Please ask an admin to run /setup.",
@@ -834,6 +1043,7 @@ async def team_name_command(  # pragma: no cover - Discord slash command wiring
 
     updated = TeamRegistration(
         guild_id=registration.guild_id,
+        division_id=registration.division_id,
         user_id=registration.user_id,
         user_name=registration.user_name,
         players=list(registration.players),
@@ -843,15 +1053,10 @@ async def team_name_command(  # pragma: no cover - Discord slash command wiring
     )
     storage.save_registration(updated)
 
-    try:
-        _, closes_at = config.registration_window()
-    except ValueError:
-        closes_at = datetime.now(UTC)
-
     embed = build_registration_embed(
         updated,
         config=config,
-        closes_at=closes_at,
+        series=series,
         is_update=True,
     )
     announcement_error = await post_registration_announcement(guild, embed)
@@ -868,12 +1073,14 @@ async def team_name_command(  # pragma: no cover - Discord slash command wiring
 
 
 @app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
     player_tag="Player tag for the substitute",
     captain="Team captain to update (admins only)",
 )
 @tournament_command(name="registersub", description="Add or replace a team substitute")
 async def register_sub_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
+    division: str,
     player_tag: str,
     captain: discord.Member | None = None,
 ) -> None:
@@ -889,10 +1096,31 @@ async def register_sub_command(  # pragma: no cover - Discord slash command wiri
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    config = storage.get_config(guild.id)
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    series = storage.get_series(guild.id)
+    if series is None:
+        await interaction.response.send_message(
+            "Tournament registration window is not configured. Please ask an admin to run /setup.",
+            ephemeral=True,
+        )
+        return
+
+    config = storage.get_config(guild.id, division_id)
     if config is None:
         await interaction.response.send_message(
-            "Tournament has not been configured yet. Please ask an admin to run /setup.",
+            "That division is not configured. Please ask an admin to add it via /setup.",
+            ephemeral=True,
+        )
+        return
+
+    if config.team_size <= 1:
+        await interaction.response.send_message(
+            "Substitutes are not supported for this division.",
             ephemeral=True,
         )
         return
@@ -906,7 +1134,7 @@ async def register_sub_command(  # pragma: no cover - Discord slash command wiri
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    registration = storage.get_registration(guild.id, owner.id)
+    registration = storage.get_registration(guild.id, division_id, owner.id)
     if registration is None:
         await interaction.response.send_message(
             "No registration found for that captain.", ephemeral=True
@@ -921,14 +1149,7 @@ async def register_sub_command(  # pragma: no cover - Discord slash command wiri
         )
         return
 
-    try:
-        opens_at, closes_at = config.registration_window()
-    except ValueError:
-        await interaction.response.send_message(
-            "Tournament registration window is missing. Please ping an admin to re-run /setup.",
-            ephemeral=True,
-        )
-        return
+    opens_at, closes_at = series.registration_window()
 
     now = datetime.now(UTC)
     if now < opens_at:
@@ -992,6 +1213,7 @@ async def register_sub_command(  # pragma: no cover - Discord slash command wiri
 
     updated = TeamRegistration(
         guild_id=registration.guild_id,
+        division_id=registration.division_id,
         user_id=registration.user_id,
         user_name=registration.user_name,
         players=list(registration.players),
@@ -1004,7 +1226,7 @@ async def register_sub_command(  # pragma: no cover - Discord slash command wiri
     embed = build_registration_embed(
         updated,
         config=config,
-        closes_at=closes_at,
+        series=series,
         is_update=True,
     )
     announcement_error = await post_registration_announcement(guild, embed)
@@ -1019,9 +1241,13 @@ async def register_sub_command(  # pragma: no cover - Discord slash command wiri
         await interaction.followup.send(announcement_error, ephemeral=True)
 
 
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
+)
 @tournament_command(name="showregistered", description="View registered teams")
 async def show_registered_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
+    division: str,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -1035,7 +1261,21 @@ async def show_registered_command(  # pragma: no cover - Discord slash command w
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    registrations = storage.list_registrations(guild.id)
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    config = storage.get_config(guild.id, division_id)
+    if config is None:
+        await interaction.response.send_message(
+            "That division is not configured. Please ask an admin to add it via /setup.",
+            ephemeral=True,
+        )
+        return
+
+    registrations = storage.list_registrations(guild.id, division_id)
     if not registrations:
         await interaction.response.send_message(
             "No teams have registered yet.", ephemeral=True
@@ -1068,7 +1308,7 @@ async def show_registered_command(  # pragma: no cover - Discord slash command w
     if current:
         chunks.append(current)
 
-    header = "Registered teams:\n"
+    header = f"Registered teams for {config.division_name}:\n"
     first_message = header + "\n".join(chunks[0])
     await interaction.response.send_message(first_message, ephemeral=True)
 
@@ -1077,11 +1317,15 @@ async def show_registered_command(  # pragma: no cover - Discord slash command w
 
 
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
+)
 @tournament_command(
     name="create-bracket", description="Seed registered teams into a bracket"
 )
 async def create_bracket_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
+    division: str,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -1089,31 +1333,50 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
         await send_ephemeral(interaction, str(exc))
         return
 
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
     if not interaction.response.is_done():
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.HTTPException as exc:  # pragma: no cover - defensive
-            log.warning("Failed to defer simulate-tourney interaction: %s", exc)
+            log.warning("Failed to defer create-bracket interaction: %s", exc)
 
-    storage_available = True
     try:
         storage.ensure_table()
     except RuntimeError as exc:
-        storage_available = False
-        log.info(
-            "Tournament storage unavailable; falling back to seeded simulation: %s", exc
-        )
+        await send_ephemeral(interaction, str(exc))
+        return
 
-    registrations = storage.list_registrations(guild.id) if storage_available else []
-    if len(registrations) < 2:
+    series = storage.get_series(guild.id)
+    if series is None:
         await send_ephemeral(
             interaction,
-            "At least two registered teams are required to create a bracket.",
+            "Tournament registration window is not configured. Please run /setup first.",
         )
         return
 
-    existing = storage.get_bracket(guild.id)
-    bracket = create_bracket_state(guild.id, registrations)
+    config = storage.get_config(guild.id, division_id)
+    if config is None:
+        await send_ephemeral(
+            interaction,
+            "That division is not configured. Please add it via /setup before seeding a bracket.",
+        )
+        return
+
+    registrations = storage.list_registrations(guild.id, division_id)
+    if len(registrations) < 2:
+        await send_ephemeral(
+            interaction,
+            "At least two registered teams are required in this division to create a bracket.",
+        )
+        return
+
+    existing = storage.get_bracket(guild.id, division_id)
+    bracket = create_bracket_state(guild.id, division_id, registrations)
     apply_team_names(bracket, registrations)
     storage.save_bracket(bracket)
 
@@ -1123,16 +1386,16 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
         for slot in (match.competitor_one, match.competitor_two)
         if slot.team_id is None and slot.team_label == "BYE"
     )
-    note_parts = [f"Teams seeded from {len(registrations)} registration(s)"]
+    note_parts = [f"Seeded {len(registrations)} registration(s)"]
     if bye_count:
         note_parts.append(f"Auto-advances applied for {bye_count} bye(s)")
     if existing is not None:
-        note_parts.append("Replaced previous bracket state")
+        note_parts.append("Previous bracket replaced")
     note = " | ".join(note_parts)
 
     await send_ephemeral(
         interaction,
-        "Bracket created successfully."
+        f"Bracket created for {config.division_name}."
         + (" Replaced previous bracket." if existing is not None else ""),
     )
 
@@ -1140,7 +1403,7 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
     if isinstance(channel, Messageable):
         embed = build_bracket_embed(
             bracket,
-            title="Tournament Bracket Created",
+            title=f"{config.division_name} | Tournament Bracket Created",
             requested_by=interaction.user,
             summary_note=note,
         )
@@ -1169,11 +1432,15 @@ async def create_bracket_error_handler(  # pragma: no cover - Discord slash comm
     )
 
 
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
+)
 @tournament_command(
     name="showbracket", description="Display the current tournament bracket"
 )
 async def show_bracket_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
+    division: str,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -1187,15 +1454,29 @@ async def show_bracket_command(  # pragma: no cover - Discord slash command wiri
         await interaction.response.send_message(str(exc), ephemeral=True)
         return
 
-    bracket = storage.get_bracket(guild.id)
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    bracket = storage.get_bracket(guild.id, division_id)
     if bracket is None:
         await interaction.response.send_message(
-            "No bracket found. Ask an admin to run /create-bracket.",
+            "No bracket found for that division. Ask an admin to run /create-bracket.",
             ephemeral=True,
         )
         return
 
-    registrations = storage.list_registrations(guild.id)
+    config = storage.get_config(guild.id, division_id)
+    if config is None:
+        await interaction.response.send_message(
+            "That division is not configured. Please ask an admin to add it via /setup.",
+            ephemeral=True,
+        )
+        return
+
+    registrations = storage.list_registrations(guild.id, division_id)
 
     bracket_for_display = bracket.clone()
     names_changed = apply_team_names(bracket_for_display, registrations)
@@ -1208,7 +1489,7 @@ async def show_bracket_command(  # pragma: no cover - Discord slash command wiri
 
     embed = build_bracket_embed(
         bracket,
-        title="Current Tournament Bracket",
+        title=f"{config.division_name} | Current Tournament Bracket",
         requested_by=interaction.user,
         summary_note=summary_note,
     )
@@ -1257,6 +1538,7 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
 
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
     winner_captain="Team captain (Discord user) for the winning team",
 )
 @tournament_command(
@@ -1265,6 +1547,7 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
 )
 async def select_round_winner_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
+    division: str,
     winner_captain: discord.Member,
 ) -> None:
     try:
@@ -1279,15 +1562,21 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
         await send_ephemeral(interaction, str(exc))
         return
 
-    bracket = storage.get_bracket(guild.id)
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    bracket = storage.get_bracket(guild.id, division_id)
     if bracket is None:
         await send_ephemeral(
             interaction,
-            "No bracket found. Run /create-bracket before selecting winners.",
+            "No bracket found for that division. Run /create-bracket before selecting winners.",
         )
         return
 
-    registrations = storage.list_registrations(guild.id)
+    registrations = storage.list_registrations(guild.id, division_id)
     registration_lookup = {entry.user_id: entry for entry in registrations}
     if apply_team_names(bracket, registrations):
         storage.save_bracket(bracket)
@@ -1414,11 +1703,15 @@ async def select_round_winner_error_handler(  # pragma: no cover - Discord wirin
 
 
 @app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
+)
 @tournament_command(
     name="simulate-tourney", description="Simulate the full tournament flow"
 )
 async def simulate_tourney_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
+    division: str,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -1432,6 +1725,12 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         except discord.HTTPException as exc:  # pragma: no cover - defensive
             log.warning("Failed to defer simulate-tourney interaction: %s", exc)
 
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
     storage_available = True
     try:
         storage.ensure_table()
@@ -1442,12 +1741,16 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
             exc,
         )
 
-    registrations = storage.list_registrations(guild.id) if storage_available else []
+    registrations = (
+        storage.list_registrations(guild.id, division_id) if storage_available else []
+    )
     use_seeded_registrations = False
 
     if len(registrations) < 2:
         try:
-            registrations = await build_seeded_registrations_for_guild(guild.id)
+            registrations = await build_seeded_registrations_for_guild(
+                guild.id, division_id
+            )
             use_seeded_registrations = True
         except Exception as exc:  # pragma: no cover - defensive
             log.exception("Failed to build seeded registrations: %s", exc)
@@ -1464,13 +1767,13 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         )
         return
 
-    bracket = create_bracket_state(guild.id, registrations)
+    bracket = create_bracket_state(guild.id, division_id, registrations)
     final_state, snapshots = simulate_tournament(bracket)
     messages_posted = 0
     for idx, (label, snapshot) in enumerate(snapshots, start=1):
         embed = build_bracket_embed(
             snapshot,
-            title=f"Simulation – {label}",
+            title=f"{division_id.upper()} Simulation – {label}",
             requested_by=interaction.user,
             summary_note=f"Snapshot {idx} of {len(snapshots)}",
             shrink_completed=True,
@@ -1486,7 +1789,7 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
         try:
             fallback_embed = build_bracket_embed(
                 final_state,
-                title="Simulation – Final Bracket",
+                title=f"{division_id.upper()} Simulation – Final Bracket",
                 requested_by=interaction.user,
                 summary_note="Delivered via follow-up",
                 shrink_completed=True,
@@ -1526,6 +1829,65 @@ async def simulate_tourney_error_handler(  # pragma: no cover - Discord wiring
         interaction,
         "An unexpected error occurred while simulating the tournament.",
     )
+
+
+# ---------- Autocomplete Wiring ----------
+
+
+@register_team_command.autocomplete("division")
+async def _register_team_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@team_name_command.autocomplete("division")
+async def _team_name_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@register_sub_command.autocomplete("division")
+async def _register_sub_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@show_registered_command.autocomplete("division")
+async def _show_registered_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@create_bracket_command.autocomplete("division")
+async def _create_bracket_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@show_bracket_command.autocomplete("division")
+async def _show_bracket_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@select_round_winner_command.autocomplete("division")
+async def _select_round_winner_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@simulate_tourney_command.autocomplete("division")
+async def _simulate_tourney_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
 
 
 # ---------- Lifecycle ----------

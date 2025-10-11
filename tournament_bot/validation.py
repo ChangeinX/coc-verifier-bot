@@ -69,8 +69,14 @@ def parse_town_hall_levels(raw: str) -> list[int]:
 
 
 def validate_team_size(team_size: int) -> int:
+    if team_size < 1:
+        raise InvalidValueError("Team size must be at least 1 player")
+    if team_size == 1:
+        return team_size
     if team_size < 5:
-        raise InvalidValueError("Team size must be at least 5 players")
+        raise InvalidValueError(
+            "Team size must be at least 5 players when greater than 1"
+        )
     if team_size % 5 != 0:
         raise InvalidValueError("Team size must be in increments of 5")
     if team_size > 50:

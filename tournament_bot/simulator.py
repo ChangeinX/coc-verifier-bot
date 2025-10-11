@@ -131,6 +131,7 @@ def sorted_for_seeding(players: Sequence[SeededPlayer]) -> list[SeededPlayer]:
 def build_registrations(
     players: Sequence[SeededPlayer],
     guild_id: int,
+    division_id: str,
     *,
     base_time: datetime | None = None,
     shuffle: bool = False,
@@ -155,6 +156,7 @@ def build_registrations(
         )
         registration = TeamRegistration(
             guild_id=guild_id,
+            division_id=division_id,
             user_id=index + 1,
             user_name=player.team_label(),
             players=[entry],
@@ -169,6 +171,7 @@ async def build_seeded_registrations(
     email: str,
     password: str,
     guild_id: int,
+    division_id: str,
     *,
     seed_file: Path | None = None,
     base_time: datetime | None = None,
@@ -183,6 +186,7 @@ async def build_seeded_registrations(
     return build_registrations(
         seeded_players,
         guild_id,
+        division_id,
         base_time=base_time or DEFAULT_BASE_REGISTRATION,
         shuffle=shuffle,
         rng=rng,

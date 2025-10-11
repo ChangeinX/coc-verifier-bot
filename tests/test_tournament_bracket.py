@@ -10,6 +10,8 @@ from tournament_bot.bracket import (
     team_captain_lines,
 )
 
+DIVISION = "th12"
+
 
 def make_reg(
     user_id: int, offset_seconds: int, *, team_name: str | None = None
@@ -20,6 +22,7 @@ def make_reg(
     ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     return TeamRegistration(
         guild_id=7,
+        division_id=DIVISION,
         user_id=user_id,
         user_name=f"Team{user_id}",
         players=[
@@ -41,7 +44,7 @@ def test_create_bracket_assigns_seeds_in_standard_order():
         make_reg(3, 60),
         make_reg(4, 90),
     ]
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
 
     first_round = bracket.rounds[0]
     assert first_round.name == "Semifinals"
@@ -57,7 +60,7 @@ def test_create_bracket_assigns_seeds_in_standard_order():
 
 def test_create_bracket_auto_assigns_byes():
     registrations = [make_reg(10, 0), make_reg(11, 30), make_reg(12, 60)]
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
 
     first_round = bracket.rounds[0]
     assert first_round.name == "Semifinals"
@@ -81,7 +84,7 @@ def test_create_bracket_auto_assigns_byes():
 
 def test_set_match_winner_advances_to_next_round():
     registrations = [make_reg(1, 0), make_reg(2, 30), make_reg(3, 60), make_reg(4, 90)]
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
 
     set_match_winner(bracket, "R1M1", 1)
     match = bracket.find_match("R1M1")
@@ -105,7 +108,7 @@ def test_create_bracket_prefers_team_names_for_labels():
         make_reg(2, 30, team_name="Bravo Squad"),
     ]
 
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
 
     first_round_match = bracket.rounds[0].matches[0]
     assert first_round_match.competitor_one.team_label == "Alpha Squad"
@@ -122,7 +125,7 @@ def test_team_captain_lines_include_captains():
         make_reg(2, 30, team_name="Bravo Squad"),
     ]
 
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
     apply_team_names(bracket, registrations)
     lines = team_captain_lines(bracket, registrations)
 
@@ -138,7 +141,7 @@ def test_team_captain_lines_fall_back_when_registration_missing():
         make_reg(2, 30, team_name="Bravo Squad"),
     ]
 
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
     apply_team_names(bracket, registrations)
     partial = team_captain_lines(bracket, registrations[:1])
 
@@ -147,7 +150,7 @@ def test_team_captain_lines_fall_back_when_registration_missing():
 
 def test_apply_team_names_updates_existing_bracket_labels():
     registrations = [make_reg(1, 0), make_reg(2, 30)]
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
 
     # team names assigned after bracket creation
     registrations[0].team_name = "Alpha Squad"
@@ -163,7 +166,7 @@ def test_apply_team_names_updates_existing_bracket_labels():
 
 def test_simulate_tournament_produces_snapshots_and_champion():
     registrations = [make_reg(1, 0), make_reg(2, 30), make_reg(3, 60), make_reg(4, 90)]
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
 
     final_state, snapshots = simulate_tournament(bracket)
     assert len(snapshots) == len(bracket.rounds) + 1
@@ -179,7 +182,7 @@ def test_simulate_tournament_produces_snapshots_and_champion():
 
 def test_render_bracket_shrinks_completed_rounds():
     registrations = [make_reg(1, 0), make_reg(2, 30), make_reg(3, 60), make_reg(4, 90)]
-    bracket = create_bracket_state(7, registrations)
+    bracket = create_bracket_state(7, DIVISION, registrations)
     _, snapshots = simulate_tournament(bracket)
 
     after_semifinals = snapshots[1][1]

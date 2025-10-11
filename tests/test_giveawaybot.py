@@ -777,9 +777,7 @@ class TestEligibilityCheck:
             patch.object(giveawaybot, "coc_client") as mock_coc_client,
         ):
             mock_coc_client.get_raid_log = AsyncMock(
-                side_effect=giveawaybot.Maintenance(
-                    None, {"message": "maintenance"}
-                )
+                side_effect=giveawaybot.Maintenance(None, {"message": "maintenance"})
             )
 
             with pytest.raises(giveawaybot.TransientRaidLogError):

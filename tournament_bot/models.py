@@ -14,18 +14,15 @@ def utc_now_iso() -> str:
 
 
 @dataclass(slots=True)
-class TournamentConfig:
+class TournamentSeries:
     guild_id: int
-    team_size: int
-    allowed_town_halls: list[int]
-    max_teams: int
     registration_opens_at: str
     registration_closes_at: str
     updated_by: int
     updated_at: str
 
     PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
-    SK_VALUE: ClassVar[str] = "CONFIG"
+    SK_VALUE: ClassVar[str] = "SERIES"
 
     @classmethod
     def key(cls, guild_id: int) -> dict[str, str]:
@@ -35,9 +32,6 @@ class TournamentConfig:
         item = self.key(self.guild_id)
         item.update(
             {
-                "team_size": self.team_size,
-                "allowed_town_halls": self.allowed_town_halls,
-                "max_teams": self.max_teams,
                 "registration_opens_at": self.registration_opens_at,
                 "registration_closes_at": self.registration_closes_at,
                 "updated_by": str(self.updated_by),
@@ -47,13 +41,10 @@ class TournamentConfig:
         return item
 
     @classmethod
-    def from_item(cls, item: dict[str, object]) -> TournamentConfig:
+    def from_item(cls, item: dict[str, object]) -> TournamentSeries:
         guild_id = int(str(item["pk"]).split("#", 1)[1])
         return cls(
             guild_id=guild_id,
-            team_size=int(item["team_size"]),
-            allowed_town_halls=[int(v) for v in item.get("allowed_town_halls", [])],
-            max_teams=int(item["max_teams"]),
             registration_opens_at=str(item.get("registration_opens_at", "")),
             registration_closes_at=str(item.get("registration_closes_at", "")),
             updated_by=int(item.get("updated_by", 0)),
@@ -68,6 +59,75 @@ class TournamentConfig:
             tzinfo=UTC
         )
         return opens_at, closes_at
+
+
+@dataclass(slots=True)
+class TournamentConfig:
+    guild_id: int
+    division_id: str
+    division_name: str
+    team_size: int
+    allowed_town_halls: list[int]
+    max_teams: int
+    updated_by: int
+    updated_at: str
+
+    PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
+    SK_TEMPLATE: ClassVar[str] = "DIVISION#%s#CONFIG"
+    LEGACY_SK_VALUE: ClassVar[str] = "CONFIG"
+
+    @classmethod
+    def key(cls, guild_id: int, division_id: str) -> dict[str, str]:
+        return {
+            "pk": cls.PK_TEMPLATE % guild_id,
+            "sk": cls.SK_TEMPLATE % division_id,
+        }
+
+    def to_item(self) -> dict[str, object]:
+        item = self.key(self.guild_id, self.division_id)
+        item.update(
+            {
+                "division_id": self.division_id,
+                "division_name": self.division_name,
+                "team_size": self.team_size,
+                "allowed_town_halls": self.allowed_town_halls,
+                "max_teams": self.max_teams,
+                "updated_by": str(self.updated_by),
+                "updated_at": self.updated_at,
+            }
+        )
+        return item
+
+    @classmethod
+    def from_item(cls, item: dict[str, object]) -> TournamentConfig:
+        pk_value = str(item["pk"])
+        guild_id = int(pk_value.split("#", 1)[1])
+        sk_value = str(item.get("sk", ""))
+        raw_division = item.get("division_id")
+        if raw_division is not None:
+            division_id = str(raw_division)
+        else:
+            parts = sk_value.split("#", 2)
+            if len(parts) >= 3 and parts[0] == "DIVISION":
+                division_id = parts[1]
+            else:
+                division_id = "default"
+        division_name_value = item.get("division_name")
+        division_name = (
+            str(division_name_value)
+            if division_name_value is not None
+            else division_id.upper()
+        )
+        return cls(
+            guild_id=guild_id,
+            division_id=division_id,
+            division_name=division_name,
+            team_size=int(item["team_size"]),
+            allowed_town_halls=[int(v) for v in item.get("allowed_town_halls", [])],
+            max_teams=int(item["max_teams"]),
+            updated_by=int(item.get("updated_by", 0)),
+            updated_at=str(item.get("updated_at", "")),
+        )
 
 
 @dataclass(slots=True)
@@ -110,6 +170,7 @@ class PlayerEntry:
 @dataclass(slots=True)
 class TeamRegistration:
     guild_id: int
+    division_id: str
     user_id: int
     user_name: str
     players: list[PlayerEntry]
@@ -118,19 +179,21 @@ class TeamRegistration:
     substitute: PlayerEntry | None = None
 
     PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
-    SK_TEMPLATE: ClassVar[str] = "TEAM#%s"
+    SK_TEMPLATE: ClassVar[str] = "DIVISION#%s#TEAM#%s"
+    LEGACY_SK_TEMPLATE: ClassVar[str] = "TEAM#%s"
 
     @classmethod
-    def key(cls, guild_id: int, user_id: int) -> dict[str, str]:
+    def key(cls, guild_id: int, division_id: str, user_id: int) -> dict[str, str]:
         return {
             "pk": cls.PK_TEMPLATE % guild_id,
-            "sk": cls.SK_TEMPLATE % user_id,
+            "sk": cls.SK_TEMPLATE % (division_id, user_id),
         }
 
     def to_item(self) -> dict[str, object]:
-        item = self.key(self.guild_id, self.user_id)
+        item = self.key(self.guild_id, self.division_id, self.user_id)
         item.update(
             {
+                "division_id": self.division_id,
                 "user_id": str(self.user_id),
                 "user_name": self.user_name,
                 "registered_at": self.registered_at,
@@ -145,8 +208,14 @@ class TeamRegistration:
 
     @classmethod
     def from_item(cls, item: dict[str, object]) -> TeamRegistration:
-        guild_id = int(str(item["pk"]).split("#", 1)[1])
-        user_id = int(str(item.get("user_id") or str(item["sk"]).split("#", 1)[1]))
+        pk_value = str(item["pk"])
+        guild_id = int(pk_value.split("#", 1)[1])
+        sk_value = str(item.get("sk", ""))
+        parts = sk_value.split("#")
+        division_id = str(
+            item.get("division_id") or (parts[1] if len(parts) > 2 else "default")
+        )
+        user_id = int(str(item.get("user_id") or parts[-1]))
         players_data: Iterable[dict[str, object]] = item.get("players", [])  # type: ignore[assignment]
         players = [PlayerEntry.from_dict(data) for data in players_data]
         team_name_value = item.get("team_name")
@@ -158,6 +227,7 @@ class TeamRegistration:
         )
         return cls(
             guild_id=guild_id,
+            division_id=division_id,
             user_id=user_id,
             user_name=str(item.get("user_name", "")),
             players=players,
@@ -307,20 +377,26 @@ class BracketRound:
 @dataclass(slots=True)
 class BracketState:
     guild_id: int
+    division_id: str
     created_at: str
     rounds: list[BracketRound]
 
     PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
-    SK_VALUE: ClassVar[str] = "BRACKET"
+    SK_TEMPLATE: ClassVar[str] = "DIVISION#%s#BRACKET"
+    LEGACY_SK_VALUE: ClassVar[str] = "BRACKET"
 
     @classmethod
-    def key(cls, guild_id: int) -> dict[str, str]:
-        return {"pk": cls.PK_TEMPLATE % guild_id, "sk": cls.SK_VALUE}
+    def key(cls, guild_id: int, division_id: str) -> dict[str, str]:
+        return {
+            "pk": cls.PK_TEMPLATE % guild_id,
+            "sk": cls.SK_TEMPLATE % division_id,
+        }
 
     def to_item(self) -> dict[str, object]:
-        item = self.key(self.guild_id)
+        item = self.key(self.guild_id, self.division_id)
         item.update(
             {
+                "division_id": self.division_id,
                 "created_at": self.created_at,
                 "rounds": [round_.to_dict() for round_ in self.rounds],
             }
@@ -329,11 +405,18 @@ class BracketState:
 
     @classmethod
     def from_item(cls, item: dict[str, object]) -> BracketState:
-        guild_id = int(str(item["pk"]).split("#", 1)[1])
+        pk_value = str(item["pk"])
+        guild_id = int(pk_value.split("#", 1)[1])
+        sk_value = str(item.get("sk", ""))
+        parts = sk_value.split("#")
+        division_id = str(
+            item.get("division_id") or (parts[1] if len(parts) > 2 else "default")
+        )
         rounds_data: Iterable[dict[str, object]] = item.get("rounds", [])  # type: ignore[assignment]
         rounds = [BracketRound.from_dict(round_item) for round_item in rounds_data]
         return cls(
             guild_id=guild_id,
+            division_id=division_id,
             created_at=str(item.get("created_at", "")),
             rounds=rounds,
         )
@@ -354,6 +437,7 @@ class BracketState:
 
 
 __all__ = [
+    "TournamentSeries",
     "TournamentConfig",
     "TeamRegistration",
     "PlayerEntry",
