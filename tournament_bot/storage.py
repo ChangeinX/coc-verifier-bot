@@ -115,6 +115,19 @@ class TournamentStorage:
             raise
         return True
 
+    def delete_registrations_for_division(self, guild_id: int, division_id: str) -> int:
+        registrations = self.list_registrations(guild_id, division_id)
+        for registration in registrations:
+            self._table.delete_item(
+                Key=TeamRegistration.key(
+                    registration.guild_id,
+                    registration.division_id,
+                    registration.user_id,
+                ),
+                ConditionExpression="attribute_exists(pk)",
+            )
+        return len(registrations)
+
     # ----- Brackets -----
     def save_bracket(self, bracket: BracketState) -> None:
         self.ensure_table()

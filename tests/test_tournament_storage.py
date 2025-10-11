@@ -199,6 +199,21 @@ def test_delete_registration_outcome():
     )
 
 
+def test_delete_registrations_for_division():
+    storage, _ = build_storage()
+    registrations = [
+        sample_registration("th13"),
+        sample_registration("th14"),
+    ]
+    for entry in registrations:
+        storage.save_registration(entry)
+
+    removed = storage.delete_registrations_for_division(42, "th13")
+    assert removed == 1
+    assert storage.list_registrations(42, "th13") == []
+    assert len(storage.list_registrations(42, "th14")) == 1
+
+
 def test_delete_registration_raises_for_other_errors():
     storage, table = build_storage()
 

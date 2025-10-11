@@ -501,12 +501,19 @@ class DivisionConfigModal(discord.ui.Modal):
                 str(existing_config.max_teams) if existing_config is not None else "32"
             ),
         )
+        self.reset_input = discord.ui.TextInput(
+            label="Reset tournament (type RESET)",
+            placeholder="Leave blank to keep current bracket & registrations",
+            required=False,
+            max_length=5,
+        )
         for item in (
             self.division_id_input,
             self.division_name_input,
             self.team_size_input,
             self.allowed_th_input,
             self.max_teams_input,
+            self.reset_input,
         ):
             self.add_item(item)
 
@@ -565,8 +572,20 @@ class DivisionConfigModal(discord.ui.Modal):
             updated_at=utc_now_iso(),
         )
         storage.save_config(config)
+
+        reset_requested = self.reset_input.value.strip().upper() == "RESET"
+        reset_summary = ""
+        if reset_requested:
+            removed = storage.delete_registrations_for_division(
+                self._setup_view.guild_id, division_id
+            )
+            storage.delete_bracket(self._setup_view.guild_id, division_id)
+            reset_summary = (
+                f" Removed {removed} registration(s) and cleared the bracket."
+            )
+
         await interaction.response.send_message(
-            f"Division {division_name} saved.", ephemeral=True
+            f"Division {division_name} saved.{reset_summary}", ephemeral=True
         )
         await self._setup_view.refresh()
 
