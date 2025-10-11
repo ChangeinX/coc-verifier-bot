@@ -326,6 +326,48 @@ class SetupView(discord.ui.View):
     ) -> None:
         await self.open_division_modal(interaction, None)
 
+    @discord.ui.button(
+        label="Auto-create TH10-17 1v1",
+        style=discord.ButtonStyle.success,
+    )
+    async def auto_create_divisions(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        created = []
+        updated = []
+        for level in range(10, 18):
+            division_id = f"th{level}-1v1"
+            display, allowed, team_size = infer_division_defaults(division_id)
+            if not allowed:
+                allowed = [level]
+            config = TournamentConfig(
+                guild_id=self.guild_id,
+                division_id=division_id,
+                division_name=display,
+                team_size=1,
+                allowed_town_halls=allowed,
+                max_teams=258,
+                updated_by=interaction.user.id,
+                updated_at=utc_now_iso(),
+            )
+            existing = storage.get_config(self.guild_id, division_id)
+            storage.save_config(config)
+            storage.delete_registrations_for_division(self.guild_id, division_id)
+            storage.delete_bracket(self.guild_id, division_id)
+            if existing is None:
+                created.append(display)
+            else:
+                updated.append(display)
+
+        summary_parts: list[str] = []
+        if created:
+            summary_parts.append(f"Created {len(created)} division(s)")
+        if updated:
+            summary_parts.append(f"Reset {len(updated)} existing division(s)")
+        message = ", ".join(summary_parts) if summary_parts else "No divisions changed."
+        await interaction.response.send_message(message, ephemeral=True)
+        await self.refresh()
+
 
 class RegistrationWindowModal(discord.ui.Modal):
     def __init__(self, setup_view: SetupView, series: TournamentSeries | None) -> None:
@@ -507,14 +549,17 @@ class DivisionConfigModal(discord.ui.Modal):
             required=False,
             max_length=5,
         )
-        for item in (
-            self.division_id_input,
+        items = [
             self.division_name_input,
             self.team_size_input,
             self.allowed_th_input,
             self.max_teams_input,
-            self.reset_input,
-        ):
+        ]
+        if self._locked_division_id is None:
+            items.insert(0, self.division_id_input)
+        else:
+            items.append(self.reset_input)
+        for item in items:
             self.add_item(item)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
