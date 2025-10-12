@@ -185,7 +185,7 @@ async def test_register_team_accepts_optional_sub_when_allowed(monkeypatch):
 
     tags = " ".join(player.tag for player in players)
 
-    await tournamentbot.register_team_command.callback(
+    await tournamentbot.register_player_command.callback(
         interaction,
         "th15",
         "My Team",
@@ -230,7 +230,7 @@ async def test_register_team_blocks_sub_in_1v1(monkeypatch):
 
     monkeypatch.setattr(tournamentbot, "fetch_players", fake_fetch)
 
-    await tournamentbot.register_team_command.callback(
+    await tournamentbot.register_player_command.callback(
         interaction,
         "th12",
         "Solo Warrior",

@@ -74,7 +74,7 @@ To run inside Docker, build the appropriate image (`Dockerfile`, `Dockerfile.giv
 
 ## 6. Tournament commands
 - `/setup` (admin only) now opens an interactive view: configure the shared registration window, then add/update divisions (e.g. `th12`, `th13`). Each division manages its own team size, allowed Town Hall levels, and maximum teams.
-- `/registerteam division:<id> team_name:<text> player_tags:<tags>` – captains register for a specific division. Divisions with a required team size of `1` automatically block substitutes.
+- `/registerplayer division:<id> team_name:<text> player_tags:<tags>` – captains register for a specific division. Divisions with a required team size of `1` automatically block substitutes.
 - `/teamname division:<id> team_name:<text>` – rename an existing team in the selected division (admins can target a different captain).
 - `/registersub division:<id> player_tag:<tag>` – add or replace a substitute when the division supports teams larger than one.
 - `/showregistered division:<id>` – list the registered teams for the division.

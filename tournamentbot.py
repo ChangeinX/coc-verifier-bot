@@ -1046,9 +1046,9 @@ async def setup_error_handler(  # pragma: no cover - Discord slash command wirin
     player_tags="Provide player tags separated by spaces or commas (e.g. #ABCD123 #EFGH456)",
 )
 @tournament_command(
-    name="registerteam", description="Register a team for the tournament"
+    name="registerplayer", description="Register for a tournament division"
 )
-async def register_team_command(  # pragma: no cover - Discord slash command wiring
+async def register_player_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     division: str,
     team_name: str,
@@ -2091,8 +2091,8 @@ async def simulate_tourney_error_handler(  # pragma: no cover - Discord wiring
 # ---------- Autocomplete Wiring ----------
 
 
-@register_team_command.autocomplete("division")
-async def _register_team_division_autocomplete(
+@register_player_command.autocomplete("division")
+async def _register_player_division_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     return await division_autocomplete(interaction, current)
