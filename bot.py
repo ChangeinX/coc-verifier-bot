@@ -80,16 +80,25 @@ VERIFIER_GUILD_OBJECT = (
 
 
 def verifier_command(*args, **kwargs):
-    """Register a slash command, scoping to the verifier guild when configured."""
+    """Register a slash command, scoping to the verifier guild when configured.
+
+    Notes
+    - discord.py expects `guilds` (sequence) for command scoping, not `guild`.
+    - To keep tests and runtime consistent, we always use `guilds=[obj]` when a
+      verifier guild is configured and no explicit scope was provided.
+    """
 
     def decorator(func):
         command_kwargs = dict(kwargs)
         if (
             VERIFIER_GUILD_OBJECT is not None
-            and "guild" not in command_kwargs
+            and "guild" not in command_kwargs  # tolerate older tests/calls
             and "guilds" not in command_kwargs
         ):
-            command_kwargs["guild"] = VERIFIER_GUILD_OBJECT
+            # Prefer the officially supported `guilds` kwarg
+            command_kwargs["guilds"] = [VERIFIER_GUILD_OBJECT]
+            # Remove any stray unsupported singular `guild` kw if present
+            command_kwargs.pop("guild", None)
         return tree.command(*args, **command_kwargs)(func)
 
     return decorator
@@ -678,6 +687,47 @@ async def on_ready() -> None:
 
     membership_check.start()
     log.info("Bot ready as %s (%s)", bot.user, bot.user.id)
+
+
+# ---------- Global app command error handler ----------
+@tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+) -> None:
+    # Handle cases where a user invokes a command that exists on Discord
+    # but the local tree isn't in sync (commonly seen when moving between
+    # global and guild scopes or after deployments).
+    if isinstance(error, app_commands.CommandNotFound):
+        log.warning(
+            "Received CommandNotFound for '%s'. Attempting to resync commands...",
+            getattr(interaction.data, "name", "unknown"),
+        )
+        try:
+            if VERIFIER_GUILD_ID is not None and interaction.guild_id is not None:
+                await tree.sync(guild=discord.Object(id=interaction.guild_id))
+            else:
+                await tree.sync()
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Resync after CommandNotFound failed: %s", exc)
+
+        # Politely ask the user to retry after resync
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Commands were updated. Please try again in a few seconds.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Commands were updated. Please try again in a few seconds.",
+                    ephemeral=True,
+                )
+        except Exception:
+            pass
+        return
+
+    # Re-raise anything else so it's visible during development/monitoring
+    raise error
 
 
 async def main() -> None:

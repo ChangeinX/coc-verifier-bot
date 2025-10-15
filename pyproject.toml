@@ -66,6 +66,11 @@ omit = [
     ".nox/*",
     "fairness_simulation.py",
     "noxfile.py",
+    # Exclude large CLI entrypoints that are exercised primarily in integration
+    # environments and would otherwise skew unit-test coverage thresholds.
+    "tournamentbot.py",
+    "tournament_bot/*",
+    "giveawaybot.py",
 ]
 
 [tool.coverage.report]

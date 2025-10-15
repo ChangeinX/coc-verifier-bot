@@ -601,7 +601,8 @@ class TestCommandRegistration:
 
         mock_tree_command.assert_called_once()
         _, kwargs = mock_tree_command.call_args
-        assert kwargs["guild"] is guild_object
+        # Expect modern `guilds=[obj]` scoping
+        assert kwargs["guilds"] == [guild_object]
 
     def test_verifier_command_no_scope_without_guild(self, monkeypatch):
         """Without a guild configured, commands remain global."""
