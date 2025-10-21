@@ -23,6 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - simple stubs for offline tests
         def __init__(self, *_args, **_kwargs) -> None:
             super().__init__(*_args)
 
+
     class GatewayError(_DummyCocError):
         pass
 

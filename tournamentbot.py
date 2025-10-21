@@ -124,6 +124,7 @@ intents.guilds = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
+
 GUILD_OBJECT = (
     discord.Object(id=TOURNAMENT_GUILD_ID) if TOURNAMENT_GUILD_ID is not None else None
 )

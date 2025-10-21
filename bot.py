@@ -74,6 +74,7 @@ intents.members = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
+
 VERIFIER_GUILD_OBJECT = (
     discord.Object(id=VERIFIER_GUILD_ID) if VERIFIER_GUILD_ID is not None else None
 )
