@@ -2153,6 +2153,121 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
 
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
+)
+@tournament_command(
+    name="broadcast-bracket", description="Post the current tournament bracket"
+)
+@require_admin_or_tournament_role()
+async def broadcast_bracket_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    division: str,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    channel = interaction.channel
+    if not isinstance(channel, Messageable):
+        await interaction.response.send_message(
+            "Unable to post the bracket here. Try running this command in a text channel.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    bracket = storage.get_bracket(guild.id, division_id)
+    if bracket is None:
+        await interaction.response.send_message(
+            "No bracket found for that division. Ask an admin to run /create-bracket.",
+            ephemeral=True,
+        )
+        return
+
+    config = storage.get_config(guild.id, division_id)
+    if config is None:
+        await interaction.response.send_message(
+            "That division is not configured. Please add it via /setup before broadcasting.",
+            ephemeral=True,
+        )
+        return
+
+    registrations = storage.list_registrations(guild.id, division_id)
+    bracket_for_display = bracket.clone()
+    names_changed = apply_team_names(bracket_for_display, registrations)
+    if names_changed:
+        storage.save_bracket(bracket_for_display)
+    bracket = bracket_for_display
+
+    champion = bracket_champion_name(bracket)
+    summary_note = f"Current champion: {champion}" if champion else None
+
+    deferred = False
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.debug("Failed to defer broadcast-bracket interaction: %s", exc)
+
+    title = f"{config.division_name} | Tournament Bracket"
+    try:
+        embed = build_bracket_embed(
+            bracket,
+            title=title,
+            requested_by=interaction.user,
+            summary_note=summary_note,
+        )
+        await channel.send(embed=embed)
+        posted_messages = 1
+    except discord.HTTPException as exc:
+        log.warning("Failed to send broadcast bracket embed: %s", exc)
+        try:
+            posted_messages = await send_bracket_embed_chunked_to_channel(
+                channel,
+                bracket,
+                title=title,
+                requested_by=interaction.user,
+                summary_note=summary_note,
+            )
+        except discord.HTTPException as exc2:  # pragma: no cover - defensive
+            log.warning("Failed to send chunked broadcast bracket: %s", exc2)
+            if deferred:
+                await interaction.followup.send(
+                    "Unable to post the bracket due to Discord API errors.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Unable to post the bracket due to Discord API errors.",
+                    ephemeral=True,
+                )
+            return
+
+    ack_message = "Posted the bracket to this channel."
+    if posted_messages > 1:
+        ack_message += f" Sent in {posted_messages} messages due to size."
+
+    if deferred:
+        await interaction.followup.send(ack_message, ephemeral=True)
+    else:
+        await interaction.response.send_message(ack_message, ephemeral=True)
+
+
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
     winner_captain="Team captain (Discord user) for the winning team",
 )
 @tournament_command(
@@ -2251,6 +2366,10 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
     match_obj, selected_slot, selected_index = min(
         eligible_matches, key=lambda item: (item[0].round_index, item[0].match_id)
     )
+    opponent_slot_pre = (
+        match_obj.competitor_two if selected_index == 0 else match_obj.competitor_one
+    )
+    opponent_registration_pre = registration_lookup.get(opponent_slot_pre.team_id)
     match_identifier = match_obj.match_id
     previous_winner = match_obj.winner_index
     try:
@@ -2286,16 +2405,76 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
 
     channel = interaction.channel
     if isinstance(channel, Messageable):
-        embed = build_bracket_embed(
-            bracket,
-            title="Bracket Update",
-            requested_by=interaction.user,
-            summary_note=f"Winner recorded for {match_identifier}",
+        winner_label = (
+            winner_slot_obj.display() if winner_slot_obj is not None else "Winner"
         )
+        winner_captain_mention = (
+            f"<@{selected_registration.user_id}>"
+            if selected_registration is not None
+            else winner_captain.mention
+        )
+        if opponent_registration_pre is not None:
+            loser_label = team_display_name(opponent_registration_pre)
+            loser_captain = f"<@{opponent_registration_pre.user_id}>"
+        elif opponent_slot_pre.team_id is not None:
+            loser_label = opponent_slot_pre.display()
+            loser_captain = f"<@{opponent_slot_pre.team_id}>"
+        else:
+            loser_label = opponent_slot_pre.display()
+            loser_captain = None
+
+        next_match: BracketMatch | None = None
+        next_opponent_slot: BracketSlot | None = None
+        for downstream in bracket.all_matches():
+            for candidate_slot in (
+                downstream.competitor_one,
+                downstream.competitor_two,
+            ):
+                if candidate_slot.source_match_id == match_identifier:
+                    next_match = downstream
+                    next_opponent_slot = (
+                        downstream.competitor_two
+                        if candidate_slot is downstream.competitor_one
+                        else downstream.competitor_one
+                    )
+                    break
+            if next_match is not None:
+                break
+
+        lines = [
+            f"Winner recorded for {match_identifier}: {winner_label} defeated {loser_label}.",
+            f"Captain: {winner_captain_mention}",
+        ]
+        if loser_captain is not None:
+            lines.append(f"Opponent captain: {loser_captain}")
+
+        if next_match is not None:
+            next_round_name = describe_round(bracket, next_match)
+            if next_opponent_slot is not None:
+                if next_opponent_slot.team_id is not None:
+                    next_reg = registration_lookup.get(next_opponent_slot.team_id)
+                    if next_reg is not None:
+                        opponent_text = (
+                            f"{team_display_name(next_reg)} (<@{next_reg.user_id}>)"
+                        )
+                    else:
+                        opponent_text = next_opponent_slot.display()
+                else:
+                    opponent_text = next_opponent_slot.display()
+            else:
+                opponent_text = "TBD"
+            lines.append(
+                f"Next match: {next_round_name} ({next_match.match_id}) vs {opponent_text}."
+            )
+
+        if champion:
+            lines.append(f"Current champion: {champion}.")
+
+        channel_message = "\n".join(lines)
         try:
-            await channel.send(embed=embed)
+            await channel.send(channel_message)
         except discord.HTTPException as exc:  # pragma: no cover - network failure
-            log.warning("Failed to post bracket update: %s", exc)
+            log.warning("Failed to post bracket update note: %s", exc)
     else:
         log.debug("Skipping bracket update; channel not messageable")
 
@@ -2771,6 +2950,13 @@ async def _create_bracket_division_autocomplete(
 
 @show_bracket_command.autocomplete("division")
 async def _show_bracket_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@broadcast_bracket_command.autocomplete("division")
+async def _broadcast_bracket_division_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     return await division_autocomplete(interaction, current)
