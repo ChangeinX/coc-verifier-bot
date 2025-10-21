@@ -1,0 +1,19 @@
+# Terraform local state and variables
+.terraform/
+terraform.tfstate*
+*.tfstate.backup
+*.tfvars
+*.auto.tfvars
+infra/terraform.tfvars
+
+# Python env and build
+.venv/
+__pycache__/
+*.pyc
+
+# Coverage/pytest
+.pytest_cache/
+htmlcov/
+coverage.xml
+.nox/
+
