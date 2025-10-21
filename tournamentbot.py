@@ -7,8 +7,9 @@ import asyncio
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import Final, Literal
 
 import boto3
 import coc
@@ -768,6 +769,211 @@ def normalize_division_value(raw: str) -> str:
             "Division is required. Please select a tournament division."
         )
     return value
+
+
+def team_display_name(registration: TeamRegistration) -> str:
+    label_source = registration.team_name or registration.user_name
+    label = label_source.strip() if label_source else ""
+    return label or "Unnamed Team"
+
+
+def format_player_names(registration: TeamRegistration) -> str:
+    names = [player.name for player in registration.players if player.name]
+    return ", ".join(names) if names else "No player names on file"
+
+
+def describe_round(bracket: BracketState, match: BracketMatch) -> str:
+    if 0 <= match.round_index < len(bracket.rounds):
+        return bracket.rounds[match.round_index].name
+    return f"Round {match.round_index + 1}"
+
+
+OpponentStatus = Literal[
+    "no_bracket",
+    "pending",
+    "awaiting_opponent",
+    "eliminated",
+    "champion",
+    "not_seeded",
+]
+
+
+@dataclass(slots=True)
+class OpponentContext:
+    division_id: str
+    division_name: str
+    registration: TeamRegistration
+    status: OpponentStatus
+    match: BracketMatch | None = None
+    round_name: str | None = None
+    opponent_slot: BracketSlot | None = None
+    opponent_registration: TeamRegistration | None = None
+    elimination_match: BracketMatch | None = None
+    elimination_round_name: str | None = None
+    elimination_opponent_slot: BracketSlot | None = None
+    elimination_opponent_registration: TeamRegistration | None = None
+
+
+def gather_opponent_contexts(guild_id: int, user_id: int) -> list[OpponentContext]:
+    configs = {cfg.division_id: cfg for cfg in storage.list_division_configs(guild_id)}
+    contexts: list[OpponentContext] = []
+
+    for division_id, config in configs.items():
+        registration = storage.get_registration(guild_id, division_id, user_id)
+        if registration is None:
+            continue
+
+        registrations = storage.list_registrations(guild_id, division_id)
+        registration_lookup = {reg.user_id: reg for reg in registrations}
+        registration = registration_lookup.get(user_id, registration)
+
+        bracket = storage.get_bracket(guild_id, division_id)
+        division_name = config.division_name or division_id.upper()
+
+        if bracket is None:
+            contexts.append(
+                OpponentContext(
+                    division_id=division_id,
+                    division_name=division_name,
+                    registration=registration,
+                    status="no_bracket",
+                )
+            )
+            continue
+
+        if apply_team_names(bracket, registrations):
+            storage.save_bracket(bracket)
+
+        pending_items: list[
+            tuple[BracketMatch, BracketSlot, str, TeamRegistration | None]
+        ] = []
+        completed_items: list[
+            tuple[
+                BracketMatch,
+                BracketSlot,
+                str,
+                TeamRegistration | None,
+                bool,
+            ]
+        ] = []
+
+        for match in bracket.all_matches():
+            slots = (match.competitor_one, match.competitor_two)
+            for idx, slot in enumerate(slots):
+                if slot.team_id != registration.user_id:
+                    continue
+                opponent_slot = slots[1 - idx]
+                round_name = describe_round(bracket, match)
+                opponent_registration = (
+                    registration_lookup.get(opponent_slot.team_id)
+                    if opponent_slot.team_id is not None
+                    else None
+                )
+                user_won = match.winner_index == idx
+                if match.winner_index is None:
+                    pending_items.append(
+                        (match, opponent_slot, round_name, opponent_registration)
+                    )
+                else:
+                    completed_items.append(
+                        (
+                            match,
+                            opponent_slot,
+                            round_name,
+                            opponent_registration,
+                            user_won,
+                        )
+                    )
+                break
+
+        if pending_items:
+            pending_items.sort(key=lambda item: (item[0].round_index, item[0].match_id))
+            next_match, opponent_slot, round_name, opponent_registration = (
+                pending_items[0]
+            )
+            status: OpponentStatus
+            if opponent_slot.team_id is not None:
+                status = "pending"
+            else:
+                status = "awaiting_opponent"
+            contexts.append(
+                OpponentContext(
+                    division_id=division_id,
+                    division_name=division_name,
+                    registration=registration,
+                    status=status,
+                    match=next_match,
+                    round_name=round_name,
+                    opponent_slot=opponent_slot,
+                    opponent_registration=opponent_registration,
+                )
+            )
+            continue
+
+        if completed_items:
+            completed_items.sort(
+                key=lambda item: (item[0].round_index, item[0].match_id)
+            )
+            last_match, opponent_slot, round_name, opponent_registration, user_won = (
+                completed_items[-1]
+            )
+
+            final_round = bracket.rounds[-1] if bracket.rounds else None
+            if final_round and final_round.matches:
+                final_match = final_round.matches[-1]
+            else:
+                final_match = None
+            winner_slot = final_match.winner_slot() if final_match else None
+            if winner_slot and winner_slot.team_id == registration.user_id:
+                contexts.append(
+                    OpponentContext(
+                        division_id=division_id,
+                        division_name=division_name,
+                        registration=registration,
+                        status="champion",
+                        match=final_match,
+                        round_name=describe_round(bracket, final_match)
+                        if final_match is not None
+                        else round_name,
+                    )
+                )
+                continue
+
+            if user_won:
+                contexts.append(
+                    OpponentContext(
+                        division_id=division_id,
+                        division_name=division_name,
+                        registration=registration,
+                        status="awaiting_opponent",
+                    )
+                )
+                continue
+
+            contexts.append(
+                OpponentContext(
+                    division_id=division_id,
+                    division_name=division_name,
+                    registration=registration,
+                    status="eliminated",
+                    elimination_match=last_match,
+                    elimination_round_name=round_name,
+                    elimination_opponent_slot=opponent_slot,
+                    elimination_opponent_registration=opponent_registration,
+                )
+            )
+            continue
+
+        contexts.append(
+            OpponentContext(
+                division_id=division_id,
+                division_name=division_name,
+                registration=registration,
+                status="not_seeded",
+            )
+        )
+
+    return contexts
 
 
 def infer_division_defaults(division_id: str | None) -> tuple[str, list[int], int]:
@@ -2111,6 +2317,287 @@ async def select_round_winner_error_handler(  # pragma: no cover - Discord wirin
         interaction,
         "An unexpected error occurred while recording the winner.",
     )
+
+
+@tournament_command(
+    name="myopponent", description="Show your current tournament opponent"
+)
+async def my_opponent_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    user_id = getattr(interaction.user, "id", None)
+    if user_id is None:
+        await interaction.response.send_message(
+            "Unable to determine your Discord account.", ephemeral=True
+        )
+        return
+
+    contexts = gather_opponent_contexts(guild.id, user_id)
+    if not contexts:
+        await interaction.response.send_message(
+            "You are not registered as a team captain in any tournament divisions.",
+            ephemeral=True,
+        )
+        return
+
+    blocks: list[str] = []
+    for context in contexts:
+        header = f"{context.division_name} ({context.division_id})"
+        if context.status == "no_bracket":
+            blocks.append(f"{header}: No bracket has been created yet.")
+            continue
+
+        if context.status == "pending" and context.match is not None:
+            opponent_registration = context.opponent_registration
+            if opponent_registration is not None:
+                opponent_display = f"<@{opponent_registration.user_id}> ({opponent_registration.user_name})"
+                opponent_players = format_player_names(opponent_registration)
+                opponent_team = team_display_name(opponent_registration)
+            else:
+                opponent_display = (
+                    context.opponent_slot.display()
+                    if context.opponent_slot is not None
+                    else "Unknown opponent"
+                )
+                opponent_players = "No roster on file"
+                opponent_team = opponent_display
+
+            match_label = (
+                f"{context.round_name or 'Upcoming round'} — {context.match.match_id}"
+            )
+            block_lines = [
+                header,
+                f"- Match: {match_label}",
+                f"- Opponent: {opponent_display} | Team: {opponent_team}",
+                f"- Opponent players: {opponent_players}",
+            ]
+            blocks.append("\n".join(block_lines))
+            continue
+
+        if context.status == "awaiting_opponent":
+            if context.match is not None and context.opponent_slot is not None:
+                waiting_label = context.opponent_slot.display()
+                blocks.append(
+                    f"{header}: Waiting for {waiting_label} to be decided "
+                    f"({context.match.match_id})."
+                )
+            else:
+                blocks.append(
+                    f"{header}: Awaiting bracket updates for your next opponent."
+                )
+            continue
+
+        if context.status == "eliminated":
+            if context.elimination_opponent_registration is not None:
+                opponent_label = context.elimination_opponent_registration.user_name
+            elif context.elimination_opponent_slot is not None:
+                opponent_label = context.elimination_opponent_slot.display()
+            else:
+                opponent_label = "another team"
+            match_id = (
+                context.elimination_match.match_id
+                if context.elimination_match is not None
+                else "a recorded match"
+            )
+            round_name = context.elimination_round_name or "Previous round"
+            elimination_message = (
+                f"{header}: Eliminated in {round_name} ({match_id}) by "
+                f"{opponent_label}."
+            )
+            blocks.append(elimination_message)
+            continue
+
+        if context.status == "champion":
+            match_id = (
+                context.match.match_id if context.match is not None else "Final match"
+            )
+            round_name = context.round_name or "Final"
+            champion_message = (
+                f"{header}: You are the champion! Last recorded match: "
+                f"{round_name} ({match_id})."
+            )
+            blocks.append(champion_message)
+            continue
+
+        if context.status == "not_seeded":
+            unseeded_message = (
+                f"{header}: Registered, but not currently seeded in the bracket. "
+                "Please contact a tournament admin."
+            )
+            blocks.append(unseeded_message)
+
+    message = (
+        "\n\n".join(blocks)
+        if blocks
+        else ("Unable to find any bracket information for your registrations.")
+    )
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@tournament_command(
+    name="alertopponent",
+    description="Ping your opponent with match details so you can schedule",
+)
+async def alert_opponent_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    user_id = getattr(interaction.user, "id", None)
+    if user_id is None:
+        await interaction.response.send_message(
+            "Unable to determine your Discord account.", ephemeral=True
+        )
+        return
+
+    contexts = gather_opponent_contexts(guild.id, user_id)
+    if not contexts:
+        await interaction.response.send_message(
+            "You are not registered as a team captain in any tournament divisions.",
+            ephemeral=True,
+        )
+        return
+
+    ready_contexts = [
+        context
+        for context in contexts
+        if context.status == "pending"
+        and context.match is not None
+        and context.opponent_slot is not None
+        and context.opponent_slot.team_id is not None
+    ]
+
+    if not ready_contexts:
+        notes: list[str] = []
+        for context in contexts:
+            header = f"{context.division_name} ({context.division_id})"
+            if context.status == "no_bracket":
+                notes.append(f"{header}: Bracket not created yet.")
+            elif context.status == "awaiting_opponent":
+                if context.match is not None and context.opponent_slot is not None:
+                    notes.append(
+                        f"{header}: Waiting for {context.opponent_slot.display()} to advance "
+                        f"({context.match.match_id})."
+                    )
+                else:
+                    notes.append(
+                        f"{header}: Waiting for the bracket to update with your opponent."
+                    )
+            elif context.status == "eliminated":
+                notes.append(f"{header}: You have been eliminated from the bracket.")
+            elif context.status == "champion":
+                notes.append(f"{header}: You have already won the bracket — congrats!")
+            elif context.status == "not_seeded":
+                note = (
+                    f"{header}: Registered, but not currently seeded. "
+                    "Contact a tournament admin."
+                )
+                notes.append(note)
+
+        fallback_message = (
+            "No opponents are ready to ping right now."
+            if not notes
+            else "No opponents are ready to ping right now:\n" + "\n".join(notes)
+        )
+        await interaction.response.send_message(fallback_message, ephemeral=True)
+        return
+
+    alert_blocks: list[str] = []
+    private_notes: list[str] = []
+
+    for context in contexts:
+        header = f"{context.division_name} ({context.division_id})"
+        if (
+            context.status == "pending"
+            and context.match is not None
+            and context.opponent_slot is not None
+            and context.opponent_slot.team_id is not None
+        ):
+            opponent_registration = context.opponent_registration
+            opponent_id = context.opponent_slot.team_id
+            opponent_mention = f"<@{opponent_id}>"
+            opponent_team = (
+                team_display_name(opponent_registration)
+                if opponent_registration is not None
+                else context.opponent_slot.display()
+            )
+            opponent_players = (
+                format_player_names(opponent_registration)
+                if opponent_registration is not None
+                else "No player names on file"
+            )
+            my_team = team_display_name(context.registration)
+            my_players = format_player_names(context.registration)
+            match_label = (
+                f"{context.round_name or 'Upcoming round'} — {context.match.match_id}"
+            )
+            alert_lines = [
+                f"{opponent_mention} {header}",
+                f"- Match: {match_label}",
+                f"- Your team: {opponent_team} ({opponent_players})",
+                f"- Our team: {my_team} ({my_players})",
+                "Please reply with your availability so we can schedule our match.",
+            ]
+            alert_blocks.append("\n".join(alert_lines))
+        else:
+            if context.status == "no_bracket":
+                private_notes.append(f"{header}: Bracket not created yet.")
+            elif context.status == "awaiting_opponent":
+                if context.match is not None and context.opponent_slot is not None:
+                    private_notes.append(
+                        f"{header}: Waiting for {context.opponent_slot.display()} to advance "
+                        f"({context.match.match_id})."
+                    )
+                else:
+                    private_notes.append(
+                        f"{header}: Waiting for the bracket to update with your opponent."
+                    )
+            elif context.status == "eliminated":
+                private_notes.append(
+                    f"{header}: You have been eliminated from the bracket."
+                )
+            elif context.status == "champion":
+                private_notes.append(
+                    f"{header}: You have already won the bracket — congrats!"
+                )
+            elif context.status == "not_seeded":
+                private_note = (
+                    f"{header}: Registered, but not currently seeded. "
+                    "Contact a tournament admin."
+                )
+                private_notes.append(private_note)
+
+    body = "\n\n".join(alert_blocks)
+    await interaction.response.send_message(body)
+
+    if private_notes:
+        note_text = "\n".join(private_notes)
+        try:
+            await interaction.followup.send(note_text, ephemeral=True)
+        except discord.HTTPException as exc:  # pragma: no cover - defensive
+            log.debug("Failed to send alertopponent follow-up: %s", exc)
 
 
 @app_commands.describe(
