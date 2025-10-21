@@ -32,6 +32,14 @@
 - Include scope when helpful (e.g., `giveaway:`). Keep related changes together.
 - Before PR: `nox -s lint tests` must pass; update tests/docs when changing behavior.
 - PRs: clear description, linked issues, env/config notes (`DISCORD_TOKEN`, AWS vars), and screenshots/logs for bot behavior.
+- Commit message rules:
+  - Separate subject from body with a blank line
+  - Limit the subject line to 50 characters
+  - Capitalize the subject line
+  - Do not end the subject line with a period
+  - Use the imperative mood in the subject line
+  - Wrap the body at 72 characters
+  - Use the body to explain what and why vs. how
 
 ## Security & Configuration Tips
 - Never commit secrets. Use GitHub Secrets for CI and AWS OIDC role.
