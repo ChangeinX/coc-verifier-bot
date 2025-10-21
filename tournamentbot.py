@@ -57,7 +57,21 @@ AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
 REGISTRATION_CHANNEL_ID_RAW: Final[str | None] = os.getenv(
     "TOURNAMENT_REGISTRATION_CHANNEL_ID"
 )
-TOURNAMENT_ADMIN_ROLE_ID: Final[int] = 1_400_887_994_445_205_707
+DEFAULT_TOURNAMENT_ADMIN_ROLE_ID: Final[int] = 1_400_887_994_445_205_707
+ADMIN_ROLE_ID_RAW: Final[str | None] = os.getenv("TOURNAMENT_ADMIN_ROLE_ID")
+if ADMIN_ROLE_ID_RAW:
+    try:
+        _admin_role_id = int(ADMIN_ROLE_ID_RAW)
+    except ValueError:
+        log = logging.getLogger("tournament-bot")
+        log.warning(
+            "Invalid TOURNAMENT_ADMIN_ROLE_ID=%s; falling back to default",
+            ADMIN_ROLE_ID_RAW,
+        )
+        _admin_role_id = DEFAULT_TOURNAMENT_ADMIN_ROLE_ID
+else:
+    _admin_role_id = DEFAULT_TOURNAMENT_ADMIN_ROLE_ID
+TOURNAMENT_ADMIN_ROLE_ID: Final[int] = _admin_role_id
 GUILD_ID_RAW: Final[str | None] = os.getenv("TOURNAMENT_GUILD_ID")
 
 REQUIRED_VARS = (
@@ -129,6 +143,32 @@ def tournament_command(*args, **kwargs):
         return tree.command(*args, **command_kwargs)(func)
 
     return decorator
+
+
+# ---------- Permission Checks ----------
+
+
+def _has_admin_or_tournament_role(interaction: discord.Interaction) -> bool:
+    member = interaction.user
+    guild_perms = getattr(member, "guild_permissions", None)
+    if getattr(guild_perms, "administrator", False):
+        return True
+    roles = getattr(member, "roles", [])
+    for role in roles or []:
+        if getattr(role, "id", None) == TOURNAMENT_ADMIN_ROLE_ID:
+            return True
+    return False
+
+
+def require_admin_or_tournament_role():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if _has_admin_or_tournament_role(interaction):
+            return True
+        raise app_commands.CheckFailure(
+            "You need administrator or tournament-admin role to run this command."
+        )
+
+    return app_commands.check(predicate)
 
 
 # ---------- AWS / CoC Clients ----------
@@ -1063,7 +1103,7 @@ async def send_ephemeral(interaction: discord.Interaction, message: str) -> None
 
 
 # ---------- Slash Commands ----------
-@app_commands.default_permissions(administrator=True)
+@require_admin_or_tournament_role()
 @tournament_command(name="setup", description="Configure tournament registration rules")
 async def setup_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
@@ -1096,9 +1136,11 @@ async def setup_command(  # pragma: no cover - Discord slash command wiring
 async def setup_error_handler(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ) -> None:
-    if isinstance(error, app_errors.MissingPermissions):
+    if isinstance(error, app_errors.MissingPermissions) or isinstance(
+        error, app_errors.CheckFailure
+    ):
         await interaction.response.send_message(
-            "You need administrator permissions to run this command.",
+            "You need administrator or tournament-admin role to run this command.",
             ephemeral=True,
         )
         return
@@ -1652,13 +1694,13 @@ async def show_registered_command(  # pragma: no cover - Discord slash command w
         await interaction.followup.send("\n".join(chunk), ephemeral=True)
 
 
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
 )
 @tournament_command(
     name="create-bracket", description="Seed registered teams into a bracket"
 )
+@require_admin_or_tournament_role()
 async def create_bracket_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     division: str,
@@ -1769,10 +1811,12 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
 async def create_bracket_error_handler(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ) -> None:
-    if isinstance(error, app_errors.MissingPermissions):
+    if isinstance(error, app_errors.MissingPermissions) or isinstance(
+        error, app_errors.CheckFailure
+    ):
         await send_ephemeral(
             interaction,
-            "You need administrator permissions to run this command.",
+            "You need administrator or tournament-admin role to run this command.",
         )
         return
     log.exception("Unhandled create-bracket error: %s", error)
@@ -1900,7 +1944,6 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
     )
 
 
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
     winner_captain="Team captain (Discord user) for the winning team",
@@ -1909,6 +1952,7 @@ async def show_bracket_error_handler(  # pragma: no cover - Discord slash comman
     name="select-round-winner",
     description="Record the winner for a bracket match",
 )
+@require_admin_or_tournament_role()
 async def select_round_winner_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     division: str,
@@ -2053,10 +2097,12 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
 async def select_round_winner_error_handler(  # pragma: no cover - Discord wiring
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ) -> None:
-    if isinstance(error, app_errors.MissingPermissions):
+    if isinstance(error, app_errors.MissingPermissions) or isinstance(
+        error, app_errors.CheckFailure
+    ):
         await send_ephemeral(
             interaction,
-            "You need administrator permissions to run this command.",
+            "You need administrator or tournament-admin role to run this command.",
         )
         return
     log.exception("Unhandled select-round-winner error: %s", error)
@@ -2066,13 +2112,13 @@ async def select_round_winner_error_handler(  # pragma: no cover - Discord wirin
     )
 
 
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
 )
 @tournament_command(
     name="simulate-tourney", description="Simulate the full tournament flow"
 )
+@require_admin_or_tournament_role()
 async def simulate_tourney_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     division: str,
@@ -2182,10 +2228,12 @@ async def simulate_tourney_command(  # pragma: no cover - Discord slash command 
 async def simulate_tourney_error_handler(  # pragma: no cover - Discord wiring
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ) -> None:
-    if isinstance(error, app_errors.MissingPermissions):
+    if isinstance(error, app_errors.MissingPermissions) or isinstance(
+        error, app_errors.CheckFailure
+    ):
         await send_ephemeral(
             interaction,
-            "You need administrator permissions to run this command.",
+            "You need administrator or tournament-admin role to run this command.",
         )
         return
     log.exception("Unhandled simulate-tourney error: %s", error)

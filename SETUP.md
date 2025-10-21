@@ -67,7 +67,7 @@ pip install -e .[dev]
 DISCORD_TOKEN=... python bot.py
 
 # Tournament bot
-DISCORD_TOKEN=... TOURNAMENT_TABLE_NAME=... python tournamentbot.py
+DISCORD_TOKEN=... TOURNAMENT_TABLE_NAME=... TOURNAMENT_ADMIN_ROLE_ID=... python tournamentbot.py
 ```
 
 To run inside Docker, build the appropriate image (`Dockerfile`, `Dockerfile.giveaway`, or `Dockerfile.tournament`) and pass the same environment variables with `docker run`.
@@ -78,10 +78,12 @@ To run inside Docker, build the appropriate image (`Dockerfile`, `Dockerfile.giv
 - `/teamname division:<id> team_name:<text>` – rename an existing team in the selected division (admins can target a different captain).
 - `/registersub division:<id> player_tag:<tag>` – add or replace a substitute when the division supports teams larger than one.
 - `/showregistered division:<id>` – list the registered teams for the division.
-- `/create-bracket division:<id>` (admin only) – seed the bracket for the division.
+- `/create-bracket division:<id>` (admin/tournament-admin only) – seed the bracket for the division.
 - `/showbracket division:<id>` – display the current bracket state.
-- `/select-round-winner division:<id> winner_captain:<user>` (admin only) – advance a team within the division bracket.
-- `/simulate-tourney division:<id>` (admin only) – run an automated bracket simulation for the division; falls back to seeded data when no live registrations exist.
+- `/select-round-winner division:<id> winner_captain:<user>` (admin/tournament-admin only) – advance a team within the division bracket.
+- `/simulate-tourney division:<id>` (admin/tournament-admin only) – run an automated bracket simulation for the division; falls back to seeded data when no live registrations exist.
+
+Note: Commands marked "admin/tournament-admin" require either the Discord Administrator permission or that the user holds the configured `TOURNAMENT_ADMIN_ROLE_ID`.
 
 ## 7. Verification commands
 - `/verifyclan <player_tag>` - link a Discord user to their Clash of Clans account.
