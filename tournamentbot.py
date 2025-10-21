@@ -938,6 +938,85 @@ def build_bracket_embed(
     return embed
 
 
+async def send_bracket_embed_chunked_to_channel(
+    channel: Messageable,
+    bracket: BracketState,
+    *,
+    title: str,
+    requested_by: discord.abc.User | None,
+    summary_note: str | None = None,
+    shrink_completed: bool = False,
+) -> int:
+    """Post the bracket to a channel, splitting into multiple embeds if too large.
+
+    Discord imposes a ~6000 character total size per-embed and 4096 character
+    description limit. Larger brackets (e.g., Round of 64) can exceed this.
+
+    This helper renders the bracket once, then sends one or more embeds where
+    the first includes the Summary/Note fields, and subsequent messages contain
+    continued graph content only.
+
+    Returns the number of messages posted.
+    """
+    graph = render_bracket(bracket, shrink_completed=shrink_completed)
+
+    # Build summary text to mirror build_bracket_embed()
+    def _summary_text(state: BracketState) -> str:
+        if not state.rounds:
+            return ""
+        first_round = state.rounds[0]
+        team_ids = {
+            slot.team_id
+            for match in first_round.matches
+            for slot in (match.competitor_one, match.competitor_two)
+            if slot.team_id is not None
+        }
+        round_names = ", ".join(r.name for r in state.rounds)
+        return f"Teams: {len(team_ids)} | Rounds: {round_names}"
+
+    summary_value = _summary_text(bracket)
+
+    # Conservative limits to stay well under Discord embed caps.
+    first_limit = 3200  # allow room for fields/title
+    rest_limit = 3900  # description limit is 4096; leave buffer
+
+    # Split graph by lines to avoid breaking ASCII art mid-line.
+    chunks: list[str] = []
+    current = ""
+    limit = first_limit
+    for line in graph.splitlines():
+        addition = ("\n" if current else "") + line
+        if len(current) + len(addition) > limit:
+            chunks.append(current)
+            current = line
+            limit = rest_limit
+        else:
+            current += addition
+    if current:
+        chunks.append(current)
+
+    messages_posted = 0
+    for index, text in enumerate(chunks, start=1):
+        embed = discord.Embed(
+            title=title + (f" (cont. {index})" if index > 1 else ""),
+            description=f"```\n{text}\n```" if text else "Bracket is empty",
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(UTC),
+        )
+        if index == 1:
+            if summary_value:
+                embed.add_field(name="Summary", value=summary_value, inline=False)
+            if summary_note:
+                embed.add_field(name="Note", value=summary_note, inline=False)
+        if requested_by is not None:
+            embed.set_footer(text=f"Updated by {requested_by}")
+
+        await channel.send(embed=embed)
+        messages_posted += 1
+
+    return messages_posted
+
+
 async def fetch_players(tags: list[str]) -> list[PlayerEntry]:
     async def fetch(tag: str) -> PlayerEntry:
         if coc_client is None:
@@ -1658,16 +1737,30 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
 
     channel = interaction.channel
     if isinstance(channel, Messageable):
-        embed = build_bracket_embed(
-            bracket,
-            title=f"{config.division_name} | Tournament Bracket Created",
-            requested_by=interaction.user,
-            summary_note=note,
-        )
+        title = f"{config.division_name} | Tournament Bracket Created"
         try:
+            # Try single embed first for smaller brackets
+            embed = build_bracket_embed(
+                bracket,
+                title=title,
+                requested_by=interaction.user,
+                summary_note=note,
+            )
             await channel.send(embed=embed)
         except discord.HTTPException as exc:  # pragma: no cover - network failure
+            # Fallback: break into multiple embeds when too large
             log.warning("Failed to send bracket announcement: %s", exc)
+            try:
+                posted = await send_bracket_embed_chunked_to_channel(
+                    channel,
+                    bracket,
+                    title=title,
+                    requested_by=interaction.user,
+                    summary_note=note,
+                )
+                log.info("Posted bracket in %s chunk(s) due to size", posted)
+            except discord.HTTPException as exc2:  # pragma: no cover - defensive
+                log.warning("Failed to send chunked bracket announcement: %s", exc2)
     else:
         log.debug("Skipping bracket announcement; channel not messageable")
 
@@ -1776,6 +1869,20 @@ async def show_bracket_command(  # pragma: no cover - Discord slash command wiri
         await interaction.response.send_message(embed=embed)
     except discord.HTTPException as exc:  # pragma: no cover - defensive
         log.warning("Failed to send showbracket response: %s", exc)
+        # Fallback: attempt chunked posting in the channel if messageable
+        channel = interaction.channel
+        if isinstance(channel, Messageable):
+            try:
+                await send_bracket_embed_chunked_to_channel(
+                    channel,
+                    bracket,
+                    title=f"{config.division_name} | Current Tournament Bracket",
+                    requested_by=interaction.user,
+                    summary_note=summary_note,
+                )
+                return
+            except discord.HTTPException as exc2:  # pragma: no cover - defensive
+                log.warning("Failed to send chunked showbracket response: %s", exc2)
         await send_ephemeral(
             interaction,
             "Failed to display the bracket. Please try again shortly.",
