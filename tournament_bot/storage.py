@@ -3,7 +3,13 @@ from __future__ import annotations
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
-from .models import BracketState, TeamRegistration, TournamentConfig, TournamentSeries
+from .models import (
+    BracketState,
+    TeamRegistration,
+    TournamentConfig,
+    TournamentRoundWindows,
+    TournamentSeries,
+)
 
 
 class TournamentStorage:
@@ -26,6 +32,20 @@ class TournamentStorage:
     def save_series(self, series: TournamentSeries) -> None:
         self.ensure_table()
         self._table.put_item(Item=series.to_item())
+
+    # ----- Round Windows -----
+    def get_round_windows(self, guild_id: int) -> TournamentRoundWindows | None:
+        self.ensure_table()
+        resp = self._table.get_item(Key=TournamentRoundWindows.key(guild_id))
+        item = resp.get("Item")
+        if not item:
+            return None
+        return TournamentRoundWindows.from_item(item)
+
+    def save_round_windows(self, windows: TournamentRoundWindows) -> None:
+        self.ensure_table()
+        windows.ensure_sequential_positions()
+        self._table.put_item(Item=windows.to_item())
 
     # ----- Division Configurations -----
     def get_config(self, guild_id: int, division_id: str) -> TournamentConfig | None:

@@ -18,13 +18,35 @@ from tournament_bot import (
 )
 
 
+class FakeMessage:
+    def __init__(self) -> None:
+        self.edits: list[dict[str, object]] = []
+
+    async def edit(self, **kwargs) -> None:  # pragma: no cover - simple stub
+        self.edits.append(kwargs)
+
+
 class FakeResponse:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, bool]] = []
+        self.messages: list[dict[str, object]] = []
         self._deferred = False
 
-    async def send_message(self, message: str, *, ephemeral: bool) -> None:
-        self.messages.append((message, ephemeral))
+    async def send_message(
+        self,
+        message: str | None = None,
+        *,
+        embed=None,
+        view=None,
+        ephemeral: bool,
+    ) -> None:
+        self.messages.append(
+            {
+                "content": message,
+                "embed": embed,
+                "view": view,
+                "ephemeral": ephemeral,
+            }
+        )
         self._deferred = True
 
     async def defer(self, *, ephemeral: bool, thinking: bool) -> None:  # noqa: FBT001,F841 - test stub
@@ -64,6 +86,10 @@ class FakeInteraction:
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.channel = None
+        self._original_message = FakeMessage()
+
+    async def original_response(self) -> FakeMessage:
+        return self._original_message
 
 
 class InMemoryStorage:
@@ -76,6 +102,7 @@ class InMemoryStorage:
         self._configs = configs
         self._registrations: dict[tuple[str, int], TeamRegistration] = {}
         self._brackets: dict[tuple[int, str], BracketState] = {}
+        self._round_windows = None
 
     def ensure_table(self) -> None:  # pragma: no cover - simple stub
         return None
@@ -91,10 +118,24 @@ class InMemoryStorage:
             return None
         return self._configs.get(division_id)
 
+    def list_division_configs(self, guild_id: int) -> list[TournamentConfig]:
+        if guild_id != self._series.guild_id:
+            return []
+        return sorted(
+            self._configs.values(),
+            key=lambda cfg: (cfg.division_name.lower(), cfg.division_id),
+        )
+
     def list_division_ids(self, guild_id: int) -> list[str]:
         if guild_id != self._series.guild_id:
             return []
         return sorted(self._configs.keys())
+
+    def get_round_windows(self, guild_id: int):  # pragma: no cover - simple helper
+        return self._round_windows if guild_id == self._series.guild_id else None
+
+    def save_round_windows(self, windows):  # pragma: no cover - simple helper
+        self._round_windows = windows
 
     def get_registration(
         self, guild_id: int, division_id: str, user_id: int
@@ -252,9 +293,9 @@ async def test_register_team_blocks_sub_in_1v1(monkeypatch):
     )
 
     assert interaction.response.messages
-    message, ephemeral = interaction.response.messages[0]
-    assert ephemeral is True
-    assert "Substitutes are not supported" in message
+    payload = interaction.response.messages[0]
+    assert payload["ephemeral"] is True
+    assert "Substitutes are not supported" in str(payload["content"])
     assert called is False
 
 
@@ -306,22 +347,11 @@ async def test_register_sub_updates_existing_registration(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_set_round_windows_command_updates_bracket(monkeypatch):
+async def test_set_round_windows_command_displays_view(monkeypatch):
     now = datetime.now(UTC)
     series = make_series(now)
     config = make_config(team_size=5, division_id="th15")
     storage = InMemoryStorage(series, {"th15": config})
-
-    bracket = BracketState(
-        guild_id=1,
-        division_id="th15",
-        created_at=tournamentbot.isoformat_utc(now),
-        rounds=[
-            BracketRound(name="Quarterfinals", matches=[]),
-            BracketRound(name="Semifinals", matches=[]),
-        ],
-    )
-    storage.save_bracket(bracket)
 
     guild = SimpleNamespace(id=1)
     admin_role = SimpleNamespace(id=tournamentbot.TOURNAMENT_ADMIN_ROLE_ID)
@@ -330,29 +360,14 @@ async def test_set_round_windows_command_updates_bracket(monkeypatch):
 
     monkeypatch.setattr(tournamentbot, "storage", storage)
 
-    qf_start = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
-    qf_end = (now + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M")
-    sf_start = (now + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M")
-    sf_end = (now + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M")
-
-    windows_spec = f"R1={qf_start}..{qf_end}; R2={sf_start}..{sf_end}"
-
-    await tournamentbot.set_round_windows_command.callback(
-        interaction,
-        "th15",
-        windows_spec,
-    )
-
-    saved = storage.get_bracket(guild.id, "th15")
-    assert saved is not None
-    for round_obj in saved.rounds[:2]:
-        assert round_obj.window_opens_at is not None
-        assert round_obj.window_closes_at is not None
+    await tournamentbot.set_round_windows_command.callback(interaction)
 
     messages = interaction.response.messages
     assert messages
-    assert messages[0][1] is True  # ephemeral
-    assert "Configured 2 round window" in messages[0][0]
+    payload = messages[0]
+    assert payload["ephemeral"] is True
+    assert payload["embed"] is not None
+    assert isinstance(payload["view"], tournamentbot.RoundWindowsView)
 
 
 def _make_bracket_with_match(now: datetime) -> BracketState:
@@ -430,7 +445,7 @@ async def test_select_round_winner_requires_window(monkeypatch):
 
     messages = interaction.response.messages
     assert messages
-    assert "does not have a match window configured" in messages[0][0]
+    assert "does not have a match window configured" in str(messages[0]["content"])
 
 
 @pytest.mark.asyncio
@@ -464,7 +479,7 @@ async def test_select_round_winner_respects_window_open(monkeypatch):
 
     messages = interaction.response.messages
     assert messages
-    assert "opens" in messages[0][0]
+    assert "opens" in str(messages[0]["content"])
     saved = storage.get_bracket(guild.id, "th15")
     assert saved is not None
     assert saved.rounds[0].matches[0].winner_index is None
@@ -505,4 +520,4 @@ async def test_select_round_winner_within_window_records_winner(monkeypatch):
 
     messages = interaction.response.messages
     assert messages
-    assert "Recorded" in messages[0][0]
+    assert "Recorded" in str(messages[0]["content"])

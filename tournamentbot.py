@@ -27,8 +27,10 @@ from tournament_bot import (
     InvalidTownHallError,
     InvalidValueError,
     PlayerEntry,
+    RoundWindowDefinition,
     TeamRegistration,
     TournamentConfig,
+    TournamentRoundWindows,
     TournamentSeries,
     TournamentStorage,
     parse_player_tags,
@@ -317,6 +319,81 @@ def parse_round_window_spec(
     return updates
 
 
+def _definitions_from_config(
+    config: TournamentRoundWindows | None,
+) -> list[RoundWindowDefinition]:
+    if config is None:
+        return []
+    config.ensure_sequential_positions()
+    return list(config.rounds)
+
+
+def _format_window_input_value(raw: str | None) -> str:
+    if not raw:
+        return ""
+    try:
+        parsed = parse_round_window_timestamp(raw)
+    except ValueError:
+        return raw
+    return parsed.strftime("%Y-%m-%dT%H:%M")
+
+
+def apply_round_windows_to_bracket(
+    bracket: BracketState,
+    config: TournamentRoundWindows,
+    *,
+    clear_missing: bool,
+) -> tuple[bool, int, int]:
+    definitions = _definitions_from_config(config)
+    changed = False
+    aligned = 0
+    cleared = 0
+    for index, round_obj in enumerate(bracket.rounds):
+        definition = definitions[index] if index < len(definitions) else None
+        if definition is not None:
+            if (
+                round_obj.window_opens_at != definition.opens_at
+                or round_obj.window_closes_at != definition.closes_at
+            ):
+                round_obj.window_opens_at = definition.opens_at
+                round_obj.window_closes_at = definition.closes_at
+                changed = True
+            aligned += 1
+        elif clear_missing and (
+            round_obj.window_opens_at is not None
+            or round_obj.window_closes_at is not None
+        ):
+            round_obj.window_opens_at = None
+            round_obj.window_closes_at = None
+            cleared += 1
+            changed = True
+    return changed, aligned, cleared
+
+
+def apply_round_windows_to_guild(
+    guild_id: int,
+    config: TournamentRoundWindows,
+    *,
+    clear_missing: bool,
+) -> tuple[int, int, int]:
+    divisions_updated = 0
+    total_aligned = 0
+    total_cleared = 0
+    for division_id in storage.list_division_ids(guild_id):
+        bracket = storage.get_bracket(guild_id, division_id)
+        if bracket is None:
+            continue
+        changed, aligned, cleared = apply_round_windows_to_bracket(
+            bracket, config, clear_missing=clear_missing
+        )
+        total_aligned += aligned
+        total_cleared += cleared
+        if changed:
+            storage.save_bracket(bracket)
+            divisions_updated += 1
+    return divisions_updated, total_aligned, total_cleared
+
+
 def build_setup_overview_embed(
     series: TournamentSeries | None, divisions: list[TournamentConfig]
 ) -> discord.Embed:
@@ -364,6 +441,102 @@ def build_setup_overview_embed(
     embed.set_footer(
         text="Use the buttons below to update the registration window and divisions."
     )
+    return embed
+
+
+def build_round_windows_embed(
+    guild_id: int, config: TournamentRoundWindows | None
+) -> discord.Embed:
+    definitions = _definitions_from_config(config)
+    embed = discord.Embed(
+        title="Round Windows",
+        description=(
+            "Configure match windows for each round. These windows are applied "
+            "to every division bracket that has been seeded."
+        ),
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(UTC),
+    )
+
+    if definitions:
+        lines: list[str] = []
+        for definition in definitions:
+            try:
+                opens_at = parse_round_window_timestamp(definition.opens_at)
+                closes_at = parse_round_window_timestamp(definition.closes_at)
+                window_text = (
+                    f"{format_display(opens_at)} — {format_display(closes_at)}"
+                )
+            except ValueError:  # pragma: no cover - defensive, malformed data
+                window_text = f"{definition.opens_at} — {definition.closes_at}"
+            lines.append(f"R{definition.position}: {window_text}")
+        embed.add_field(
+            name="Configured Windows",
+            value="\n".join(lines),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Configured Windows",
+            value="No rounds configured yet. Use Add Round to create the first window.",
+            inline=False,
+        )
+
+    division_configs = storage.list_division_configs(guild_id)
+    coverage_lines: list[str] = []
+    awaiting_bracket: list[str] = []
+    for config_entry in division_configs:
+        bracket = storage.get_bracket(guild_id, config_entry.division_id)
+        division_name = config_entry.division_name or config_entry.division_id.upper()
+        if bracket is None:
+            awaiting_bracket.append(division_name)
+            continue
+        total_rounds = len(bracket.rounds)
+        available = len(definitions)
+        applied = min(total_rounds, available)
+        missing = max(0, total_rounds - available)
+        summary = f"{division_name}: {applied}/{total_rounds} round windows"
+        if missing:
+            summary += f" (missing {missing})"
+        coverage_lines.append(summary)
+
+    if coverage_lines:
+        limited = coverage_lines[:12]
+        remainder = len(coverage_lines) - len(limited)
+        value = "\n".join(limited)
+        if remainder > 0:
+            value += f"\n… {remainder} more division(s)"
+        embed.add_field(name="Bracket Coverage", value=value, inline=False)
+    else:
+        embed.add_field(
+            name="Bracket Coverage",
+            value="No brackets have been seeded yet.",
+            inline=False,
+        )
+
+    if awaiting_bracket:
+        limited = awaiting_bracket[:6]
+        remainder = len(awaiting_bracket) - len(limited)
+        value = ", ".join(limited)
+        if remainder > 0:
+            value += f" (+{remainder} more)"
+        embed.add_field(
+            name="Awaiting Bracket",
+            value=value,
+            inline=False,
+        )
+
+    if config is not None and config.updated_at:
+        try:
+            updated_at = datetime.strptime(config.updated_at, ISO_FORMAT).replace(
+                tzinfo=UTC
+            )
+            embed.timestamp = updated_at
+        except ValueError:  # pragma: no cover - defensive
+            pass
+        if config.updated_by:
+            embed.set_footer(text=f"Last updated by <@{config.updated_by}>")
+
     return embed
 
 
@@ -772,6 +945,302 @@ class DivisionConfigModal(discord.ui.Modal):
             f"Division {division_name} saved.{reset_summary}", ephemeral=True
         )
         await self._setup_view.refresh()
+
+
+class RoundSelect(discord.ui.Select):
+    def __init__(
+        self,
+        windows_view: RoundWindowsView,
+        rounds: Sequence[RoundWindowDefinition],
+    ) -> None:
+        options = self._build_options(rounds)
+        super().__init__(
+            placeholder="Edit a configured round…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self._windows_view = windows_view
+
+    @staticmethod
+    def _build_options(
+        rounds: Sequence[RoundWindowDefinition],
+    ) -> list[discord.SelectOption]:
+        options: list[discord.SelectOption] = []
+        for definition in rounds:
+            try:
+                opens = parse_round_window_timestamp(definition.opens_at)
+                closes = parse_round_window_timestamp(definition.closes_at)
+                description = f"{format_display(opens)} — {format_display(closes)}"
+            except ValueError:  # pragma: no cover - defensive
+                description = f"{definition.opens_at} — {definition.closes_at}"
+            options.append(
+                discord.SelectOption(
+                    label=f"Round {definition.position}",
+                    value=str(definition.position - 1),
+                    description=description[:100],
+                )
+            )
+        return options
+
+    def refresh(self, rounds: Sequence[RoundWindowDefinition]) -> None:
+        self.options = self._build_options(rounds)
+        self.disabled = not rounds
+
+    async def callback(
+        self, interaction: discord.Interaction
+    ) -> None:  # pragma: no cover - UI wiring
+        try:
+            selection = int(self.values[0])
+        except (ValueError, IndexError):
+            await interaction.response.send_message(
+                "Unable to determine the selected round.",
+                ephemeral=True,
+            )
+            return
+        await self._windows_view.open_round_modal(interaction, selection)
+
+
+class RoundWindowsView(discord.ui.View):
+    def __init__(
+        self,
+        guild_id: int,
+        requester_id: int,
+        *,
+        initial_config: TournamentRoundWindows | None,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.requester_id = requester_id
+        self.message: discord.Message | None = None
+        self.round_select: RoundSelect | None = None
+        definitions = _definitions_from_config(initial_config)
+        if definitions:
+            self.round_select = RoundSelect(self, definitions)
+            self.add_item(self.round_select)
+        self._sync_button_state(definitions)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id or is_tournament_admin(
+            interaction.user
+        ):
+            return True
+        await interaction.response.send_message(
+            "Only tournament admins may use this session.",
+            ephemeral=True,
+        )
+        return False
+
+    def _load_config(self) -> TournamentRoundWindows | None:
+        config = storage.get_round_windows(self.guild_id)
+        if config is not None:
+            config.ensure_sequential_positions()
+        return config
+
+    def _sync_button_state(self, definitions: Sequence[RoundWindowDefinition]) -> None:
+        has_rounds = bool(definitions)
+        if hasattr(self, "remove_round"):
+            self.remove_round.disabled = not has_rounds
+        if self.round_select is not None:
+            self.round_select.disabled = not has_rounds
+
+    def _refresh_round_select(
+        self, definitions: Sequence[RoundWindowDefinition]
+    ) -> None:
+        if definitions and self.round_select is None:
+            self.round_select = RoundSelect(self, definitions)
+            self.add_item(self.round_select)
+        elif definitions and self.round_select is not None:
+            self.round_select.refresh(definitions)
+        elif not definitions and self.round_select is not None:
+            self.remove_item(self.round_select)
+            self.round_select = None
+
+    async def refresh(self) -> None:
+        config = self._load_config()
+        definitions = _definitions_from_config(config)
+        self._refresh_round_select(definitions)
+        self._sync_button_state(definitions)
+        if self.message is None:
+            return
+        embed = build_round_windows_embed(self.guild_id, config)
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning("Failed to refresh round windows view: %s", exc)
+
+    async def on_timeout(self) -> None:  # pragma: no cover - UI timeout
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) or isinstance(
+                child, discord.ui.Select
+            ):
+                child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def open_round_modal(
+        self, interaction: discord.Interaction, round_index: int
+    ) -> None:
+        config = self._load_config()
+        definitions = _definitions_from_config(config)
+        existing = (
+            definitions[round_index] if 0 <= round_index < len(definitions) else None
+        )
+        modal = RoundWindowModal(
+            self,
+            round_index=round_index,
+            existing=existing,
+            is_new=existing is None,
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Add Round", style=discord.ButtonStyle.primary)
+    async def add_round(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        config = self._load_config()
+        definitions = _definitions_from_config(config)
+        modal = RoundWindowModal(
+            self,
+            round_index=len(definitions),
+            existing=None,
+            is_new=True,
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(
+        label="Remove Last Round",
+        style=discord.ButtonStyle.danger,
+    )
+    async def remove_round(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        config = self._load_config()
+        definitions = _definitions_from_config(config)
+        if not definitions:
+            await interaction.response.send_message(
+                "No round windows configured yet.", ephemeral=True
+            )
+            return
+        removed = definitions.pop()
+        if config is None:
+            config = TournamentRoundWindows(
+                guild_id=self.guild_id,
+                rounds=[],
+                updated_by=interaction.user.id,
+                updated_at=utc_now_iso(),
+            )
+        config.rounds = list(definitions)
+        config.updated_by = interaction.user.id
+        config.updated_at = utc_now_iso()
+        storage.save_round_windows(config)
+        divisions_updated, _, cleared = apply_round_windows_to_guild(
+            self.guild_id, config, clear_missing=True
+        )
+        ack_parts = [f"Removed round {removed.position} window."]
+        if divisions_updated:
+            ack_parts.append(f"Updated {divisions_updated} bracket(s).")
+        if cleared:
+            ack_parts.append(f"Cleared {cleared} round(s) without windows.")
+        if not divisions_updated and not cleared:
+            ack_parts.append("No existing brackets required changes.")
+        await interaction.response.send_message(" ".join(ack_parts), ephemeral=True)
+        await self.refresh()
+
+
+class RoundWindowModal(discord.ui.Modal):
+    def __init__(
+        self,
+        windows_view: RoundWindowsView,
+        *,
+        round_index: int,
+        existing: RoundWindowDefinition | None,
+        is_new: bool,
+    ) -> None:
+        title_action = "Add" if is_new else "Edit"
+        super().__init__(title=f"{title_action} Round {round_index + 1} Window")
+        self._windows_view = windows_view
+        self._round_index = round_index
+        self._is_new = is_new
+        default_opens = _format_window_input_value(
+            existing.opens_at if existing is not None else None
+        )
+        default_closes = _format_window_input_value(
+            existing.closes_at if existing is not None else None
+        )
+        self.opens_input = discord.ui.TextInput(
+            label="Opens (UTC)",
+            placeholder="2024-05-01T18:00",
+            default=default_opens,
+        )
+        self.closes_input = discord.ui.TextInput(
+            label="Closes (UTC)",
+            placeholder="2024-05-05T18:00",
+            default=default_closes,
+        )
+        self.add_item(self.opens_input)
+        self.add_item(self.closes_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            opens_at = parse_registration_datetime(self.opens_input.value)
+            closes_at = parse_registration_datetime(self.closes_input.value)
+            opens_at, closes_at = validate_registration_window(opens_at, closes_at)
+        except InvalidValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        config = self._windows_view._load_config()
+        if config is None:
+            config = TournamentRoundWindows(
+                guild_id=self._windows_view.guild_id,
+                rounds=[],
+                updated_by=interaction.user.id,
+                updated_at=utc_now_iso(),
+            )
+        definitions = _definitions_from_config(config)
+        iso_opens = isoformat_utc(opens_at)
+        iso_closes = isoformat_utc(closes_at)
+        definition = RoundWindowDefinition(
+            position=self._round_index + 1,
+            opens_at=iso_opens,
+            closes_at=iso_closes,
+        )
+        if self._is_new:
+            definitions.append(definition)
+        elif 0 <= self._round_index < len(definitions):
+            definitions[self._round_index] = definition
+        else:
+            definitions.append(definition)
+
+        config.rounds = list(definitions)
+        config.updated_by = interaction.user.id
+        config.updated_at = utc_now_iso()
+        storage.save_round_windows(config)
+
+        divisions_updated, aligned, _ = apply_round_windows_to_guild(
+            self._windows_view.guild_id,
+            config,
+            clear_missing=False,
+        )
+
+        action = "Added" if self._is_new else "Updated"
+        window_text = f"{format_display(opens_at)} — {format_display(closes_at)}"
+        ack_parts = [
+            f"{action} round {self._round_index + 1} window ({window_text}).",
+        ]
+        if divisions_updated:
+            ack_parts.append(f"Applied to {divisions_updated} bracket(s).")
+        elif aligned:
+            ack_parts.append("Aligned existing brackets.")
+        else:
+            ack_parts.append("Brackets will inherit this window when seeded.")
+
+        await interaction.response.send_message(" ".join(ack_parts), ephemeral=True)
+        await self._windows_view.refresh()
 
 
 def format_lineup_table(
@@ -2060,6 +2529,9 @@ async def create_bracket_command(  # pragma: no cover - Discord slash command wi
     existing = storage.get_bracket(guild.id, division_id)
     bracket = create_bracket_state(guild.id, division_id, registrations)
     apply_team_names(bracket, registrations)
+    round_windows = storage.get_round_windows(guild.id)
+    if round_windows is not None:
+        apply_round_windows_to_bracket(bracket, round_windows, clear_missing=False)
     storage.save_bracket(bracket)
 
     bye_count = sum(
@@ -2130,19 +2602,13 @@ async def create_bracket_error_handler(  # pragma: no cover - Discord slash comm
     )
 
 
-@app_commands.describe(
-    division="Tournament division identifier (e.g. th12)",
-    windows="Round windows e.g. R1=2024-05-01T18:00..2024-05-05T18:00; R2=...",
-)
 @tournament_command(
     name="setwindows",
-    description="Configure match windows for each round of a bracket",
+    description="Configure match windows for tournament rounds",
 )
 @require_admin_or_tournament_role()
 async def set_round_windows_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
-    division: str,
-    windows: str,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -2156,58 +2622,18 @@ async def set_round_windows_command(  # pragma: no cover - Discord slash command
         await send_ephemeral(interaction, str(exc))
         return
 
+    config = storage.get_round_windows(guild.id)
+    if config is not None:
+        config.ensure_sequential_positions()
+
+    embed = build_round_windows_embed(guild.id, config)
+    view = RoundWindowsView(guild.id, interaction.user.id, initial_config=config)
+
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     try:
-        division_id = normalize_division_value(division)
-    except InvalidValueError as exc:
-        await send_ephemeral(interaction, str(exc))
-        return
-
-    bracket = storage.get_bracket(guild.id, division_id)
-    if bracket is None:
-        await send_ephemeral(
-            interaction,
-            "No bracket found for that division. Run /create-bracket before setting windows.",
-        )
-        return
-
-    try:
-        updates = parse_round_window_spec(windows, bracket.rounds)
-    except InvalidValueError as exc:
-        await send_ephemeral(interaction, str(exc))
-        return
-
-    for index, (opens_at, closes_at) in updates.items():
-        bracket.rounds[index].window_opens_at = opens_at
-        bracket.rounds[index].window_closes_at = closes_at
-
-    storage.save_bracket(bracket)
-
-    ack_lines = [f"Configured {len(updates)} round window(s)."]
-    for index in sorted(updates.keys()):
-        round_obj = bracket.rounds[index]
-        opens_at_raw = round_obj.window_opens_at
-        closes_at_raw = round_obj.window_closes_at
-        if opens_at_raw is None or closes_at_raw is None:
-            continue
-        opens_at = parse_round_window_timestamp(opens_at_raw)
-        closes_at = parse_round_window_timestamp(closes_at_raw)
-        ack_lines.append(
-            f"- {round_obj.name}: {format_display(opens_at)} — {format_display(closes_at)}"
-        )
-
-    remaining = [
-        round_obj.name
-        for round_obj in bracket.rounds
-        if not round_obj.window_opens_at or not round_obj.window_closes_at
-    ]
-    if remaining:
-        pending_list = ", ".join(remaining)
-        ack_lines.append(
-            "Pending: configure windows for "
-            + (pending_list if len(remaining) <= 4 else f"{len(remaining)} round(s)")
-        )
-
-    await send_ephemeral(interaction, "\n".join(ack_lines))
+        view.message = await interaction.original_response()
+    except discord.HTTPException:  # pragma: no cover - defensive
+        view.message = None
 
 
 @set_round_windows_command.error
@@ -3183,13 +3609,6 @@ async def _show_registered_division_autocomplete(
 
 @create_bracket_command.autocomplete("division")
 async def _create_bracket_division_autocomplete(
-    interaction: discord.Interaction, current: str
-) -> list[app_commands.Choice[str]]:
-    return await division_autocomplete(interaction, current)
-
-
-@set_round_windows_command.autocomplete("division")
-async def _set_round_windows_division_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     return await division_autocomplete(interaction, current)

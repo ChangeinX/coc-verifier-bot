@@ -6,9 +6,12 @@ import pytest
 import tournamentbot
 from tournament_bot import (
     BracketRound,
+    BracketState,
     PlayerEntry,
+    RoundWindowDefinition,
     TeamRegistration,
     TournamentConfig,
+    TournamentRoundWindows,
     TournamentSeries,
     utc_now_iso,
 )
@@ -82,6 +85,96 @@ def test_parse_round_window_spec_rejects_unknown_round():
 
     with pytest.raises(tournamentbot.InvalidValueError):
         tournamentbot.parse_round_window_spec(spec, rounds)
+
+
+def test_apply_round_windows_to_bracket_assigns_all_rounds():
+    rounds = [
+        BracketRound(name="Quarterfinals", matches=[]),
+        BracketRound(name="Semifinals", matches=[]),
+    ]
+    bracket = BracketState(
+        guild_id=1,
+        division_id="th15",
+        created_at="2024-01-01T00:00:00.000Z",
+        rounds=rounds,
+    )
+    config = TournamentRoundWindows(
+        guild_id=1,
+        rounds=[
+            RoundWindowDefinition(
+                position=1,
+                opens_at=tournamentbot.isoformat_utc(
+                    datetime(2024, 5, 1, 18, tzinfo=UTC)
+                ),
+                closes_at=tournamentbot.isoformat_utc(
+                    datetime(2024, 5, 3, 18, tzinfo=UTC)
+                ),
+            ),
+            RoundWindowDefinition(
+                position=2,
+                opens_at=tournamentbot.isoformat_utc(
+                    datetime(2024, 5, 4, 18, tzinfo=UTC)
+                ),
+                closes_at=tournamentbot.isoformat_utc(
+                    datetime(2024, 5, 6, 18, tzinfo=UTC)
+                ),
+            ),
+        ],
+        updated_by=1,
+        updated_at="2024-05-01T00:00:00.000Z",
+    )
+
+    changed, aligned, cleared = tournamentbot.apply_round_windows_to_bracket(
+        bracket, config, clear_missing=True
+    )
+
+    assert changed is True
+    assert aligned == 2
+    assert cleared == 0
+    assert bracket.rounds[0].window_opens_at == config.rounds[0].opens_at
+    assert bracket.rounds[1].window_closes_at == config.rounds[1].closes_at
+
+
+def test_apply_round_windows_to_bracket_clears_missing_rounds():
+    rounds = [
+        BracketRound(name="Quarterfinals", matches=[]),
+        BracketRound(name="Semifinals", matches=[]),
+    ]
+    rounds[1].window_opens_at = "2024-05-05T18:00:00.000Z"
+    rounds[1].window_closes_at = "2024-05-07T18:00:00.000Z"
+    bracket = BracketState(
+        guild_id=1,
+        division_id="th15",
+        created_at="2024-01-01T00:00:00.000Z",
+        rounds=rounds,
+    )
+    config = TournamentRoundWindows(
+        guild_id=1,
+        rounds=[
+            RoundWindowDefinition(
+                position=1,
+                opens_at=tournamentbot.isoformat_utc(
+                    datetime(2024, 5, 1, 18, tzinfo=UTC)
+                ),
+                closes_at=tournamentbot.isoformat_utc(
+                    datetime(2024, 5, 3, 18, tzinfo=UTC)
+                ),
+            )
+        ],
+        updated_by=1,
+        updated_at="2024-05-01T00:00:00.000Z",
+    )
+
+    changed, aligned, cleared = tournamentbot.apply_round_windows_to_bracket(
+        bracket, config, clear_missing=True
+    )
+
+    assert changed is True
+    assert aligned == 1
+    assert cleared == 1
+    assert bracket.rounds[0].window_opens_at == config.rounds[0].opens_at
+    assert bracket.rounds[1].window_opens_at is None
+    assert bracket.rounds[1].window_closes_at is None
 
 
 def test_ensure_guild_validates_presence():

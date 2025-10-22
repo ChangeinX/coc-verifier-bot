@@ -62,6 +62,86 @@ class TournamentSeries:
 
 
 @dataclass(slots=True)
+class RoundWindowDefinition:
+    position: int
+    opens_at: str
+    closes_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "position": self.position,
+            "opens_at": self.opens_at,
+            "closes_at": self.closes_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> RoundWindowDefinition:
+        position_raw = data.get("position")
+        try:
+            position = int(position_raw) if position_raw is not None else 0
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            position = 0
+        if position <= 0:
+            position = 1
+        opens_at = str(data.get("opens_at", ""))
+        closes_at = str(data.get("closes_at", ""))
+        return cls(position=position, opens_at=opens_at, closes_at=closes_at)
+
+
+@dataclass(slots=True)
+class TournamentRoundWindows:
+    guild_id: int
+    rounds: list[RoundWindowDefinition]
+    updated_by: int
+    updated_at: str
+
+    PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
+    SK_VALUE: ClassVar[str] = "ROUND_WINDOWS"
+
+    @classmethod
+    def key(cls, guild_id: int) -> dict[str, str]:
+        return {"pk": cls.PK_TEMPLATE % guild_id, "sk": cls.SK_VALUE}
+
+    def to_item(self) -> dict[str, object]:
+        self.ensure_sequential_positions()
+        item = self.key(self.guild_id)
+        item.update(
+            {
+                "rounds": [round_.to_dict() for round_ in self.rounds],
+                "updated_by": str(self.updated_by),
+                "updated_at": self.updated_at,
+            }
+        )
+        return item
+
+    @classmethod
+    def from_item(cls, item: dict[str, object]) -> TournamentRoundWindows:
+        pk_value = str(item["pk"])
+        guild_id = int(pk_value.split("#", 1)[1])
+        rounds_data = item.get("rounds", [])  # type: ignore[assignment]
+        rounds = [
+            RoundWindowDefinition.from_dict(round_item) for round_item in rounds_data
+        ]
+        rounds.sort(key=lambda round_: round_.position)
+        updated_by_raw = item.get("updated_by", 0)
+        try:
+            updated_by = int(updated_by_raw)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            updated_by = 0
+        return cls(
+            guild_id=guild_id,
+            rounds=rounds,
+            updated_by=updated_by,
+            updated_at=str(item.get("updated_at", "")),
+        )
+
+    def ensure_sequential_positions(self) -> None:
+        self.rounds.sort(key=lambda round_: round_.position)
+        for idx, round_ in enumerate(self.rounds, start=1):
+            round_.position = idx
+
+
+@dataclass(slots=True)
 class TournamentConfig:
     guild_id: int
     division_id: str
@@ -458,6 +538,8 @@ class BracketState:
 
 __all__ = [
     "TournamentSeries",
+    "TournamentRoundWindows",
+    "RoundWindowDefinition",
     "TournamentConfig",
     "TeamRegistration",
     "PlayerEntry",
