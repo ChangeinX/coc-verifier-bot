@@ -78,6 +78,21 @@ if ADMIN_ROLE_ID_RAW:
 else:
     _admin_role_id = DEFAULT_TOURNAMENT_ADMIN_ROLE_ID
 TOURNAMENT_ADMIN_ROLE_ID: Final[int] = _admin_role_id
+
+CAPTAIN_ROLE_ID_RAW: Final[str | None] = os.getenv("TOURNAMENT_CAPTAIN_ROLE_ID")
+if CAPTAIN_ROLE_ID_RAW:
+    try:
+        _captain_role_id: int | None = int(CAPTAIN_ROLE_ID_RAW)
+    except ValueError:
+        log = logging.getLogger("tournament-bot")
+        log.warning(
+            "Invalid TOURNAMENT_CAPTAIN_ROLE_ID=%s; captain role syncing disabled.",
+            CAPTAIN_ROLE_ID_RAW,
+        )
+        _captain_role_id = None
+else:
+    _captain_role_id = None
+TOURNAMENT_CAPTAIN_ROLE_ID: Final[int | None] = _captain_role_id
 GUILD_ID_RAW: Final[str | None] = os.getenv("TOURNAMENT_GUILD_ID")
 
 REQUIRED_VARS = (
@@ -126,6 +141,7 @@ TOURNAMENT_GUILD_ID: Final[int | None] = _guild_id
 # ---------- Discord Setup ----------
 intents = discord.Intents.default()
 intents.guilds = True
+intents.members = True
 
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
@@ -1875,6 +1891,168 @@ async def send_ephemeral(interaction: discord.Interaction, message: str) -> None
         await interaction.response.send_message(message, ephemeral=True)
 
 
+async def resolve_captain_role(
+    guild: discord.Guild,
+) -> tuple[discord.Role | None, str | None]:
+    if TOURNAMENT_CAPTAIN_ROLE_ID is None:
+        return None, (
+            "Captain role is not configured. Ask a tournament admin to set the "
+            "captain role ID."
+        )
+
+    role = guild.get_role(TOURNAMENT_CAPTAIN_ROLE_ID)
+    if role is not None:
+        return role, None
+
+    try:
+        roles = await guild.fetch_roles()
+    except discord.Forbidden:
+        log.warning(
+            "Forbidden when fetching roles in guild %s to resolve captain role",
+            guild.id,
+        )
+        return None, (
+            "Bot lacks permission to view roles. Grant **Manage Roles** so the "
+            "bot can manage captain roles."
+        )
+    except discord.HTTPException as exc:
+        log.warning("HTTPException fetching roles in guild %s: %s", guild.id, exc)
+        return None, "Discord API error prevented resolving the captain role."
+
+    for role in roles:
+        if role.id == TOURNAMENT_CAPTAIN_ROLE_ID:
+            return role, None
+
+    return None, (
+        f"Captain role ID {TOURNAMENT_CAPTAIN_ROLE_ID} was not found in this "
+        "guild. Update the configured value."
+    )
+
+
+async def fetch_guild_member(
+    guild: discord.Guild, user_id: int
+) -> discord.Member | None:
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+
+    try:
+        return await guild.fetch_member(user_id)
+    except discord.NotFound:
+        log.warning("Member %s not found in guild %s", user_id, guild.id)
+    except discord.Forbidden:
+        log.warning(
+            "Forbidden fetching member %s in guild %s for captain role sync",
+            user_id,
+            guild.id,
+        )
+    except discord.HTTPException as exc:
+        log.warning(
+            "HTTPException fetching member %s in guild %s: %s",
+            user_id,
+            guild.id,
+            exc,
+        )
+    return None
+
+
+def categorize_captains_for_division(
+    bracket: BracketState | None, registrations: Sequence[TeamRegistration]
+) -> tuple[set[int], set[int]]:
+    active: set[int] = {registration.user_id for registration in registrations}
+    eliminated: set[int] = set()
+
+    if bracket is None:
+        return active, eliminated
+
+    registration_ids = {registration.user_id for registration in registrations}
+    for match in bracket.all_matches():
+        winner_index = match.winner_index
+        if winner_index is None:
+            continue
+        for idx, slot in enumerate((match.competitor_one, match.competitor_two)):
+            team_id = slot.team_id
+            if team_id is None or team_id not in registration_ids:
+                continue
+            if winner_index != idx:
+                eliminated.add(team_id)
+
+    active -= eliminated
+    return active, eliminated
+
+
+def gather_captain_role_targets(
+    guild_id: int,
+) -> tuple[set[int], set[int]]:
+    active_ids: set[int] = set()
+    eliminated_ids: set[int] = set()
+
+    for config in storage.list_division_configs(guild_id):
+        registrations = storage.list_registrations(guild_id, config.division_id)
+        if not registrations:
+            continue
+
+        bracket = storage.get_bracket(guild_id, config.division_id)
+        if bracket is not None and apply_team_names(bracket, registrations):
+            storage.save_bracket(bracket)
+
+        active, eliminated = categorize_captains_for_division(bracket, registrations)
+        active_ids.update(active)
+        eliminated_ids.update(eliminated)
+
+    return active_ids, eliminated_ids
+
+
+async def add_captain_role(
+    member: discord.Member, role: discord.Role, *, reason: str
+) -> str | None:
+    if role in getattr(member, "roles", []):
+        return None
+    try:
+        await member.add_roles(role, reason=reason)
+    except discord.Forbidden:
+        log.warning(
+            "Forbidden when adding captain role to %s (guild %s)",
+            member,
+            member.guild.id,
+        )
+        return "Bot lacks permission to assign the captain role."
+    except discord.HTTPException as exc:
+        log.warning(
+            "HTTPException adding captain role to %s in guild %s: %s",
+            member,
+            member.guild.id,
+            exc,
+        )
+        return "Discord API error prevented assigning the captain role."
+    return None
+
+
+async def remove_captain_role(
+    member: discord.Member, role: discord.Role, *, reason: str
+) -> str | None:
+    if role not in getattr(member, "roles", []):
+        return None
+    try:
+        await member.remove_roles(role, reason=reason)
+    except discord.Forbidden:
+        log.warning(
+            "Forbidden when removing captain role from %s (guild %s)",
+            member,
+            member.guild.id,
+        )
+        return "Bot lacks permission to remove the captain role."
+    except discord.HTTPException as exc:
+        log.warning(
+            "HTTPException removing captain role from %s in guild %s: %s",
+            member,
+            member.guild.id,
+            exc,
+        )
+        return "Discord API error prevented removing the captain role."
+    return None
+
+
 # ---------- Slash Commands ----------
 @require_admin_or_tournament_role()
 @tournament_command(name="setup", description="Configure tournament registration rules")
@@ -2087,6 +2265,19 @@ async def register_player_command(  # pragma: no cover - Discord slash command w
     )
     storage.save_registration(registration)
 
+    role_note: str | None = None
+    role, role_error = await resolve_captain_role(guild)
+    if role is None:
+        role_note = role_error
+    else:
+        assignment_error = await add_captain_role(
+            interaction.user,
+            role,
+            reason="Registered for tournament",
+        )
+        if assignment_error is not None:
+            role_note = assignment_error
+
     embed = build_registration_embed(
         registration,
         config=config,
@@ -2105,6 +2296,9 @@ async def register_player_command(  # pragma: no cover - Discord slash command w
             "Team registered! Announcement posted in "
             f"<#{TOURNAMENT_REGISTRATION_CHANNEL_ID}>."
         )
+
+    if role_note is not None:
+        confirmation = f"{confirmation}\n{role_note}"
 
     await interaction.followup.send(confirmation, ephemeral=True)
 
@@ -3047,6 +3241,44 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
     storage.save_bracket(bracket)
     winner_slot_obj = match_obj.winner_slot()
     selected_registration = registration_lookup.get(selected_slot.team_id)
+
+    role_notes: list[str] = []
+    role, role_error = await resolve_captain_role(guild)
+    if role is None:
+        if role_error is not None:
+            role_notes.append(role_error)
+    else:
+        add_error = await add_captain_role(
+            winner_captain,
+            role,
+            reason="Advanced in tournament bracket",
+        )
+        if add_error is not None:
+            role_notes.append(add_error)
+
+        loser_member: discord.Member | None = None
+        loser_id: int | None = None
+        if opponent_registration_pre is not None:
+            loser_id = opponent_registration_pre.user_id
+        elif opponent_slot_pre.team_id is not None:
+            loser_id = opponent_slot_pre.team_id
+
+        if loser_id is not None and loser_id != winner_captain.id:
+            loser_member = await fetch_guild_member(guild, loser_id)
+
+        if loser_member is not None:
+            remove_error = await remove_captain_role(
+                loser_member,
+                role,
+                reason="Eliminated from tournament bracket",
+            )
+            if remove_error is not None:
+                role_notes.append(remove_error)
+        elif loser_id is not None and loser_id != winner_captain.id:
+            role_notes.append(
+                f"Unable to locate <@{loser_id}> to update their captain role."
+            )
+
     if winner_slot_obj is not None:
         captain_text = (
             f"<@{selected_registration.user_id}> ({selected_registration.user_name})"
@@ -3066,6 +3298,9 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
     champion = bracket_champion_name(bracket)
     if champion:
         ack_message += f" Current champion: {champion}."
+
+    if role_notes:
+        ack_message += "\n" + "\n".join(role_notes)
 
     await send_ephemeral(interaction, ack_message)
 
@@ -3162,6 +3397,117 @@ async def select_round_winner_error_handler(  # pragma: no cover - Discord wirin
         interaction,
         "An unexpected error occurred while recording the winner.",
     )
+
+
+@tournament_command(
+    name="setcaptains",
+    description="Sync the captain role with active tournament registrations",
+)
+@require_admin_or_tournament_role()
+async def set_captains_command(  # pragma: no cover - Discord wiring
+    interaction: discord.Interaction,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    role, role_error = await resolve_captain_role(guild)
+    if role is None:
+        await interaction.followup.send(
+            role_error or "Captain role not configured.", ephemeral=True
+        )
+        return
+
+    active_ids, eliminated_ids = gather_captain_role_targets(guild.id)
+
+    try:
+        await guild.chunk()
+    except discord.HTTPException as exc:
+        log.warning("Failed to chunk guild %s before syncing roles: %s", guild.id, exc)
+
+    current_members = list(role.members)
+    current_ids = {member.id for member in current_members}
+    members_by_id: dict[int, discord.Member] = {
+        member.id: member for member in current_members
+    }
+
+    to_remove_ids = current_ids - active_ids
+
+    added = 0
+    removed = 0
+    missing_add: list[int] = []
+    missing_remove: list[int] = []
+    assign_errors = 0
+    remove_errors = 0
+
+    for user_id in sorted(active_ids):
+        if user_id in current_ids:
+            continue
+        member = members_by_id.get(user_id) or await fetch_guild_member(guild, user_id)
+        if member is None:
+            missing_add.append(user_id)
+            continue
+        error = await add_captain_role(
+            member,
+            role,
+            reason="Synced via /setcaptains",
+        )
+        if error is None:
+            added += 1
+            members_by_id[user_id] = member
+        else:
+            assign_errors += 1
+
+    for user_id in sorted(to_remove_ids):
+        member = members_by_id.get(user_id) or await fetch_guild_member(guild, user_id)
+        if member is None:
+            missing_remove.append(user_id)
+            continue
+        error = await remove_captain_role(
+            member,
+            role,
+            reason="Synced via /setcaptains",
+        )
+        if error is None:
+            removed += 1
+        else:
+            remove_errors += 1
+
+    summary_lines = [
+        f"Captain role synced. Active captains: {len(active_ids)}",
+        f"Eliminated captains detected: {len(eliminated_ids)}",
+        f"Added role to {added} member(s).",
+        f"Removed role from {removed} member(s).",
+    ]
+
+    if missing_add:
+        summary_lines.append(
+            f"Unable to locate {len(missing_add)} member(s) to assign the role."
+        )
+    if missing_remove:
+        summary_lines.append(
+            f"Unable to locate {len(missing_remove)} member(s) to remove the role."
+        )
+    if assign_errors:
+        summary_lines.append(
+            f"Encountered {assign_errors} error(s) assigning the role; check logs."
+        )
+    if remove_errors:
+        summary_lines.append(
+            f"Encountered {remove_errors} error(s) removing the role; check logs."
+        )
+
+    await interaction.followup.send("\n".join(summary_lines), ephemeral=True)
 
 
 @tournament_command(

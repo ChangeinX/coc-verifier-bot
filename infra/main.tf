@@ -74,6 +74,11 @@ variable "tournament_admin_role_id" {
   description = "Tournament admin role ID allowed to run admin commands"
   type        = string
 }
+variable "tournament_captain_role_id" {
+  description = "Role ID applied to active tournament captains"
+  type        = string
+  default     = ""
+}
 variable "vpc_id" {}
 
 data "aws_ecs_task_definition" "bot_latest" {
@@ -406,6 +411,7 @@ resource "aws_ecs_task_definition" "tournament_bot" {
         },
         { name = "TOURNAMENT_GUILD_ID", value = var.tournament_guild_id },
         { name = "TOURNAMENT_ADMIN_ROLE_ID", value = var.tournament_admin_role_id },
+        { name = "TOURNAMENT_CAPTAIN_ROLE_ID", value = var.tournament_captain_role_id },
         { name = "AWS_REGION", value = var.aws_region }
       ]
       logConfiguration = {

@@ -53,6 +53,8 @@ Configure the environment separately for each bot. All bots require AWS credenti
 - `DISCORD_TOKEN` - tournament bot token.
 - `COC_EMAIL` / `COC_PASSWORD` - Clash of Clans credentials for validating player tags.
 - `TOURNAMENT_TABLE_NAME` - DynamoDB table for tournament configuration and registrations.
+- `TOURNAMENT_ADMIN_ROLE_ID` - Discord role allowed to run tournament admin commands.
+- `TOURNAMENT_CAPTAIN_ROLE_ID` - Discord role applied to active team captains.
 - `AWS_REGION` (optional, defaults to `us-east-1`).
 
 ## 5. Running locally
@@ -81,6 +83,7 @@ To run inside Docker, build the appropriate image (`Dockerfile`, `Dockerfile.giv
 - `/create-bracket division:<id>` (admin/tournament-admin only) – seed the bracket for the division.
 - `/showbracket division:<id>` – display the current bracket state.
 - `/select-round-winner division:<id> winner_captain:<user>` (admin/tournament-admin only) – advance a team within the division bracket.
+- `/setcaptains` (admin/tournament-admin only) – sync the configured captain role with active tournament captains.
 - `/simulate-tourney division:<id>` (admin/tournament-admin only) – run an automated bracket simulation for the division; falls back to seeded data when no live registrations exist.
 
 Note: Commands marked "admin/tournament-admin" require either the Discord Administrator permission or that the user holds the configured `TOURNAMENT_ADMIN_ROLE_ID`.
