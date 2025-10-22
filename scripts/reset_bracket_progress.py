@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import pathlib
+import re
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -51,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         action="append",
         dest="guild_ids",
-        help="Guild id to process (repeat for multiple). Required unless --input-file is used",
+        help="Guild id to process (repeat for multiple). Defaults to tfvars values",
     )
     parser.add_argument(
         "--division",
@@ -83,12 +84,63 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
 
-    if not args.input_file and not args.table:
-        parser.error("--table is required unless --input-file is provided")
-    if not args.input_file and not args.guild_ids:
-        parser.error("At least one --guild value is required when using DynamoDB")
-
     return args
+
+
+def load_tfvars_defaults() -> dict[str, Any]:
+    """Return defaults gathered from infra/*.tfvars."""
+
+    def _clean_value(raw: str) -> str:
+        value = raw.strip().rstrip(",")
+        if value.startswith("[") and value.endswith("]"):
+            return value
+        if value.startswith('"') and value.endswith('"'):
+            return value[1:-1]
+        if value.lower() == "null":
+            return ""
+        return value
+
+    def _parse_file(path: pathlib.Path) -> dict[str, str]:
+        results: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            value = _clean_value(value)
+            if value.startswith("[") and value.endswith("]"):
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:  # pragma: no cover - defensive
+                    continue
+                if parsed:
+                    results[key] = parsed[0]
+                continue
+            results[key] = value
+        return results
+
+    defaults: dict[str, Any] = {
+        "region": None,
+        "table": None,
+        "guild_ids": [],
+    }
+    pattern = ROOT_DIR.glob("infra/*.tfvars")
+    for tfvars in sorted(pattern):
+        data = _parse_file(tfvars)
+        if not defaults["region"] and data.get("aws_region"):
+            defaults["region"] = data["aws_region"]
+        if not defaults["table"] and data.get("tournament_table_name"):
+            defaults["table"] = data["tournament_table_name"]
+        guild_value = data.get("tournament_guild_id")
+        if guild_value:
+            try:
+                guild_id = int(re.sub(r"[^0-9]", "", guild_value))
+            except ValueError:  # pragma: no cover - defensive
+                continue
+            if guild_id and guild_id not in defaults["guild_ids"]:
+                defaults["guild_ids"].append(guild_id)
+    return defaults
 
 
 def should_include_division(division_id: str, selected: Sequence[str] | None) -> bool:
@@ -172,6 +224,16 @@ def main() -> None:
     dry_run = not args.execute
     divisions = args.divisions or None
 
+    defaults = load_tfvars_defaults()
+    table_name = args.table or defaults.get("table")
+    guild_ids = args.guild_ids or defaults.get("guild_ids") or []
+    region = args.region or defaults.get("region")
+
+    if args.input_file is None and not table_name:
+        raise SystemExit("No DynamoDB table specified and none found in infra/*.tfvars")
+    if args.input_file is None and not guild_ids:
+        raise SystemExit("No guild ids provided and none found in infra/*.tfvars")
+
     overall_resets = 0
 
     if args.input_file:
@@ -204,13 +266,13 @@ def main() -> None:
     session_kwargs: dict[str, Any] = {}
     if args.profile:
         session_kwargs["profile_name"] = args.profile
-    if args.region:
-        session_kwargs["region_name"] = args.region
+    if region:
+        session_kwargs["region_name"] = region
     session = boto3.Session(**session_kwargs)
-    table = session.resource("dynamodb").Table(args.table)
+    table = session.resource("dynamodb").Table(table_name)
 
     try:
-        for guild_id in args.guild_ids:
+        for guild_id in guild_ids:
             for item in iter_dynamo_brackets(table, guild_id, divisions):
                 bracket = BracketState.from_item(item)
                 summaries = reset_bracket(bracket)
