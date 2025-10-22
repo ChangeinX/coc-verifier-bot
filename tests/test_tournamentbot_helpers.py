@@ -1,9 +1,11 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
 import tournamentbot
 from tournament_bot import (
+    BracketRound,
     PlayerEntry,
     TeamRegistration,
     TournamentConfig,
@@ -42,6 +44,44 @@ def test_build_setup_overview_embed_lists_divisions():
     )
     assert "Team size: 5" in division_field.value
     assert "Allowed TH: 15, 16" in division_field.value
+
+
+def test_parse_round_window_spec_supports_multiple_rounds():
+    rounds = [
+        BracketRound(name="Quarterfinals", matches=[]),
+        BracketRound(name="Semifinals", matches=[]),
+    ]
+    spec = (
+        "R1=2024-05-01T18:00..2024-05-02T18:00; "
+        "Semifinals=2024-05-03T18:00..2024-05-04T18:00"
+    )
+
+    updates = tournamentbot.parse_round_window_spec(spec, rounds)
+
+    assert set(updates.keys()) == {0, 1}
+    first_open, first_close = updates[0]
+    assert first_open == tournamentbot.isoformat_utc(
+        datetime(2024, 5, 1, 18, tzinfo=UTC)
+    )
+    assert first_close == tournamentbot.isoformat_utc(
+        datetime(2024, 5, 2, 18, tzinfo=UTC)
+    )
+
+    second_open, second_close = updates[1]
+    assert second_open == tournamentbot.isoformat_utc(
+        datetime(2024, 5, 3, 18, tzinfo=UTC)
+    )
+    assert second_close == tournamentbot.isoformat_utc(
+        datetime(2024, 5, 4, 18, tzinfo=UTC)
+    )
+
+
+def test_parse_round_window_spec_rejects_unknown_round():
+    rounds = [BracketRound(name="Final", matches=[])]
+    spec = "Quarterfinals=2024-05-01T18:00..2024-05-02T18:00"
+
+    with pytest.raises(tournamentbot.InvalidValueError):
+        tournamentbot.parse_round_window_spec(spec, rounds)
 
 
 def test_ensure_guild_validates_presence():

@@ -360,18 +360,38 @@ class BracketMatch:
 class BracketRound:
     name: str
     matches: list[BracketMatch]
+    window_opens_at: str | None = None
+    window_closes_at: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "name": self.name,
             "matches": [match.to_dict() for match in self.matches],
         }
+        if self.window_opens_at is not None:
+            data["window_opens_at"] = self.window_opens_at
+        if self.window_closes_at is not None:
+            data["window_closes_at"] = self.window_closes_at
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> BracketRound:
         matches_data: Iterable[dict[str, object]] = data.get("matches", [])  # type: ignore[assignment]
         matches = [BracketMatch.from_dict(item) for item in matches_data]
-        return cls(name=str(data.get("name", "")), matches=matches)
+        return cls(
+            name=str(data.get("name", "")),
+            matches=matches,
+            window_opens_at=(
+                str(data.get("window_opens_at"))
+                if data.get("window_opens_at") is not None
+                else None
+            ),
+            window_closes_at=(
+                str(data.get("window_closes_at"))
+                if data.get("window_closes_at") is not None
+                else None
+            ),
+        )
 
 
 @dataclass(slots=True)

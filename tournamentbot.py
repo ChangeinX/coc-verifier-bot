@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, Literal
@@ -20,6 +21,7 @@ from discord.app_commands import errors as app_errors
 
 from tournament_bot import (
     BracketMatch,
+    BracketRound,
     BracketSlot,
     BracketState,
     InvalidTownHallError,
@@ -46,6 +48,7 @@ from tournament_bot.bracket import (
     simulate_tournament,
     team_captain_lines,
 )
+from tournament_bot.models import ISO_FORMAT
 from tournament_bot.simulator import build_seeded_registrations
 from verifier_bot import coc_api
 
@@ -197,6 +200,13 @@ async def ensure_coc_client() -> coc.Client:
     return coc_client
 
 
+ROUND_WINDOW_ENTRY_SPLIT = re.compile(r"[;\n]+")
+
+
+def _normalize_round_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.strip().lower())
+
+
 async def build_seeded_registrations_for_guild(
     guild_id: int, division_id: str
 ) -> list[TeamRegistration]:
@@ -218,6 +228,93 @@ async def build_seeded_registrations_for_guild(
 
 def format_display(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%b %d, %Y %H:%M UTC")
+
+
+def parse_round_window_timestamp(raw: str) -> datetime:
+    return datetime.strptime(raw, ISO_FORMAT).replace(tzinfo=UTC)
+
+
+def parse_round_window_spec(
+    raw_spec: str, rounds: Sequence[BracketRound]
+) -> dict[int, tuple[str, str]]:
+    if not rounds:
+        raise InvalidValueError("This bracket does not have any rounds to configure.")
+
+    spec = raw_spec.strip()
+    if not spec:
+        raise InvalidValueError(
+            "Provide round windows using the format R1=2024-05-01T18:00..2024-05-05T18:00"
+        )
+
+    alias_map: dict[str, int] = {}
+    for idx, round_obj in enumerate(rounds):
+        aliases = {
+            f"r{idx + 1}",
+            f"round{idx + 1}",
+            str(idx + 1),
+            round_obj.name,
+            round_obj.name.rstrip("s"),
+        }
+        cleaned_aliases = {
+            _normalize_round_identifier(alias)
+            for alias in aliases
+            if alias and _normalize_round_identifier(alias)
+        }
+        for alias in cleaned_aliases:
+            alias_map.setdefault(alias, idx)
+
+    updates: dict[int, tuple[str, str]] = {}
+    entries = [
+        part.strip() for part in ROUND_WINDOW_ENTRY_SPLIT.split(spec) if part.strip()
+    ]
+
+    if not entries:
+        raise InvalidValueError(
+            "Provide round windows using the format R1=2024-05-01T18:00..2024-05-05T18:00"
+        )
+
+    for entry in entries:
+        if "=" not in entry:
+            raise InvalidValueError(
+                "Each round window entry must include '=' between the round and window."
+            )
+        round_key_raw, window_values_raw = entry.split("=", 1)
+        round_key = _normalize_round_identifier(round_key_raw)
+        if not round_key:
+            raise InvalidValueError("Round identifier cannot be empty.")
+        if round_key not in alias_map:
+            valid_examples = ", ".join(
+                f"R{idx + 1}" for idx in range(min(4, len(rounds)))
+            )
+            raise InvalidValueError(
+                f"Unknown round identifier '{round_key_raw.strip()}'. Try one of: {valid_examples}"
+            )
+        round_index = alias_map[round_key]
+        if round_index in updates:
+            raise InvalidValueError(
+                f"Round '{rounds[round_index].name}' is specified more than once."
+            )
+
+        if ".." not in window_values_raw:
+            raise InvalidValueError(
+                "Use '..' between the start and end of each window (e.g. 2024-05-01T18:00..2024-05-05T18:00)."
+            )
+        start_raw, end_raw = (part.strip() for part in window_values_raw.split("..", 1))
+        if not start_raw or not end_raw:
+            raise InvalidValueError(
+                "Both start and end times are required for each round window."
+            )
+
+        opens_at = parse_registration_datetime(start_raw)
+        closes_at = parse_registration_datetime(end_raw)
+        opens_at_utc, closes_at_utc = validate_registration_window(opens_at, closes_at)
+
+        updates[round_index] = (
+            isoformat_utc(opens_at_utc),
+            isoformat_utc(closes_at_utc),
+        )
+
+    return updates
 
 
 def build_setup_overview_embed(
@@ -2035,6 +2132,105 @@ async def create_bracket_error_handler(  # pragma: no cover - Discord slash comm
 
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
+    windows="Round windows e.g. R1=2024-05-01T18:00..2024-05-05T18:00; R2=...",
+)
+@tournament_command(
+    name="setwindows",
+    description="Configure match windows for each round of a bracket",
+)
+@require_admin_or_tournament_role()
+async def set_round_windows_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    division: str,
+    windows: str,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    bracket = storage.get_bracket(guild.id, division_id)
+    if bracket is None:
+        await send_ephemeral(
+            interaction,
+            "No bracket found for that division. Run /create-bracket before setting windows.",
+        )
+        return
+
+    try:
+        updates = parse_round_window_spec(windows, bracket.rounds)
+    except InvalidValueError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    for index, (opens_at, closes_at) in updates.items():
+        bracket.rounds[index].window_opens_at = opens_at
+        bracket.rounds[index].window_closes_at = closes_at
+
+    storage.save_bracket(bracket)
+
+    ack_lines = [f"Configured {len(updates)} round window(s)."]
+    for index in sorted(updates.keys()):
+        round_obj = bracket.rounds[index]
+        opens_at_raw = round_obj.window_opens_at
+        closes_at_raw = round_obj.window_closes_at
+        if opens_at_raw is None or closes_at_raw is None:
+            continue
+        opens_at = parse_round_window_timestamp(opens_at_raw)
+        closes_at = parse_round_window_timestamp(closes_at_raw)
+        ack_lines.append(
+            f"- {round_obj.name}: {format_display(opens_at)} — {format_display(closes_at)}"
+        )
+
+    remaining = [
+        round_obj.name
+        for round_obj in bracket.rounds
+        if not round_obj.window_opens_at or not round_obj.window_closes_at
+    ]
+    if remaining:
+        pending_list = ", ".join(remaining)
+        ack_lines.append(
+            "Pending: configure windows for "
+            + (pending_list if len(remaining) <= 4 else f"{len(remaining)} round(s)")
+        )
+
+    await send_ephemeral(interaction, "\n".join(ack_lines))
+
+
+@set_round_windows_command.error
+async def set_round_windows_error_handler(  # pragma: no cover - Discord wiring
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+) -> None:
+    if isinstance(error, app_errors.MissingPermissions) or isinstance(
+        error, app_errors.CheckFailure
+    ):
+        await send_ephemeral(
+            interaction,
+            "You need administrator or tournament-admin role to run this command.",
+        )
+        return
+    log.exception("Unhandled setwindows error: %s", error)
+    await send_ephemeral(
+        interaction,
+        "An unexpected error occurred while updating round windows.",
+    )
+
+
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
 )
 @tournament_command(
     name="showbracket", description="Display the current tournament bracket"
@@ -2372,6 +2568,50 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
     opponent_registration_pre = registration_lookup.get(opponent_slot_pre.team_id)
     match_identifier = match_obj.match_id
     previous_winner = match_obj.winner_index
+
+    try:
+        round_obj = bracket.rounds[match_obj.round_index]
+    except IndexError:  # pragma: no cover - defensive
+        await send_ephemeral(
+            interaction,
+            "Unable to determine the round for this match. Please refresh the bracket and try again.",
+        )
+        return
+
+    opens_raw = round_obj.window_opens_at
+    closes_raw = round_obj.window_closes_at
+    if opens_raw is None or closes_raw is None:
+        await send_ephemeral(
+            interaction,
+            (
+                f"Round '{round_obj.name}' does not have a match window configured. "
+                "Ask an admin to run /setwindows before recording winners."
+            ),
+        )
+        return
+
+    opens_at = parse_round_window_timestamp(opens_raw)
+    closes_at = parse_round_window_timestamp(closes_raw)
+    now = datetime.now(UTC)
+    if now < opens_at:
+        await send_ephemeral(
+            interaction,
+            (
+                f"Match window for {round_obj.name} opens {format_display(opens_at)}. "
+                "You cannot record this winner yet."
+            ),
+        )
+        return
+    if now > closes_at:
+        await send_ephemeral(
+            interaction,
+            (
+                f"Match window for {round_obj.name} closed {format_display(closes_at)}. "
+                "Extend it with /setwindows before recording a winner."
+            ),
+        )
+        return
+
     try:
         set_match_winner(bracket, match_identifier, selected_index + 1)
     except ValueError as exc:
@@ -2943,6 +3183,13 @@ async def _show_registered_division_autocomplete(
 
 @create_bracket_command.autocomplete("division")
 async def _create_bracket_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@set_round_windows_command.autocomplete("division")
+async def _set_round_windows_division_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     return await division_autocomplete(interaction, current)

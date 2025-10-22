@@ -7,6 +7,10 @@ import pytest
 
 import tournamentbot
 from tournament_bot import (
+    BracketMatch,
+    BracketRound,
+    BracketSlot,
+    BracketState,
     PlayerEntry,
     TeamRegistration,
     TournamentConfig,
@@ -71,6 +75,7 @@ class InMemoryStorage:
         self._series = series
         self._configs = configs
         self._registrations: dict[tuple[str, int], TeamRegistration] = {}
+        self._brackets: dict[tuple[int, str], BracketState] = {}
 
     def ensure_table(self) -> None:  # pragma: no cover - simple stub
         return None
@@ -110,6 +115,8 @@ class InMemoryStorage:
     def list_registrations(
         self, guild_id: int, division_id: str
     ) -> list[TeamRegistration]:
+        if guild_id != self._series.guild_id:
+            return []
         return sorted(
             [
                 reg
@@ -118,6 +125,13 @@ class InMemoryStorage:
             ],
             key=lambda reg: (reg.registered_at, reg.user_id),
         )
+
+    def save_bracket(self, bracket: BracketState) -> None:
+        key = (bracket.guild_id, bracket.division_id)
+        self._brackets[key] = bracket
+
+    def get_bracket(self, guild_id: int, division_id: str) -> BracketState | None:
+        return self._brackets.get((guild_id, division_id))
 
 
 def make_series(now: datetime) -> TournamentSeries:
@@ -289,3 +303,206 @@ async def test_register_sub_updates_existing_registration(monkeypatch):
     assert messages
     assert messages[-1]["content"] == "Substitute registered!"
     assert messages[-1]["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_round_windows_command_updates_bracket(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=5, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+
+    bracket = BracketState(
+        guild_id=1,
+        division_id="th15",
+        created_at=tournamentbot.isoformat_utc(now),
+        rounds=[
+            BracketRound(name="Quarterfinals", matches=[]),
+            BracketRound(name="Semifinals", matches=[]),
+        ],
+    )
+    storage.save_bracket(bracket)
+
+    guild = SimpleNamespace(id=1)
+    admin_role = SimpleNamespace(id=tournamentbot.TOURNAMENT_ADMIN_ROLE_ID)
+    admin = FakeUser(99, roles=[admin_role])
+    interaction = FakeInteraction(user=admin, guild=guild)
+
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    qf_start = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
+    qf_end = (now + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M")
+    sf_start = (now + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M")
+    sf_end = (now + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M")
+
+    windows_spec = f"R1={qf_start}..{qf_end}; R2={sf_start}..{sf_end}"
+
+    await tournamentbot.set_round_windows_command.callback(
+        interaction,
+        "th15",
+        windows_spec,
+    )
+
+    saved = storage.get_bracket(guild.id, "th15")
+    assert saved is not None
+    for round_obj in saved.rounds[:2]:
+        assert round_obj.window_opens_at is not None
+        assert round_obj.window_closes_at is not None
+
+    messages = interaction.response.messages
+    assert messages
+    assert messages[0][1] is True  # ephemeral
+    assert "Configured 2 round window" in messages[0][0]
+
+
+def _make_bracket_with_match(now: datetime) -> BracketState:
+    return BracketState(
+        guild_id=1,
+        division_id="th15",
+        created_at=tournamentbot.isoformat_utc(now),
+        rounds=[
+            BracketRound(
+                name="Semifinals",
+                matches=[
+                    BracketMatch(
+                        match_id="R1M1",
+                        round_index=0,
+                        competitor_one=BracketSlot(
+                            seed=1,
+                            team_id=101,
+                            team_label="Alpha",
+                        ),
+                        competitor_two=BracketSlot(
+                            seed=2,
+                            team_id=102,
+                            team_label="Bravo",
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def _register_team(
+    storage: InMemoryStorage, user_id: int, team_name: str, now: datetime
+) -> None:
+    storage.save_registration(
+        TeamRegistration(
+            guild_id=1,
+            division_id="th15",
+            user_id=user_id,
+            user_name=f"Captain{user_id}",
+            players=make_players(5),
+            registered_at=now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            team_name=team_name,
+        )
+    )
+
+
+def _make_admin() -> FakeUser:
+    admin_role = SimpleNamespace(id=tournamentbot.TOURNAMENT_ADMIN_ROLE_ID)
+    return FakeUser(9001, roles=[admin_role])
+
+
+@pytest.mark.asyncio
+async def test_select_round_winner_requires_window(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=5, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+    storage.save_bracket(_make_bracket_with_match(now))
+    _register_team(storage, 101, "Alpha", now)
+    _register_team(storage, 102, "Bravo", now)
+
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    guild = SimpleNamespace(id=1)
+    interaction = FakeInteraction(user=_make_admin(), guild=guild)
+
+    winner = SimpleNamespace(id=101, mention="<@101>")
+
+    await tournamentbot.select_round_winner_command.callback(
+        interaction,
+        "th15",
+        winner,
+    )
+
+    messages = interaction.response.messages
+    assert messages
+    assert "does not have a match window configured" in messages[0][0]
+
+
+@pytest.mark.asyncio
+async def test_select_round_winner_respects_window_open(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=5, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+    bracket = _make_bracket_with_match(now)
+    bracket.rounds[0].window_opens_at = tournamentbot.isoformat_utc(
+        now + timedelta(hours=2)
+    )
+    bracket.rounds[0].window_closes_at = tournamentbot.isoformat_utc(
+        now + timedelta(hours=3)
+    )
+    storage.save_bracket(bracket)
+    _register_team(storage, 101, "Alpha", now)
+    _register_team(storage, 102, "Bravo", now)
+
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    guild = SimpleNamespace(id=1)
+    interaction = FakeInteraction(user=_make_admin(), guild=guild)
+    winner = SimpleNamespace(id=101, mention="<@101>")
+
+    await tournamentbot.select_round_winner_command.callback(
+        interaction,
+        "th15",
+        winner,
+    )
+
+    messages = interaction.response.messages
+    assert messages
+    assert "opens" in messages[0][0]
+    saved = storage.get_bracket(guild.id, "th15")
+    assert saved is not None
+    assert saved.rounds[0].matches[0].winner_index is None
+
+
+@pytest.mark.asyncio
+async def test_select_round_winner_within_window_records_winner(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=5, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+    bracket = _make_bracket_with_match(now)
+    bracket.rounds[0].window_opens_at = tournamentbot.isoformat_utc(
+        now - timedelta(hours=1)
+    )
+    bracket.rounds[0].window_closes_at = tournamentbot.isoformat_utc(
+        now + timedelta(hours=1)
+    )
+    storage.save_bracket(bracket)
+    _register_team(storage, 101, "Alpha", now)
+    _register_team(storage, 102, "Bravo", now)
+
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    guild = SimpleNamespace(id=1)
+    interaction = FakeInteraction(user=_make_admin(), guild=guild)
+    winner = SimpleNamespace(id=101, mention="<@101>")
+
+    await tournamentbot.select_round_winner_command.callback(
+        interaction,
+        "th15",
+        winner,
+    )
+
+    saved = storage.get_bracket(guild.id, "th15")
+    assert saved is not None
+    assert saved.rounds[0].matches[0].winner_index == 0
+
+    messages = interaction.response.messages
+    assert messages
+    assert "Recorded" in messages[0][0]

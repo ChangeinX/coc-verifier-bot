@@ -226,10 +226,13 @@ Temporary Items
 
 # AWS / Terraform
 infra/.terraform/
+infra/scripts/
 infra/*.tfvars
 infra/terraform.tfstate*
 infra/.terraform.lock.hcl
 
 # Claude Code
 .claude/
-scripts/
+scripts/*
+!scripts/migrate_tournament_table.py
+!scripts/reset_bracket_progress.py
