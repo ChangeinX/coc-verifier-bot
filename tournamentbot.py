@@ -1929,6 +1929,97 @@ async def resolve_captain_role(
     )
 
 
+def division_role_name(config: TournamentConfig) -> str:
+    base = config.division_name.strip() if config.division_name else ""
+    if not base:
+        base = config.division_id.upper()
+    return f"{base} Division"
+
+
+async def ensure_division_role(
+    guild: discord.Guild, config: TournamentConfig
+) -> tuple[discord.Role | None, str | None]:
+    desired_name = division_role_name(config)
+    stored_role_id = getattr(config, "division_role_id", None)
+
+    def update_config(role: discord.Role) -> None:
+        if getattr(config, "division_role_id", None) == role.id:
+            return
+        config.division_role_id = role.id
+        try:
+            storage.save_config(config)
+        except RuntimeError:  # pragma: no cover - storage unavailable
+            log.debug(
+                "Storage unavailable while persisting division role id for %s",
+                desired_name,
+            )
+
+    if stored_role_id is not None:
+        role = guild.get_role(stored_role_id)
+        if role is not None:
+            return role, None
+
+    try:
+        roles = await guild.fetch_roles()
+    except discord.Forbidden:
+        log.warning(
+            "Forbidden when fetching roles in guild %s to resolve division role",
+            guild.id,
+        )
+        return None, (
+            "Bot lacks permission to view roles. Grant **Manage Roles** so the "
+            "bot can manage division roles."
+        )
+    except discord.HTTPException as exc:
+        log.warning("HTTPException fetching roles in guild %s: %s", guild.id, exc)
+        return None, "Discord API error prevented resolving the division role."
+
+    for role in roles:
+        if stored_role_id is not None and role.id == stored_role_id:
+            update_config(role)
+            return role, None
+
+    lower_name = desired_name.lower()
+    for role in roles:
+        if role.name.lower() == lower_name:
+            update_config(role)
+            return role, None
+
+    try:
+        new_role = await guild.create_role(
+            name=desired_name,
+            mentionable=True,
+            reason=f"Ensure division role for {desired_name}",
+        )
+    except discord.Forbidden:
+        log.warning(
+            "Forbidden when creating division role '%s' in guild %s",
+            desired_name,
+            guild.id,
+        )
+        return None, (
+            "Bot lacks permission to create division roles. Grant **Manage Roles** "
+            "so the bot can create them."
+        )
+    except discord.HTTPException as exc:
+        log.warning(
+            "HTTPException creating division role '%s' in guild %s: %s",
+            desired_name,
+            guild.id,
+            exc,
+        )
+        return None, "Discord API error prevented creating the division role."
+
+    update_config(new_role)
+    log.info(
+        "Created division role '%s' (id=%s) for guild %s",
+        new_role.name,
+        new_role.id,
+        guild.id,
+    )
+    return new_role, None
+
+
 async def fetch_guild_member(
     guild: discord.Guild, user_id: int
 ) -> discord.Member | None:
@@ -2003,8 +2094,12 @@ def gather_captain_role_targets(
     return active_ids, eliminated_ids
 
 
-async def add_captain_role(
-    member: discord.Member, role: discord.Role, *, reason: str
+async def _add_member_role(
+    member: discord.Member,
+    role: discord.Role,
+    *,
+    reason: str,
+    label: str,
 ) -> str | None:
     if role in getattr(member, "roles", []):
         return None
@@ -2016,20 +2111,24 @@ async def add_captain_role(
             member,
             member.guild.id,
         )
-        return "Bot lacks permission to assign the captain role."
+        return f"Bot lacks permission to assign the {label}."
     except discord.HTTPException as exc:
         log.warning(
-            "HTTPException adding captain role to %s in guild %s: %s",
+            "HTTPException adding role to %s in guild %s: %s",
             member,
             member.guild.id,
             exc,
         )
-        return "Discord API error prevented assigning the captain role."
+        return f"Discord API error prevented assigning the {label}."
     return None
 
 
-async def remove_captain_role(
-    member: discord.Member, role: discord.Role, *, reason: str
+async def _remove_member_role(
+    member: discord.Member,
+    role: discord.Role,
+    *,
+    reason: str,
+    label: str,
 ) -> str | None:
     if role not in getattr(member, "roles", []):
         return None
@@ -2041,16 +2140,40 @@ async def remove_captain_role(
             member,
             member.guild.id,
         )
-        return "Bot lacks permission to remove the captain role."
+        return f"Bot lacks permission to remove the {label}."
     except discord.HTTPException as exc:
         log.warning(
-            "HTTPException removing captain role from %s in guild %s: %s",
+            "HTTPException removing role from %s in guild %s: %s",
             member,
             member.guild.id,
             exc,
         )
-        return "Discord API error prevented removing the captain role."
+        return f"Discord API error prevented removing the {label}."
     return None
+
+
+async def add_captain_role(
+    member: discord.Member, role: discord.Role, *, reason: str
+) -> str | None:
+    return await _add_member_role(member, role, reason=reason, label="captain role")
+
+
+async def remove_captain_role(
+    member: discord.Member, role: discord.Role, *, reason: str
+) -> str | None:
+    return await _remove_member_role(member, role, reason=reason, label="captain role")
+
+
+async def add_division_role(
+    member: discord.Member, role: discord.Role, *, reason: str
+) -> str | None:
+    return await _add_member_role(member, role, reason=reason, label="division role")
+
+
+async def remove_division_role(
+    member: discord.Member, role: discord.Role, *, reason: str
+) -> str | None:
+    return await _remove_member_role(member, role, reason=reason, label="division role")
 
 
 # ---------- Slash Commands ----------
@@ -2265,10 +2388,11 @@ async def register_player_command(  # pragma: no cover - Discord slash command w
     )
     storage.save_registration(registration)
 
-    role_note: str | None = None
+    role_notes: list[str] = []
     role, role_error = await resolve_captain_role(guild)
     if role is None:
-        role_note = role_error
+        if role_error is not None:
+            role_notes.append(role_error)
     else:
         assignment_error = await add_captain_role(
             interaction.user,
@@ -2276,7 +2400,20 @@ async def register_player_command(  # pragma: no cover - Discord slash command w
             reason="Registered for tournament",
         )
         if assignment_error is not None:
-            role_note = assignment_error
+            role_notes.append(assignment_error)
+
+    division_role, division_role_error = await ensure_division_role(guild, config)
+    if division_role is None:
+        if division_role_error is not None:
+            role_notes.append(division_role_error)
+    else:
+        division_assign_error = await add_division_role(
+            interaction.user,
+            division_role,
+            reason=f"Registered for {config.division_name} division",
+        )
+        if division_assign_error is not None:
+            role_notes.append(division_assign_error)
 
     embed = build_registration_embed(
         registration,
@@ -2297,10 +2434,90 @@ async def register_player_command(  # pragma: no cover - Discord slash command w
             f"<#{TOURNAMENT_REGISTRATION_CHANNEL_ID}>."
         )
 
-    if role_note is not None:
-        confirmation = f"{confirmation}\n{role_note}"
+    if role_notes:
+        confirmation = f"{confirmation}\n" + "\n".join(role_notes)
 
     await interaction.followup.send(confirmation, ephemeral=True)
+
+
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
+    member="Member to receive the division role (defaults to yourself)",
+)
+@tournament_command(
+    name="assignrole", description="Sync a division role for yourself or another member"
+)
+async def assign_role_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    division: str,
+    member: discord.Member | None = None,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    config = storage.get_config(guild.id, division_id)
+    if config is None:
+        await interaction.response.send_message(
+            "That division is not configured. Please ask an admin to run /setup.",
+            ephemeral=True,
+        )
+        return
+
+    target_member = member or interaction.user
+    assigning_self = target_member.id == interaction.user.id
+    if not assigning_self and not _has_admin_or_tournament_role(interaction):
+        await interaction.response.send_message(
+            "You need administrator or tournament-admin role to assign roles to other members.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    division_role, division_note = await ensure_division_role(guild, config)
+    if division_role is None:
+        await interaction.followup.send(
+            division_note or "Unable to resolve the division role.",
+            ephemeral=True,
+        )
+        return
+
+    already_had_role = division_role in getattr(target_member, "roles", [])
+    assign_error = await add_division_role(
+        target_member,
+        division_role,
+        reason=f"Manual sync for {config.division_name} division",
+    )
+    if assign_error is not None:
+        await interaction.followup.send(assign_error, ephemeral=True)
+        return
+
+    if already_had_role:
+        ack_message = (
+            f"{target_member.mention} already has the {division_role.name} role."
+        )
+    else:
+        ack_message = f"Assigned {division_role.name} to {target_member.mention}."
+
+    if not assigning_self:
+        ack_message += f"\nRequested by {interaction.user.mention}."
+
+    await interaction.followup.send(ack_message, ephemeral=True)
 
 
 @app_commands.describe(
@@ -3114,6 +3331,14 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
         await send_ephemeral(interaction, str(exc))
         return
 
+    config = storage.get_config(guild.id, division_id)
+    if config is None:
+        await send_ephemeral(
+            interaction,
+            "That division is not configured. Please ask an admin to run /setup.",
+        )
+        return
+
     bracket = storage.get_bracket(guild.id, division_id)
     if bracket is None:
         await send_ephemeral(
@@ -3242,7 +3467,22 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
     winner_slot_obj = match_obj.winner_slot()
     selected_registration = registration_lookup.get(selected_slot.team_id)
 
+    loser_id: int | None = None
+    if opponent_registration_pre is not None:
+        loser_id = opponent_registration_pre.user_id
+    elif opponent_slot_pre.team_id is not None:
+        loser_id = opponent_slot_pre.team_id
+
+    loser_member: discord.Member | None = None
+    if loser_id is not None and loser_id != winner_captain.id:
+        loser_member = await fetch_guild_member(guild, loser_id)
+
     role_notes: list[str] = []
+    missing_role_updates: dict[int, set[str]] = {}
+
+    def record_missing(member_id: int, label: str) -> None:
+        missing_role_updates.setdefault(member_id, set()).add(label)
+
     role, role_error = await resolve_captain_role(guild)
     if role is None:
         if role_error is not None:
@@ -3255,17 +3495,6 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
         )
         if add_error is not None:
             role_notes.append(add_error)
-
-        loser_member: discord.Member | None = None
-        loser_id: int | None = None
-        if opponent_registration_pre is not None:
-            loser_id = opponent_registration_pre.user_id
-        elif opponent_slot_pre.team_id is not None:
-            loser_id = opponent_slot_pre.team_id
-
-        if loser_id is not None and loser_id != winner_captain.id:
-            loser_member = await fetch_guild_member(guild, loser_id)
-
         if loser_member is not None:
             remove_error = await remove_captain_role(
                 loser_member,
@@ -3275,9 +3504,43 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
             if remove_error is not None:
                 role_notes.append(remove_error)
         elif loser_id is not None and loser_id != winner_captain.id:
-            role_notes.append(
-                f"Unable to locate <@{loser_id}> to update their captain role."
+            record_missing(loser_id, "captain role")
+
+    division_role, division_note = await ensure_division_role(guild, config)
+    if division_role is None:
+        if division_note is not None:
+            role_notes.append(division_note)
+    else:
+        division_add_error = await add_division_role(
+            winner_captain,
+            division_role,
+            reason=f"Advanced in {config.division_name} division",
+        )
+        if division_add_error is not None:
+            role_notes.append(division_add_error)
+
+        if loser_member is not None:
+            division_remove_error = await remove_division_role(
+                loser_member,
+                division_role,
+                reason=f"Eliminated from {config.division_name} division",
             )
+            if division_remove_error is not None:
+                role_notes.append(division_remove_error)
+        elif loser_id is not None and loser_id != winner_captain.id:
+            record_missing(loser_id, "division role")
+
+    for member_id, labels in missing_role_updates.items():
+        sorted_labels = sorted(labels)
+        if not sorted_labels:
+            continue
+        if len(sorted_labels) == 1:
+            label_text = sorted_labels[0]
+        else:
+            label_text = " and ".join(sorted_labels)
+        role_notes.append(
+            f"Unable to locate <@{member_id}> to update their {label_text}."
+        )
 
     if winner_slot_obj is not None:
         captain_text = (
@@ -3934,6 +4197,13 @@ async def _register_player_division_autocomplete(
 
 @team_name_command.autocomplete("division")
 async def _team_name_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@assign_role_command.autocomplete("division")
+async def _assign_role_division_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     return await division_autocomplete(interaction, current)

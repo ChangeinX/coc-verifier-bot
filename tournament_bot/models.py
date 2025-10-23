@@ -151,6 +151,7 @@ class TournamentConfig:
     max_teams: int
     updated_by: int
     updated_at: str
+    division_role_id: int | None = None
 
     PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
     SK_TEMPLATE: ClassVar[str] = "DIVISION#%s#CONFIG"
@@ -176,6 +177,8 @@ class TournamentConfig:
                 "updated_at": self.updated_at,
             }
         )
+        if self.division_role_id is not None:
+            item["division_role_id"] = str(self.division_role_id)
         return item
 
     @classmethod
@@ -198,6 +201,13 @@ class TournamentConfig:
             if division_name_value is not None
             else division_id.upper()
         )
+        role_id_value = item.get("division_role_id")
+        try:
+            division_role_id = (
+                int(role_id_value) if role_id_value not in (None, "", "None") else None
+            )
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            division_role_id = None
         return cls(
             guild_id=guild_id,
             division_id=division_id,
@@ -207,6 +217,7 @@ class TournamentConfig:
             max_teams=int(item["max_teams"]),
             updated_by=int(item.get("updated_by", 0)),
             updated_at=str(item.get("updated_at", "")),
+            division_role_id=division_role_id,
         )
 
 

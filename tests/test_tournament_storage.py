@@ -74,7 +74,9 @@ def sample_series() -> TournamentSeries:
     )
 
 
-def sample_config(division_id: str = "th12") -> TournamentConfig:
+def sample_config(
+    division_id: str = "th12", *, role_id: int | None = None
+) -> TournamentConfig:
     return TournamentConfig(
         guild_id=42,
         division_id=division_id,
@@ -84,6 +86,7 @@ def sample_config(division_id: str = "th12") -> TournamentConfig:
         max_teams=16,
         updated_by=99,
         updated_at="2024-01-01T00:00:00.000Z",
+        division_role_id=role_id,
     )
 
 
@@ -149,7 +152,7 @@ def test_series_round_trip():
 
 def test_config_round_trip():
     storage, _ = build_storage()
-    config = sample_config("th13")
+    config = sample_config("th13", role_id=555555555)
     storage.save_config(config)
 
     restored = storage.get_config(config.guild_id, config.division_id)

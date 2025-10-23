@@ -118,6 +118,7 @@ def test_models_round_trip():
         max_teams=10,
         updated_by=42,
         updated_at=utc_now_iso(),
+        division_role_id=987654321,
     )
     config_item = config.to_item()
     assert TournamentConfig.from_item(config_item) == config

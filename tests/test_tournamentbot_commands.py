@@ -70,10 +70,28 @@ class FakeFollowup:
         self.sent.append({"content": content, "embed": embed, "ephemeral": ephemeral})
 
 
+class FakeGuild:
+    def __init__(self, guild_id: int) -> None:
+        self.id = guild_id
+        self.roles: dict[int, object] = {}
+        self.members: dict[int, FakeUser] = {}
+
+    def get_member(self, user_id: int):  # pragma: no cover - simple helper
+        return self.members.get(user_id)
+
+    async def fetch_member(self, user_id: int):  # pragma: no cover - simple helper
+        return self.members.get(user_id)
+
+    def register_member(self, member: FakeUser) -> None:
+        self.members[member.id] = member
+
+
 class FakeUser:
     def __init__(self, user_id: int, roles: list[object]):
         self.id = user_id
         self.roles = roles
+        self.mention = f"<@{user_id}>"
+        self.guild = None
 
     def __str__(self) -> str:
         return "User#0001"
@@ -83,6 +101,11 @@ class FakeInteraction:
     def __init__(self, user, guild) -> None:
         self.user = user
         self.guild = guild
+        if getattr(user, "guild", None) is None:
+            try:
+                user.guild = guild
+            except AttributeError:  # pragma: no cover - defensive
+                pass
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.channel = None
@@ -213,6 +236,25 @@ def make_players(count: int) -> list[PlayerEntry]:
     return players
 
 
+def patch_division_role_helpers(monkeypatch, role_name: str = "TH15 Division") -> None:
+    role = SimpleNamespace(id=987654321, name=role_name)
+
+    async def fake_ensure(_guild, _config):  # pragma: no cover - simple stub
+        return role, None
+
+    async def fake_add(_member, _role, *, reason):  # pragma: no cover - stub
+        del reason
+        return None
+
+    async def fake_remove(_member, _role, *, reason):  # pragma: no cover - stub
+        del reason
+        return None
+
+    monkeypatch.setattr(tournamentbot, "ensure_division_role", fake_ensure)
+    monkeypatch.setattr(tournamentbot, "add_division_role", fake_add)
+    monkeypatch.setattr(tournamentbot, "remove_division_role", fake_remove)
+
+
 @pytest.mark.asyncio
 async def test_register_team_accepts_optional_sub_when_allowed(monkeypatch):
     now = datetime.now(UTC)
@@ -220,8 +262,10 @@ async def test_register_team_accepts_optional_sub_when_allowed(monkeypatch):
     config = make_config(team_size=5, division_id="th15")
     storage = InMemoryStorage(series, {"th15": config})
 
-    guild = SimpleNamespace(id=1)
+    guild = FakeGuild(1)
     user = FakeUser(42, roles=[])
+    user.guild = guild
+    guild.register_member(user)
     interaction = FakeInteraction(user=user, guild=guild)
 
     players = make_players(6)
@@ -237,6 +281,7 @@ async def test_register_team_accepts_optional_sub_when_allowed(monkeypatch):
     monkeypatch.setattr(tournamentbot, "fetch_players", fake_fetch)
     monkeypatch.setattr(tournamentbot, "post_registration_announcement", fake_post)
     monkeypatch.setattr(tournamentbot, "TOURNAMENT_REGISTRATION_CHANNEL_ID", None)
+    patch_division_role_helpers(monkeypatch)
 
     tags = " ".join(player.tag for player in players)
 
@@ -266,12 +311,15 @@ async def test_register_team_blocks_sub_in_1v1(monkeypatch):
     config = make_config(team_size=1, division_id="th12")
     storage = InMemoryStorage(series, {"th12": config})
 
-    guild = SimpleNamespace(id=1)
+    guild = FakeGuild(1)
     user = FakeUser(42, roles=[])
+    user.guild = guild
+    guild.register_member(user)
     interaction = FakeInteraction(user=user, guild=guild)
 
     monkeypatch.setattr(tournamentbot, "storage", storage)
     monkeypatch.setattr(tournamentbot, "TOURNAMENT_REGISTRATION_CHANNEL_ID", None)
+    patch_division_role_helpers(monkeypatch, role_name="TH12 Division")
 
     players = make_players(2)
     tags = " ".join(player.tag for player in players)
@@ -305,8 +353,10 @@ async def test_register_sub_updates_existing_registration(monkeypatch):
     series = make_series(now)
     config = make_config(team_size=5, division_id="th15")
     storage = InMemoryStorage(series, {"th15": config})
-    guild = SimpleNamespace(id=1)
+    guild = FakeGuild(1)
     user = FakeUser(42, roles=[])
+    user.guild = guild
+    guild.register_member(user)
     interaction = FakeInteraction(user=user, guild=guild)
 
     existing_players = make_players(5)
@@ -353,9 +403,10 @@ async def test_set_round_windows_command_displays_view(monkeypatch):
     config = make_config(team_size=5, division_id="th15")
     storage = InMemoryStorage(series, {"th15": config})
 
-    guild = SimpleNamespace(id=1)
+    guild = FakeGuild(1)
     admin_role = SimpleNamespace(id=tournamentbot.TOURNAMENT_ADMIN_ROLE_ID)
     admin = FakeUser(99, roles=[admin_role])
+    admin.guild = guild
     interaction = FakeInteraction(user=admin, guild=guild)
 
     monkeypatch.setattr(tournamentbot, "storage", storage)
@@ -431,11 +482,20 @@ async def test_select_round_winner_requires_window(monkeypatch):
     _register_team(storage, 102, "Bravo", now)
 
     monkeypatch.setattr(tournamentbot, "storage", storage)
+    patch_division_role_helpers(monkeypatch)
 
-    guild = SimpleNamespace(id=1)
-    interaction = FakeInteraction(user=_make_admin(), guild=guild)
+    guild = FakeGuild(1)
+    admin = _make_admin()
+    admin.guild = guild
+    guild.register_member(admin)
+    interaction = FakeInteraction(user=admin, guild=guild)
 
-    winner = SimpleNamespace(id=101, mention="<@101>")
+    winner = FakeUser(101, roles=[])
+    winner.guild = guild
+    guild.register_member(winner)
+    loser_member = FakeUser(102, roles=[])
+    loser_member.guild = guild
+    guild.register_member(loser_member)
 
     await tournamentbot.select_round_winner_command.callback(
         interaction,
@@ -466,10 +526,19 @@ async def test_select_round_winner_respects_window_open(monkeypatch):
     _register_team(storage, 102, "Bravo", now)
 
     monkeypatch.setattr(tournamentbot, "storage", storage)
+    patch_division_role_helpers(monkeypatch)
 
-    guild = SimpleNamespace(id=1)
-    interaction = FakeInteraction(user=_make_admin(), guild=guild)
-    winner = SimpleNamespace(id=101, mention="<@101>")
+    guild = FakeGuild(1)
+    admin = _make_admin()
+    admin.guild = guild
+    guild.register_member(admin)
+    interaction = FakeInteraction(user=admin, guild=guild)
+    winner = FakeUser(101, roles=[])
+    winner.guild = guild
+    guild.register_member(winner)
+    loser_member = FakeUser(102, roles=[])
+    loser_member.guild = guild
+    guild.register_member(loser_member)
 
     await tournamentbot.select_round_winner_command.callback(
         interaction,
@@ -503,10 +572,19 @@ async def test_select_round_winner_within_window_records_winner(monkeypatch):
     _register_team(storage, 102, "Bravo", now)
 
     monkeypatch.setattr(tournamentbot, "storage", storage)
+    patch_division_role_helpers(monkeypatch)
 
-    guild = SimpleNamespace(id=1)
-    interaction = FakeInteraction(user=_make_admin(), guild=guild)
-    winner = SimpleNamespace(id=101, mention="<@101>")
+    guild = FakeGuild(1)
+    admin = _make_admin()
+    admin.guild = guild
+    guild.register_member(admin)
+    interaction = FakeInteraction(user=admin, guild=guild)
+    winner = FakeUser(101, roles=[])
+    winner.guild = guild
+    guild.register_member(winner)
+    loser_member = FakeUser(102, roles=[])
+    loser_member.guild = guild
+    guild.register_member(loser_member)
 
     await tournamentbot.select_round_winner_command.callback(
         interaction,
@@ -521,3 +599,104 @@ async def test_select_round_winner_within_window_records_winner(monkeypatch):
     messages = interaction.response.messages
     assert messages
     assert "Recorded" in str(messages[0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_assign_role_self_success(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=5, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    guild = FakeGuild(1)
+    user = FakeUser(42, roles=[])
+    user.guild = guild
+    guild.register_member(user)
+    interaction = FakeInteraction(user=user, guild=guild)
+
+    role = SimpleNamespace(id=222, name="TH15 Division")
+
+    async def fake_ensure(guild_obj, cfg):
+        assert guild_obj is guild
+        assert cfg is config
+        return role, None
+
+    add_calls: dict[str, object] = {}
+
+    async def fake_add(member, role_obj, *, reason):
+        add_calls["member"] = member
+        add_calls["role"] = role_obj
+        add_calls["reason"] = reason
+        return None
+
+    monkeypatch.setattr(tournamentbot, "ensure_division_role", fake_ensure)
+    monkeypatch.setattr(tournamentbot, "add_division_role", fake_add)
+
+    await tournamentbot.assign_role_command.callback(interaction, "th15", None)
+
+    assert add_calls["member"] is user
+    assert add_calls["role"] == role
+    assert "TH15" in str(add_calls["reason"])
+
+    messages = interaction.followup.sent
+    assert messages
+    assert "Assigned" in str(messages[0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_assign_role_requires_admin_for_others(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=5, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    guild = FakeGuild(1)
+    user = FakeUser(42, roles=[])
+    user.guild = guild
+    guild.register_member(user)
+    interaction = FakeInteraction(user=user, guild=guild)
+
+    other_member = FakeUser(84, roles=[])
+    other_member.guild = guild
+    guild.register_member(other_member)
+
+    await tournamentbot.assign_role_command.callback(interaction, "th15", other_member)
+
+    messages = interaction.response.messages
+    assert messages
+    assert "administrator" in str(messages[0]["content"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_assign_role_reports_existing_role(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=5, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    role = SimpleNamespace(id=333, name="TH15 Division")
+
+    user = FakeUser(42, roles=[role])
+    guild = FakeGuild(1)
+    user.guild = guild
+    guild.register_member(user)
+    interaction = FakeInteraction(user=user, guild=guild)
+
+    async def fake_ensure(_guild, _cfg):
+        return role, None
+
+    async def fake_add(member, role_obj, *, reason):
+        del member, role_obj, reason
+        return None
+
+    monkeypatch.setattr(tournamentbot, "ensure_division_role", fake_ensure)
+    monkeypatch.setattr(tournamentbot, "add_division_role", fake_add)
+
+    await tournamentbot.assign_role_command.callback(interaction, "th15", None)
+
+    messages = interaction.followup.sent
+    assert messages
+    assert "already has" in str(messages[0]["content"]).lower()
