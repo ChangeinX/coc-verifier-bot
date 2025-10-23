@@ -2442,15 +2442,15 @@ async def register_player_command(  # pragma: no cover - Discord slash command w
 
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
-    member="Member to receive the division role (defaults to yourself)",
 )
+@require_admin_or_tournament_role()
 @tournament_command(
-    name="assignrole", description="Sync a division role for yourself or another member"
+    name="assignrole",
+    description="Sync division roles for all participants in a bracket",
 )
 async def assign_role_command(  # pragma: no cover - Discord slash command wiring
     interaction: discord.Interaction,
     division: str,
-    member: discord.Member | None = None,
 ) -> None:
     try:
         guild = ensure_guild(interaction)
@@ -2478,46 +2478,93 @@ async def assign_role_command(  # pragma: no cover - Discord slash command wirin
         )
         return
 
-    target_member = member or interaction.user
-    assigning_self = target_member.id == interaction.user.id
-    if not assigning_self and not _has_admin_or_tournament_role(interaction):
+    registrations = storage.list_registrations(guild.id, division_id)
+    if not registrations:
         await interaction.response.send_message(
-            "You need administrator or tournament-admin role to assign roles to other members.",
+            "No registrations found for that division.", ephemeral=True
+        )
+        return
+
+    bracket = storage.get_bracket(guild.id, division_id)
+    if bracket is not None and apply_team_names(bracket, registrations):
+        storage.save_bracket(bracket)
+
+    active_ids, eliminated_ids = categorize_captains_for_division(
+        bracket, registrations
+    )
+
+    division_role, division_note = await ensure_division_role(guild, config)
+    if division_role is None:
+        await interaction.response.send_message(
+            division_note or "Unable to resolve the division role.",
             ephemeral=True,
         )
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
 
-    division_role, division_note = await ensure_division_role(guild, config)
-    if division_role is None:
-        await interaction.followup.send(
-            division_note or "Unable to resolve the division role.",
-            ephemeral=True,
+    assigned = 0
+    removed = 0
+    missing_assign: set[int] = set()
+    missing_remove: set[int] = set()
+    error_notes: list[str] = []
+
+    for captain_id in sorted(active_ids):
+        member = await fetch_guild_member(guild, captain_id)
+        if member is None:
+            missing_assign.add(captain_id)
+            continue
+        had_role = division_role in getattr(member, "roles", [])
+        assign_error = await add_division_role(
+            member,
+            division_role,
+            reason=f"Division role sync for {config.division_name}",
         )
-        return
+        if assign_error is not None:
+            error_notes.append(assign_error)
+            continue
+        if not had_role:
+            assigned += 1
 
-    already_had_role = division_role in getattr(target_member, "roles", [])
-    assign_error = await add_division_role(
-        target_member,
-        division_role,
-        reason=f"Manual sync for {config.division_name} division",
-    )
-    if assign_error is not None:
-        await interaction.followup.send(assign_error, ephemeral=True)
-        return
-
-    if already_had_role:
-        ack_message = (
-            f"{target_member.mention} already has the {division_role.name} role."
+    for captain_id in sorted(eliminated_ids):
+        member = await fetch_guild_member(guild, captain_id)
+        if member is None:
+            missing_remove.add(captain_id)
+            continue
+        if division_role not in getattr(member, "roles", []):
+            continue
+        remove_error = await remove_division_role(
+            member,
+            division_role,
+            reason=f"Division role sync for {config.division_name}",
         )
-    else:
-        ack_message = f"Assigned {division_role.name} to {target_member.mention}."
+        if remove_error is not None:
+            error_notes.append(remove_error)
+            continue
+        removed += 1
 
-    if not assigning_self:
-        ack_message += f"\nRequested by {interaction.user.mention}."
+    lines = [
+        (
+            f"Synced {division_role.name} for {config.division_name} "
+            f"({config.division_id})."
+        )
+    ]
+    lines.append(f"Assigned role to {assigned} member(s).")
+    lines.append(f"Removed role from {removed} member(s).")
 
-    await interaction.followup.send(ack_message, ephemeral=True)
+    if missing_assign:
+        mentions = " ".join(f"<@{user_id}>" for user_id in sorted(missing_assign))
+        lines.append("Could not locate these captains to assign the role: " + mentions)
+    if missing_remove:
+        mentions = " ".join(f"<@{user_id}>" for user_id in sorted(missing_remove))
+        lines.append(
+            "Could not locate these eliminated captains to remove the role: " + mentions
+        )
+    if error_notes:
+        unique_notes = list(dict.fromkeys(error_notes))
+        lines.extend(unique_notes)
+
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
 @app_commands.describe(

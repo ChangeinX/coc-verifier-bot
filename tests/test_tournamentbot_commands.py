@@ -602,50 +602,76 @@ async def test_select_round_winner_within_window_records_winner(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_assign_role_self_success(monkeypatch):
+async def test_assign_role_syncs_division_roles(monkeypatch):
     now = datetime.now(UTC)
     series = make_series(now)
     config = make_config(team_size=5, division_id="th15")
     storage = InMemoryStorage(series, {"th15": config})
+    bracket = _make_bracket_with_match(now)
+    bracket.rounds[0].matches[0].winner_index = 0
+    storage.save_bracket(bracket)
+    _register_team(storage, 101, "Alpha", now)
+    _register_team(storage, 102, "Bravo", now)
+
     monkeypatch.setattr(tournamentbot, "storage", storage)
 
     guild = FakeGuild(1)
-    user = FakeUser(42, roles=[])
-    user.guild = guild
-    guild.register_member(user)
-    interaction = FakeInteraction(user=user, guild=guild)
+    admin = _make_admin()
+    admin.guild = guild
+    guild.register_member(admin)
 
-    role = SimpleNamespace(id=222, name="TH15 Division")
+    role = SimpleNamespace(id=444, name="TH15 Division")
+
+    winner_member = FakeUser(101, roles=[])
+    winner_member.guild = guild
+    guild.register_member(winner_member)
+
+    loser_member = FakeUser(102, roles=[role])
+    loser_member.guild = guild
+    guild.register_member(loser_member)
 
     async def fake_ensure(guild_obj, cfg):
         assert guild_obj is guild
         assert cfg is config
         return role, None
 
-    add_calls: dict[str, object] = {}
+    add_calls: list[tuple[int, str]] = []
+    remove_calls: list[tuple[int, str]] = []
 
     async def fake_add(member, role_obj, *, reason):
-        add_calls["member"] = member
-        add_calls["role"] = role_obj
-        add_calls["reason"] = reason
+        add_calls.append((member.id, reason))
+        if role_obj not in member.roles:
+            member.roles.append(role_obj)
+        return None
+
+    async def fake_remove(member, role_obj, *, reason):
+        remove_calls.append((member.id, reason))
+        if role_obj in member.roles:
+            member.roles.remove(role_obj)
         return None
 
     monkeypatch.setattr(tournamentbot, "ensure_division_role", fake_ensure)
     monkeypatch.setattr(tournamentbot, "add_division_role", fake_add)
+    monkeypatch.setattr(tournamentbot, "remove_division_role", fake_remove)
 
-    await tournamentbot.assign_role_command.callback(interaction, "th15", None)
+    interaction = FakeInteraction(user=admin, guild=guild)
 
-    assert add_calls["member"] is user
-    assert add_calls["role"] == role
-    assert "TH15" in str(add_calls["reason"])
+    await tournamentbot.assign_role_command.callback(interaction, "th15")
+
+    assert (101, "Division role sync for TH15") in add_calls
+    assert (102, "Division role sync for TH15") in remove_calls
+    assert role in winner_member.roles
+    assert role not in loser_member.roles
 
     messages = interaction.followup.sent
     assert messages
-    assert "Assigned" in str(messages[0]["content"])
+    content = str(messages[0]["content"]).lower()
+    assert "assigned role to 1" in content
+    assert "removed role from 1" in content
 
 
 @pytest.mark.asyncio
-async def test_assign_role_requires_admin_for_others(monkeypatch):
+async def test_assign_role_handles_missing_registrations(monkeypatch):
     now = datetime.now(UTC)
     series = make_series(now)
     config = make_config(team_size=5, division_id="th15")
@@ -653,50 +679,14 @@ async def test_assign_role_requires_admin_for_others(monkeypatch):
     monkeypatch.setattr(tournamentbot, "storage", storage)
 
     guild = FakeGuild(1)
-    user = FakeUser(42, roles=[])
-    user.guild = guild
-    guild.register_member(user)
-    interaction = FakeInteraction(user=user, guild=guild)
+    admin = _make_admin()
+    admin.guild = guild
+    guild.register_member(admin)
 
-    other_member = FakeUser(84, roles=[])
-    other_member.guild = guild
-    guild.register_member(other_member)
+    interaction = FakeInteraction(user=admin, guild=guild)
 
-    await tournamentbot.assign_role_command.callback(interaction, "th15", other_member)
+    await tournamentbot.assign_role_command.callback(interaction, "th15")
 
     messages = interaction.response.messages
     assert messages
-    assert "administrator" in str(messages[0]["content"]).lower()
-
-
-@pytest.mark.asyncio
-async def test_assign_role_reports_existing_role(monkeypatch):
-    now = datetime.now(UTC)
-    series = make_series(now)
-    config = make_config(team_size=5, division_id="th15")
-    storage = InMemoryStorage(series, {"th15": config})
-    monkeypatch.setattr(tournamentbot, "storage", storage)
-
-    role = SimpleNamespace(id=333, name="TH15 Division")
-
-    user = FakeUser(42, roles=[role])
-    guild = FakeGuild(1)
-    user.guild = guild
-    guild.register_member(user)
-    interaction = FakeInteraction(user=user, guild=guild)
-
-    async def fake_ensure(_guild, _cfg):
-        return role, None
-
-    async def fake_add(member, role_obj, *, reason):
-        del member, role_obj, reason
-        return None
-
-    monkeypatch.setattr(tournamentbot, "ensure_division_role", fake_ensure)
-    monkeypatch.setattr(tournamentbot, "add_division_role", fake_add)
-
-    await tournamentbot.assign_role_command.callback(interaction, "th15", None)
-
-    messages = interaction.followup.sent
-    assert messages
-    assert "already has" in str(messages[0]["content"]).lower()
+    assert "no registrations" in str(messages[0]["content"]).lower()
