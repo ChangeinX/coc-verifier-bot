@@ -957,7 +957,7 @@ class BracketAdjustView(discord.ui.View):
         self.round_select = BracketRoundSelect(self)
         self.round_select.row = 1
         self.match_select = BracketMatchSelect(self)
-        self.match_select.row = 1
+        self.match_select.row = 2
 
         self.add_item(self.division_select)
         self.add_item(self.round_select)
@@ -1334,7 +1334,7 @@ class BracketAdjustView(discord.ui.View):
     @discord.ui.button(
         label="Set Winner → Competitor One",
         style=discord.ButtonStyle.primary,
-        row=2,
+        row=3,
     )
     async def declare_competitor_one(  # type: ignore[override]
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -1344,7 +1344,7 @@ class BracketAdjustView(discord.ui.View):
     @discord.ui.button(
         label="Set Winner → Competitor Two",
         style=discord.ButtonStyle.primary,
-        row=2,
+        row=3,
     )
     async def declare_competitor_two(  # type: ignore[override]
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -1354,7 +1354,7 @@ class BracketAdjustView(discord.ui.View):
     @discord.ui.button(
         label="Find Match",
         style=discord.ButtonStyle.secondary,
-        row=2,
+        row=3,
     )
     async def open_match_modal(  # type: ignore[override]
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -1370,7 +1370,7 @@ class BracketAdjustView(discord.ui.View):
     @discord.ui.button(
         label="Replace Competitor One",
         style=discord.ButtonStyle.secondary,
-        row=3,
+        row=4,
     )
     async def replace_competitor_one(  # type: ignore[override]
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -1388,7 +1388,7 @@ class BracketAdjustView(discord.ui.View):
     @discord.ui.button(
         label="Replace Competitor Two",
         style=discord.ButtonStyle.secondary,
-        row=3,
+        row=4,
     )
     async def replace_competitor_two(  # type: ignore[override]
         self, interaction: discord.Interaction, _button: discord.ui.Button
