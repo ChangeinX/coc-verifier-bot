@@ -777,3 +777,8 @@ async def test_adjust_bracket_command_swaps_captains(monkeypatch):
     next_round = updated.find_match("R2M1")
     assert next_round is not None
     assert next_round.competitor_one.team_id == 2
+
+    tournamentbot.clear_match_winner(updated, match)
+    next_round = updated.find_match("R2M1")
+    assert next_round is not None
+    assert next_round.competitor_one.team_id is None

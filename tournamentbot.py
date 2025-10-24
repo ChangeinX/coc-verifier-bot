@@ -1277,6 +1277,38 @@ class BracketAdjustView(discord.ui.View):
             f"Updated winner for {match.match_id} to {label}.",
         )
 
+    async def clear_winner(self, interaction: discord.Interaction) -> None:
+        if self.division_id is None or self.match_id is None:
+            await interaction.response.send_message(
+                "Select a division and match before clearing a winner.",
+                ephemeral=True,
+            )
+            return
+        bracket = storage.get_bracket(self.guild_id, self.division_id)
+        if bracket is None:
+            await interaction.response.send_message(
+                "No bracket stored for this division.", ephemeral=True
+            )
+            return
+        match = bracket.find_match(self.match_id)
+        if match is None:
+            await interaction.response.send_message(
+                "Match could not be located. Select it again and retry.",
+                ephemeral=True,
+            )
+            return
+        if match.winner_index is None:
+            await interaction.response.send_message(
+                "This match is already undecided.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        clear_match_winner(bracket, match)
+        storage.save_bracket(bracket)
+        await self._finalize_action(
+            interaction, f"Cleared the recorded winner for {match.match_id}."
+        )
+
     async def replace_competitor(
         self,
         interaction: discord.Interaction,
@@ -1368,6 +1400,16 @@ class BracketAdjustView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(MatchPickerModal(self))
+
+    @discord.ui.button(
+        label="Clear Winner",
+        style=discord.ButtonStyle.danger,
+        row=3,
+    )
+    async def clear_winner_button(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await self.clear_winner(interaction)
 
     @discord.ui.button(
         label="Replace Competitor One",
@@ -2057,6 +2099,11 @@ def assign_match_winner(
     bracket: BracketState, match: BracketMatch, winner_index: int
 ) -> None:
     match.winner_index = winner_index
+    propagate_match_result(bracket, match)
+
+
+def clear_match_winner(bracket: BracketState, match: BracketMatch) -> None:
+    match.winner_index = None
     propagate_match_result(bracket, match)
 
 
