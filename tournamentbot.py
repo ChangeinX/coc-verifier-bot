@@ -1101,7 +1101,9 @@ class BracketAdjustView(discord.ui.View):
                 )
             ]
         options: list[discord.SelectOption] = []
-        for match in matches[: self.MATCH_PAGE_SIZE]:
+        overflow = len(matches) > self.MATCH_PAGE_SIZE
+        limit = self.MATCH_PAGE_SIZE - 1 if overflow else self.MATCH_PAGE_SIZE
+        for match in matches[: max(limit, 0)]:
             label = (
                 f"{match.match_id}: {match.competitor_one.display()} vs "
                 f"{match.competitor_two.display()}"
@@ -1113,7 +1115,7 @@ class BracketAdjustView(discord.ui.View):
                     default=match.match_id == self.match_id,
                 )
             )
-        if len(matches) > self.MATCH_PAGE_SIZE:
+        if overflow:
             options.append(
                 discord.SelectOption(
                     label="More matches available…",
