@@ -10,7 +10,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final, Literal
+from typing import ClassVar, Final, Literal
 
 import boto3
 import coc
@@ -739,6 +739,671 @@ class RegistrationWindowModal(discord.ui.Modal):
         await self._setup_view.refresh()
 
 
+class BracketDivisionSelect(discord.ui.Select):
+    def __init__(self, adjust_view: BracketAdjustView) -> None:
+        self.adjust_view = adjust_view
+        options = self.adjust_view._build_division_options()
+        super().__init__(
+            placeholder="Select a division",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self.disabled = not options or options[0].value == "__none__"
+
+    def refresh_options(self) -> None:
+        options = self.adjust_view._build_division_options()
+        self.options = options
+        self.disabled = not options or options[0].value == "__none__"
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        selected = self.values[0]
+        if selected == "__none__":
+            await interaction.response.send_message(
+                "No divisions are available to adjust.", ephemeral=True
+            )
+            return
+        self.adjust_view.division_id = selected
+        self.adjust_view.round_index = 0
+        self.adjust_view.match_id = None
+        self.adjust_view.match_page = 0
+        self.adjust_view.round_select.refresh_options()
+        self.adjust_view.match_select.refresh_options()
+        await interaction.response.edit_message(
+            embed=self.adjust_view.build_embed(), view=self.adjust_view
+        )
+
+
+class BracketRoundSelect(discord.ui.Select):
+    def __init__(self, adjust_view: BracketAdjustView) -> None:
+        self.adjust_view = adjust_view
+        options = self.adjust_view._build_round_options()
+        super().__init__(
+            placeholder="Select a round",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self.disabled = not options or options[0].value == "__none__"
+
+    def refresh_options(self) -> None:
+        options = self.adjust_view._build_round_options()
+        self.options = options
+        self.disabled = not options or options[0].value == "__none__"
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        selected = self.values[0]
+        if selected == "__none__":
+            await interaction.response.send_message(
+                "No rounds available in this division.", ephemeral=True
+            )
+            return
+        try:
+            self.adjust_view.round_index = int(selected)
+        except ValueError:
+            self.adjust_view.round_index = 0
+        self.adjust_view.match_id = None
+        self.adjust_view.match_page = 0
+        self.adjust_view.match_select.refresh_options()
+        await interaction.response.edit_message(
+            embed=self.adjust_view.build_embed(), view=self.adjust_view
+        )
+
+
+class BracketMatchSelect(discord.ui.Select):
+    def __init__(self, adjust_view: BracketAdjustView) -> None:
+        self.adjust_view = adjust_view
+        options = self.adjust_view._build_match_options()
+        super().__init__(
+            placeholder="Select a match",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self.disabled = not options or options[0].value in {"__none__", "__info__"}
+
+    def refresh_options(self) -> None:
+        options = self.adjust_view._build_match_options()
+        self.options = options
+        first_value = options[0].value if options else None
+        self.disabled = not options or first_value in {"__none__", "__info__"}
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        selected = self.values[0]
+        if selected == "__info__":
+            await interaction.response.send_message(
+                "More matches exist in this round. Use the *Find Match* button to look up a specific match ID.",
+                ephemeral=True,
+            )
+            return
+        if selected == "__none__":
+            await interaction.response.send_message(
+                "No matches available to select.", ephemeral=True
+            )
+            return
+        if not self.adjust_view.set_match_id(selected):
+            await interaction.response.send_message(
+                f"Match {selected} is no longer available. Refresh and try again.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(
+            embed=self.adjust_view.build_embed(), view=self.adjust_view
+        )
+
+
+class MatchPickerModal(discord.ui.Modal):
+    def __init__(self, adjust_view: BracketAdjustView) -> None:
+        super().__init__(title="Find Match")
+        self.adjust_view = adjust_view
+        self.match_input = discord.ui.TextInput(
+            label="Match ID",
+            placeholder="R1M60",
+            max_length=50,
+        )
+        self.add_item(self.match_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        match_id = self.match_input.value.strip()
+        if not match_id:
+            await interaction.response.send_message(
+                "Enter a match ID to locate.", ephemeral=True
+            )
+            return
+        if not self.adjust_view.set_match_id(match_id):
+            await interaction.response.send_message(
+                f"Match {match_id} was not found in this division.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Now showing match {match_id}.", ephemeral=True
+        )
+        await self.adjust_view.refresh_message()
+
+
+class ReplaceCompetitorModal(discord.ui.Modal):
+    def __init__(
+        self,
+        adjust_view: BracketAdjustView,
+        *,
+        slot_index: int,
+    ) -> None:
+        title = (
+            "Replace Competitor One" if slot_index == 0 else "Replace Competitor Two"
+        )
+        super().__init__(title=title)
+        self.adjust_view = adjust_view
+        self.slot_index = slot_index
+        self.captain_input = discord.ui.TextInput(
+            label="Captain Discord ID",
+            placeholder="1208203695028961330",
+            max_length=32,
+        )
+        self.set_winner_input = discord.ui.TextInput(
+            label="Set as match winner? (yes/no)",
+            default="no",
+            required=False,
+            max_length=5,
+        )
+        self.add_item(self.captain_input)
+        self.add_item(self.set_winner_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw_id = self.captain_input.value.strip()
+        try:
+            captain_id = int(raw_id)
+        except (TypeError, ValueError):
+            await interaction.response.send_message(
+                "Provide a valid Discord user ID for the captain.",
+                ephemeral=True,
+            )
+            return
+        set_as_winner = self.set_winner_input.value.strip().lower() in {
+            "yes",
+            "true",
+            "y",
+            "1",
+        }
+        await self.adjust_view.replace_competitor(
+            interaction,
+            slot_index=self.slot_index,
+            captain_id=captain_id,
+            set_as_winner=set_as_winner,
+        )
+
+
+class BracketAdjustView(discord.ui.View):
+    MATCH_PAGE_SIZE: ClassVar[int] = 25
+
+    def __init__(
+        self,
+        guild_id: int,
+        requester_id: int,
+        *,
+        initial_division: str | None = None,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.requester_id = requester_id
+        self.division_id: str | None = None
+        self.round_index: int = 0
+        self.match_id: str | None = None
+        self.match_page: int = 0
+        self.message: discord.Message | None = None
+
+        self.division_select = BracketDivisionSelect(self)
+        self.division_select.row = 0
+        self.round_select = BracketRoundSelect(self)
+        self.round_select.row = 1
+        self.match_select = BracketMatchSelect(self)
+        self.match_select.row = 1
+
+        self.add_item(self.division_select)
+        self.add_item(self.round_select)
+        self.add_item(self.match_select)
+
+        self._initialize_state(initial_division=initial_division)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id or is_tournament_admin(
+            interaction.user
+        ):
+            return True
+        await interaction.response.send_message(
+            "Only tournament admins may adjust brackets.",
+            ephemeral=True,
+        )
+        return False
+
+    def _initialize_state(self, *, initial_division: str | None) -> None:
+        division_ids = [
+            cfg.division_id for cfg in storage.list_division_configs(self.guild_id)
+        ]
+        if not division_ids:
+            self.division_id = None
+            self.division_select.refresh_options()
+            self.round_select.refresh_options()
+            self.match_select.refresh_options()
+            return
+        if initial_division and initial_division in division_ids:
+            self.division_id = initial_division
+        else:
+            for candidate in division_ids:
+                bracket = storage.get_bracket(self.guild_id, candidate)
+                if bracket is not None and bracket.rounds:
+                    self.division_id = candidate
+                    break
+            if self.division_id is None:
+                self.division_id = division_ids[0]
+
+        bracket = (
+            storage.get_bracket(self.guild_id, self.division_id)
+            if self.division_id is not None
+            else None
+        )
+        if bracket and bracket.rounds:
+            self.round_index = 0
+            self.match_page = 0
+            first_round = bracket.rounds[0]
+            if first_round.matches:
+                self.match_id = first_round.matches[0].match_id
+
+        self.division_select.refresh_options()
+        self.round_select.refresh_options()
+        self.match_select.refresh_options()
+
+    async def on_timeout(self) -> None:  # pragma: no cover - UI timeout
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) or isinstance(
+                child, discord.ui.Select
+            ):
+                child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    def _build_division_options(self) -> list[discord.SelectOption]:
+        configs = storage.list_division_configs(self.guild_id)
+        if not configs:
+            return [
+                discord.SelectOption(
+                    label="No divisions configured", value="__none__", default=True
+                )
+            ]
+        options: list[discord.SelectOption] = []
+        for cfg in configs[:25]:
+            value = cfg.division_id
+            default = value == self.division_id
+            options.append(
+                discord.SelectOption(
+                    label=cfg.division_name[:100],
+                    value=value,
+                    description=cfg.division_id,
+                    default=default,
+                )
+            )
+        if self.division_id is None and options:
+            options[0].default = True
+        return options
+
+    def _build_round_options(self) -> list[discord.SelectOption]:
+        if self.division_id is None:
+            return [
+                discord.SelectOption(
+                    label="Select a division first", value="__none__", default=True
+                )
+            ]
+        bracket = storage.get_bracket(self.guild_id, self.division_id)
+        if bracket is None or not bracket.rounds:
+            return [
+                discord.SelectOption(
+                    label="No rounds available", value="__none__", default=True
+                )
+            ]
+        options: list[discord.SelectOption] = []
+        for idx, round_obj in enumerate(bracket.rounds[:25]):
+            name = round_obj.name or f"Round {idx + 1}"
+            options.append(
+                discord.SelectOption(
+                    label=name[:100],
+                    value=str(idx),
+                    default=idx == self.round_index,
+                )
+            )
+        if self.round_index >= len(bracket.rounds):
+            self.round_index = max(0, len(bracket.rounds) - 1)
+        return options or [
+            discord.SelectOption(
+                label="No rounds found", value="__none__", default=True
+            )
+        ]
+
+    def _list_matches_for_round(self) -> list[BracketMatch]:
+        if self.division_id is None:
+            return []
+        bracket = storage.get_bracket(self.guild_id, self.division_id)
+        if bracket is None or not bracket.rounds:
+            return []
+        if self.round_index >= len(bracket.rounds):
+            self.round_index = max(0, len(bracket.rounds) - 1)
+        round_obj = bracket.rounds[self.round_index]
+        return list(round_obj.matches)
+
+    def _build_match_options(self) -> list[discord.SelectOption]:
+        matches = self._list_matches_for_round()
+        if not matches:
+            return [
+                discord.SelectOption(
+                    label="No matches available", value="__none__", default=True
+                )
+            ]
+        options: list[discord.SelectOption] = []
+        for match in matches[: self.MATCH_PAGE_SIZE]:
+            label = (
+                f"{match.match_id}: {match.competitor_one.display()} vs "
+                f"{match.competitor_two.display()}"
+            )[:100]
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=match.match_id,
+                    default=match.match_id == self.match_id,
+                )
+            )
+        if len(matches) > self.MATCH_PAGE_SIZE:
+            options.append(
+                discord.SelectOption(
+                    label="More matches available…",
+                    value="__info__",
+                    description="Use the Find Match button",
+                    default=False,
+                )
+            )
+        if self.match_id is None and options:
+            first_value = options[0].value
+            if first_value not in {"__none__", "__info__"}:
+                options[0].default = True
+                self.match_id = first_value
+        return options
+
+    def set_match_id(self, match_id: str) -> bool:
+        if self.division_id is None:
+            return False
+        bracket = storage.get_bracket(self.guild_id, self.division_id)
+        if bracket is None:
+            return False
+        match = bracket.find_match(match_id)
+        if match is None:
+            return False
+        self.match_id = match_id
+        self.round_index = match.round_index
+        self.round_select.refresh_options()
+        self.match_select.refresh_options()
+        return True
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="Adjust Tournament Bracket",
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(UTC),
+        )
+        if self.division_id is None:
+            embed.description = "No tournament divisions are available. Add divisions with /setup before adjusting a bracket."
+            return embed
+
+        bracket = storage.get_bracket(self.guild_id, self.division_id)
+        if bracket is None or not bracket.rounds:
+            embed.description = "No bracket data found for this division. Create a bracket with /create-bracket first."
+            embed.add_field(name="Division", value=self.division_id, inline=False)
+            return embed
+
+        match = bracket.find_match(self.match_id) if self.match_id else None
+        if match is None:
+            embed.description = "Select a match using the dropdown or the *Find Match* button to view and adjust details."
+            embed.add_field(name="Division", value=self.division_id, inline=True)
+            round_name = (
+                describe_round(bracket, bracket.rounds[self.round_index])
+                if bracket.rounds
+                else "—"
+            )
+            embed.add_field(name="Round", value=round_name, inline=True)
+            embed.add_field(
+                name="Matches in round",
+                value=str(len(self._list_matches_for_round())),
+                inline=True,
+            )
+            return embed
+
+        registrations = {
+            registration.user_id: registration
+            for registration in storage.list_registrations(
+                self.guild_id, self.division_id
+            )
+        }
+
+        embed.add_field(name="Division", value=self.division_id, inline=True)
+        embed.add_field(name="Round", value=describe_round(bracket, match), inline=True)
+        embed.add_field(name="Match", value=match.match_id, inline=True)
+        embed.add_field(
+            name="Competitor One",
+            value=self._format_competitor(match.competitor_one, registrations),
+            inline=False,
+        )
+        embed.add_field(
+            name="Competitor Two",
+            value=self._format_competitor(match.competitor_two, registrations),
+            inline=False,
+        )
+        winner_slot = match.winner_slot()
+        winner_text = (
+            self._format_competitor(winner_slot, registrations)
+            if winner_slot is not None
+            else "Undecided"
+        )
+        embed.add_field(name="Winner", value=winner_text, inline=False)
+        embed.set_footer(
+            text="Use the buttons below to change the winner or replace a competitor."
+        )
+        return embed
+
+    def _format_competitor(
+        self,
+        slot: BracketSlot,
+        registrations: dict[int, TeamRegistration],
+    ) -> str:
+        if slot.team_id is None:
+            return slot.display()
+        registration = registrations.get(slot.team_id)
+        label = slot.display()
+        if registration is None:
+            return f"{label}\nCaptain ID: {slot.team_id}"
+        return f"{label}\nCaptain: <@{registration.user_id}> ({registration.user_name})"
+
+    async def refresh_message(self) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(embed=self.build_embed(), view=self)
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning("Failed to refresh bracket adjuster view: %s", exc)
+
+    async def _finalize_action(
+        self, interaction: discord.Interaction, message: str
+    ) -> None:
+        self.round_select.refresh_options()
+        self.match_select.refresh_options()
+        await self.refresh_message()
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def set_winner(
+        self, interaction: discord.Interaction, winner_index: int
+    ) -> None:
+        if self.division_id is None or self.match_id is None:
+            await interaction.response.send_message(
+                "Select a division and match before setting a winner.",
+                ephemeral=True,
+            )
+            return
+        bracket = storage.get_bracket(self.guild_id, self.division_id)
+        if bracket is None:
+            await interaction.response.send_message(
+                "No bracket stored for this division.", ephemeral=True
+            )
+            return
+        match = bracket.find_match(self.match_id)
+        if match is None:
+            await interaction.response.send_message(
+                "Match could not be located. Select it again and retry.",
+                ephemeral=True,
+            )
+            return
+        if winner_index not in (0, 1):
+            await interaction.response.send_message(
+                "Winner index must be 0 or 1.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        assign_match_winner(bracket, match, winner_index)
+        storage.save_bracket(bracket)
+        winner_slot = match.winner_slot()
+        label = winner_slot.display() if winner_slot is not None else "Undecided"
+        await self._finalize_action(
+            interaction,
+            f"Updated winner for {match.match_id} to {label}.",
+        )
+
+    async def replace_competitor(
+        self,
+        interaction: discord.Interaction,
+        *,
+        slot_index: int,
+        captain_id: int,
+        set_as_winner: bool,
+    ) -> None:
+        if self.division_id is None or self.match_id is None:
+            await interaction.response.send_message(
+                "Select a division and match before replacing a competitor.",
+                ephemeral=True,
+            )
+            return
+        registration = storage.get_registration(
+            self.guild_id, self.division_id, captain_id
+        )
+        if registration is None:
+            await interaction.response.send_message(
+                "That captain is not registered for the selected division.",
+                ephemeral=True,
+            )
+            return
+        bracket = storage.get_bracket(self.guild_id, self.division_id)
+        if bracket is None:
+            await interaction.response.send_message(
+                "No bracket stored for this division.", ephemeral=True
+            )
+            return
+        match = bracket.find_match(self.match_id)
+        if match is None:
+            await interaction.response.send_message(
+                "Match could not be located. Select it again and retry.",
+                ephemeral=True,
+            )
+            return
+        if slot_index not in (0, 1):
+            await interaction.response.send_message(
+                "Slot index must be 0 or 1.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        replace_match_competitor(
+            bracket,
+            match,
+            slot_index=slot_index,
+            registration=registration,
+            set_as_winner=set_as_winner,
+        )
+        storage.save_bracket(bracket)
+        slot = match.competitor_one if slot_index == 0 else match.competitor_two
+        action_label = f"Replaced competitor {slot_index + 1} with {slot.display()}"
+        if set_as_winner:
+            action_label += ", set as winner"
+        await self._finalize_action(interaction, action_label + ".")
+
+    @discord.ui.button(
+        label="Set Winner → Competitor One",
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
+    async def declare_competitor_one(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await self.set_winner(interaction, 0)
+
+    @discord.ui.button(
+        label="Set Winner → Competitor Two",
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
+    async def declare_competitor_two(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await self.set_winner(interaction, 1)
+
+    @discord.ui.button(
+        label="Find Match",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def open_match_modal(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        if self.division_id is None:
+            await interaction.response.send_message(
+                "Select a division before searching for matches.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(MatchPickerModal(self))
+
+    @discord.ui.button(
+        label="Replace Competitor One",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def replace_competitor_one(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        if self.match_id is None:
+            await interaction.response.send_message(
+                "Select a match before replacing a competitor.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            ReplaceCompetitorModal(self, slot_index=0)
+        )
+
+    @discord.ui.button(
+        label="Replace Competitor Two",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def replace_competitor_two(  # type: ignore[override]
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        if self.match_id is None:
+            await interaction.response.send_message(
+                "Select a match before replacing a competitor.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            ReplaceCompetitorModal(self, slot_index=1)
+        )
+
+
 class DivisionPresetSelect(discord.ui.Select):
     PRESET_OPTIONS = [
         discord.SelectOption(label="TH12 1v1", value="th12-1v1"),
@@ -1368,6 +2033,45 @@ def describe_round(bracket: BracketState, match: BracketMatch) -> str:
     if 0 <= match.round_index < len(bracket.rounds):
         return bracket.rounds[match.round_index].name
     return f"Round {match.round_index + 1}"
+
+
+def propagate_match_result(bracket: BracketState, match: BracketMatch) -> None:
+    winner_slot = match.winner_slot()
+    for downstream in bracket.all_matches():
+        for candidate in (downstream.competitor_one, downstream.competitor_two):
+            if candidate.source_match_id != match.match_id:
+                continue
+            if winner_slot is None:
+                candidate.seed = None
+                candidate.team_id = None
+                candidate.team_label = f"Winner {match.match_id}"
+            else:
+                candidate.seed = winner_slot.seed
+                candidate.team_id = winner_slot.team_id
+                candidate.team_label = winner_slot.team_label
+
+
+def assign_match_winner(
+    bracket: BracketState, match: BracketMatch, winner_index: int
+) -> None:
+    match.winner_index = winner_index
+    propagate_match_result(bracket, match)
+
+
+def replace_match_competitor(
+    bracket: BracketState,
+    match: BracketMatch,
+    *,
+    slot_index: int,
+    registration: TeamRegistration,
+    set_as_winner: bool = False,
+) -> None:
+    slot = match.competitor_one if slot_index == 0 else match.competitor_two
+    slot.team_id = registration.user_id
+    slot.team_label = team_display_name(registration)
+    if set_as_winner:
+        match.winner_index = slot_index
+    propagate_match_result(bracket, match)
 
 
 OpponentStatus = Literal[
@@ -2565,6 +3269,59 @@ async def assign_role_command(  # pragma: no cover - Discord slash command wirin
         lines.extend(unique_notes)
 
     await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+@app_commands.describe(
+    division="Optional tournament division identifier to pre-select",
+)
+@require_admin_or_tournament_role()
+@tournament_command(
+    name="adjust-bracket",
+    description="Interactively adjust match winners or competitors in the bracket",
+)
+async def adjust_bracket_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    division: str | None = None,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    initial_division: str | None = None
+    if division is not None:
+        try:
+            initial_division = normalize_division_value(division)
+        except InvalidValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+    view = BracketAdjustView(
+        guild.id,
+        interaction.user.id,
+        initial_division=initial_division,
+    )
+
+    if view.division_id is None:
+        await interaction.response.send_message(
+            "No tournament divisions are configured. Use /setup to add one first.",
+            ephemeral=True,
+        )
+        return
+
+    embed = view.build_embed()
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    try:
+        view.message = await interaction.original_response()
+    except discord.HTTPException:  # pragma: no cover - defensive
+        view.message = None
 
 
 @app_commands.describe(
@@ -4251,6 +5008,13 @@ async def _team_name_division_autocomplete(
 
 @assign_role_command.autocomplete("division")
 async def _assign_role_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
+@adjust_bracket_command.autocomplete("division")
+async def _adjust_bracket_division_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     return await division_autocomplete(interaction, current)

@@ -75,6 +75,7 @@ class FakeGuild:
         self.id = guild_id
         self.roles: dict[int, object] = {}
         self.members: dict[int, FakeUser] = {}
+        self.bracket = None
 
     def get_member(self, user_id: int):  # pragma: no cover - simple helper
         return self.members.get(user_id)
@@ -690,3 +691,89 @@ async def test_assign_role_handles_missing_registrations(monkeypatch):
     messages = interaction.response.messages
     assert messages
     assert "no registrations" in str(messages[0]["content"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_adjust_bracket_command_swaps_captains(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=1, division_id="th17-1v1")
+    storage = InMemoryStorage(series, {"th17-1v1": config})
+    bracket = _make_bracket_with_match(now)
+    bracket.division_id = "th17-1v1"
+    bracket.rounds[0].matches[0].match_id = "R1M1"
+    bracket.rounds[0].matches[0].round_index = 0
+    bracket.rounds[0].matches[0].competitor_one.team_id = 1
+    bracket.rounds[0].matches[0].competitor_two.team_id = 2
+    bracket.rounds[0].matches[0].winner_index = 0
+    bracket.rounds[0].matches[0].competitor_one.team_label = "One"
+    bracket.rounds[0].matches[0].competitor_two.team_label = "Two"
+    bracket.rounds[0].matches[0].competitor_one.seed = 1
+    bracket.rounds[0].matches[0].competitor_two.seed = 2
+    bracket.rounds.append(
+        BracketRound(
+            name="Final",
+            matches=[
+                BracketMatch(
+                    match_id="R2M1",
+                    round_index=1,
+                    competitor_one=BracketSlot(
+                        seed=1,
+                        team_id=1,
+                        team_label="One",
+                        source_match_id="R1M1",
+                    ),
+                    competitor_two=BracketSlot(
+                        seed=2,
+                        team_id=None,
+                        team_label="Winner R1M2",
+                        source_match_id="R1M2",
+                    ),
+                )
+            ],
+        )
+    )
+
+    storage.save_bracket(bracket)
+
+    reg_one = TeamRegistration(
+        guild_id=1,
+        division_id="th17-1v1",
+        user_id=1,
+        user_name="One",
+        players=make_players(1),
+        registered_at=now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+    )
+    reg_two = TeamRegistration(
+        guild_id=1,
+        division_id="th17-1v1",
+        user_id=2,
+        user_name="Two",
+        players=make_players(1),
+        registered_at=now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+    )
+    storage.save_registration(reg_one)
+    storage.save_registration(reg_two)
+
+    match = bracket.find_match("R1M1")
+    assert match is not None
+
+    tournamentbot.replace_match_competitor(
+        bracket,
+        match,
+        slot_index=1,
+        registration=reg_two,
+        set_as_winner=True,
+    )
+    storage.save_bracket(bracket)
+
+    updated = storage.get_bracket(1, "th17-1v1")
+    assert updated is not None
+    match = updated.find_match("R1M1")
+    assert match is not None
+    assert match.winner_index == 1
+    assert match.competitor_one.team_id == 1
+    assert match.competitor_two.team_id == 2
+    next_round = updated.find_match("R2M1")
+    assert next_round is not None
+    assert next_round.competitor_one.team_id == 2
