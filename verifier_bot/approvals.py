@@ -9,6 +9,7 @@ import discord
 
 PENDING_REMOVAL_PREFIX: Final[str] = "PENDING_REMOVAL_"
 DENIED_REMOVAL_PREFIX: Final[str] = "REMOVAL_DENIED_"
+REMOVAL_REQUEST_PREFIX: Final[str] = "REMOVAL_REQUEST_"
 
 
 log: Final = logging.getLogger("coc-gateway")
@@ -118,6 +119,7 @@ class MemberRemovalViewBase(discord.ui.View):
                 ephemeral=True,
             )
             await self.remove_pending_removal()
+            await clear_removal_request_record(self._get_table(), self.discord_id)
             for item in self.children:
                 item.disabled = True
             if hasattr(interaction.message, "edit") and interaction.message:
@@ -148,6 +150,7 @@ class MemberRemovalViewBase(discord.ui.View):
 
         kicked = False
         record_deleted = False
+        role_removed = False
 
         try:
             await member.kick(
@@ -164,6 +167,11 @@ class MemberRemovalViewBase(discord.ui.View):
             log.warning("Forbidden when trying to kick %s", member)
         except discord.HTTPException as exc:  # pylint: disable=broad-except
             log.exception("Failed to kick %s: %s", member, exc)
+
+        role_removed = await self._remove_verified_role(
+            member,
+            reason=f"Removal approved by {interaction.user}",
+        )
 
         table = self._get_table()
         if table is not None:
@@ -183,9 +191,13 @@ class MemberRemovalViewBase(discord.ui.View):
                 )
 
         await self.remove_pending_removal()
+        await clear_removal_request_record(table, self.discord_id)
 
         result_parts: list[str] = []
         result_parts.append("✅ Member kicked" if kicked else "⚠️ Could not kick member")
+        result_parts.append(
+            "✅ Role removed" if role_removed else "⚠️ Could not remove role"
+        )
         result_parts.append(
             "✅ Record deleted" if record_deleted else "⚠️ Could not delete record"
         )
@@ -216,7 +228,83 @@ class MemberRemovalViewBase(discord.ui.View):
             except discord.Forbidden:
                 log.warning("No permission to edit approval message")
             except Exception as exc:  # pylint: disable=broad-except
-                log.exception("Failed to update message after approval: %s", exc)
+                log.exception("Failed to update approval message: %s", exc)
+
+    @discord.ui.button(
+        label="Remove Role",
+        style=discord.ButtonStyle.primary,
+        emoji="🛡️",
+    )
+    async def remove_role(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send("Error: Guild not found.", ephemeral=True)
+            return
+
+        member = guild.get_member(int(self.discord_id))
+        if member is None:
+            await interaction.followup.send(
+                f"❌ Member {self.discord_id} not found in server. They may have already left.",
+                ephemeral=True,
+            )
+            await self.remove_pending_removal()
+            await clear_removal_request_record(self._get_table(), self.discord_id)
+            self._disable_all_items()
+            await self._update_message_with_result(
+                interaction,
+                embed_color=discord.Color.red(),
+                result_text=f"❌ Member not found (role removal by {interaction.user.mention})",
+            )
+            return
+
+        role_removed = await self._remove_verified_role(
+            member,
+            reason=f"Verified role removed by {interaction.user}",
+        )
+
+        record_deleted = False
+        table = self._get_table()
+        if table is not None:
+            try:
+                table.delete_item(Key={"discord_id": self.discord_id})
+                record_deleted = True
+                log.info(
+                    "Deleted verification record for %s via role removal by %s",
+                    self.discord_id,
+                    interaction.user,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception(
+                    "Failed to delete verification record for %s during role removal: %s",
+                    self.discord_id,
+                    exc,
+                )
+
+        await self.remove_pending_removal()
+        await clear_removal_request_record(table, self.discord_id)
+
+        self._disable_all_items()
+
+        status_parts = [
+            "✅ Role removed" if role_removed else "⚠️ Could not remove role",
+            "✅ Record deleted" if record_deleted else "⚠️ Could not delete record",
+        ]
+        status_text = " | ".join(status_parts)
+
+        await interaction.followup.send(
+            f"**Removed verified role for {member.mention}**\n{status_text}",
+            ephemeral=True,
+        )
+
+        await self._update_message_with_result(
+            interaction,
+            embed_color=discord.Color.blurple(),
+            result_text=f"🛡️ Role removed by {interaction.user.mention}\n{status_text}",
+        )
 
     @discord.ui.button(
         label="Deny Removal", style=discord.ButtonStyle.secondary, emoji="❌"
@@ -227,6 +315,7 @@ class MemberRemovalViewBase(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         await self.remove_pending_removal()
+        await clear_removal_request_record(self._get_table(), self.discord_id)
         await record_denied_removal(
             self._get_table(),
             removal_id=self.removal_id,
@@ -297,6 +386,80 @@ class MemberRemovalViewBase(discord.ui.View):
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to update timestamp field to static format: %s", exc)
 
+    async def _update_message_with_result(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed_color: discord.Color,
+        result_text: str,
+    ) -> None:
+        if hasattr(interaction.message, "edit") and interaction.message:
+            try:
+                embed = self._get_or_create_embed(interaction.message)
+                if embed:
+                    embed.color = embed_color
+                    self._update_timestamp_field_to_static(embed)
+                    embed.add_field(
+                        name="Result",
+                        value=result_text,
+                        inline=False,
+                    )
+                    await interaction.message.edit(embed=embed, view=self)
+                else:
+                    log.warning("Could not create or retrieve embed for message update")
+            except discord.NotFound:
+                log.warning("Message not found when trying to update approval result")
+            except discord.Forbidden:
+                log.warning("No permission to edit approval message")
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception("Failed to update message after approval: %s", exc)
+
+    def _disable_all_items(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+    async def _remove_verified_role(
+        self, member: discord.Member, *, reason: str
+    ) -> bool:
+        try:
+            from bot import VERIFIED_ROLE_ID
+        except Exception as exc:  # pylint: disable=broad-except
+            log.exception("Failed to import VERIFIED_ROLE_ID: %s", exc)
+            return False
+
+        if VERIFIED_ROLE_ID is None:
+            return False
+
+        role = member.guild.get_role(VERIFIED_ROLE_ID)
+        if role is None:
+            log.warning(
+                "Verified role %s not found in guild %s", VERIFIED_ROLE_ID, member.guild
+            )
+            return False
+        if role not in member.roles:
+            log.debug(
+                "Member %s (%s) no longer has verified role %s",
+                member,
+                self.discord_id,
+                VERIFIED_ROLE_ID,
+            )
+            return True
+
+        try:
+            await member.remove_roles(role, reason=reason)
+            log.info(
+                "Removed verified role %s from %s (%s)",
+                VERIFIED_ROLE_ID,
+                member,
+                self.discord_id,
+            )
+            return True
+        except discord.Forbidden:
+            log.warning("Forbidden when trying to remove verified role from %s", member)
+        except discord.HTTPException as exc:  # pylint: disable=broad-except
+            log.exception("Failed to remove verified role from %s: %s", member, exc)
+        return False
+
     async def on_timeout(self) -> None:
         await self.remove_pending_removal()
         log.info("Removal request %s timed out", self.removal_id)
@@ -319,10 +482,18 @@ async def send_removal_approval_request(
         )
         return
 
+    target_discord_id = str(member.id)
+    if await has_recent_removal_request(table, target_discord_id):
+        log.info(
+            "Skipping removal approval request for %s - already notified within 24h",
+            member,
+        )
+        return
+
     removal_id = uuid.uuid4().hex[:8]
     # use a callable to fetch the latest table to support dynamic patching
     view = MemberRemovalViewBase(
-        (lambda: table), removal_id, str(member.id), player_tag, player_name, reason
+        (lambda: table), removal_id, target_discord_id, player_tag, player_name, reason
     )
 
     await view.store_pending_removal()
@@ -353,6 +524,9 @@ async def send_removal_approval_request(
     try:
         message = await log_chan.send(embed=embed, view=view)
         await view.record_message_details(message)
+        await record_removal_request(
+            table, target_discord_id=target_discord_id, removal_id=removal_id
+        )
         log.info(
             "Sent removal approval request for %s (%s) - ID: %s",
             member,
@@ -360,8 +534,10 @@ async def send_removal_approval_request(
             removal_id,
         )
     except discord.Forbidden:
+        await view.remove_pending_removal()
         log.warning("No send permission in log channel %s", log_chan.id)
     except discord.HTTPException as exc:  # pylint: disable=broad-except
+        await view.remove_pending_removal()
         log.exception("Failed to send removal approval request: %s", exc)
 
 
@@ -459,6 +635,7 @@ async def clear_pending_removals_for_target(
                 removed,
                 target_discord_id,
             )
+        await clear_removal_request_record(table, target_discord_id)
         return removed
 
     except Exception as exc:  # pylint: disable=broad-except
@@ -466,6 +643,83 @@ async def clear_pending_removals_for_target(
             "Failed to clear pending removals for %s: %s", target_discord_id, exc
         )
         return 0
+
+
+async def record_removal_request(
+    table,
+    *,
+    target_discord_id: str,
+    removal_id: str,
+) -> None:
+    if table is None:
+        return
+
+    try:
+        table.put_item(
+            Item={
+                "discord_id": f"{REMOVAL_REQUEST_PREFIX}{target_discord_id}",
+                "target_discord_id": target_discord_id,
+                "removal_id": removal_id,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "status": "NOTIFIED",
+            }
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception(
+            "Failed to record removal notification for %s: %s",
+            target_discord_id,
+            exc,
+        )
+
+
+async def clear_removal_request_record(table, target_discord_id: str) -> None:
+    if table is None:
+        return
+
+    key = {"discord_id": f"{REMOVAL_REQUEST_PREFIX}{target_discord_id}"}
+
+    try:
+        table.delete_item(Key=key)
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception(
+            "Failed to clear removal notification for %s: %s",
+            target_discord_id,
+            exc,
+        )
+
+
+async def has_recent_removal_request(table, target_discord_id: str) -> bool:
+    if table is None:
+        return False
+
+    key = {"discord_id": f"{REMOVAL_REQUEST_PREFIX}{target_discord_id}"}
+
+    try:
+        response = table.get_item(Key=key)
+        item = response.get("Item")
+        if not item:
+            return False
+
+        timestamp = _parse_timestamp(item.get("timestamp"))
+        if timestamp is None:
+            table.delete_item(Key=key)
+            return False
+
+        from bot import APPROVAL_TIMEOUT_SECONDS
+
+        age_seconds = (datetime.now(UTC) - timestamp).total_seconds()
+        if age_seconds < APPROVAL_TIMEOUT_SECONDS:
+            return True
+
+        table.delete_item(Key=key)
+        return False
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception(
+            "Failed to check removal notification for %s: %s",
+            target_discord_id,
+            exc,
+        )
+        return False
 
 
 def _parse_timestamp(timestamp_str: str | None) -> datetime | None:

@@ -154,6 +154,11 @@ class MemberRemovalView(approvals.MemberRemovalViewBase):
     ):
         return await super().approve_removal(interaction, button)
 
+    async def remove_role(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        return await super().remove_role(interaction, button)
+
     async def deny_removal(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):

@@ -3,7 +3,7 @@
 import asyncio
 import os
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, PropertyMock, call, patch
 
 import coc
 import discord
@@ -1053,8 +1053,13 @@ class TestMemberRemovalView:
         mock_interaction.guild = mock_guild
         mock_interaction.user = mock_user
         mock_guild.get_member.return_value = mock_member
+        mock_member.guild = mock_guild
         mock_member.mention = "@testuser"
         mock_member.kick = AsyncMock()
+        mock_member.remove_roles = AsyncMock()
+        mock_role = MagicMock()
+        mock_guild.get_role.return_value = mock_role
+        mock_member.roles = [mock_role]
 
         # Mock message editing
         mock_embed = MagicMock()
@@ -1081,11 +1086,16 @@ class TestMemberRemovalView:
 
             # Verify member was kicked
             mock_member.kick.assert_called_once()
+            mock_member.remove_roles.assert_awaited_once()
 
             # Verify database operations
-            mock_table.delete_item.assert_any_call(Key={"discord_id": "987654321"})
-            mock_table.delete_item.assert_any_call(
-                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            mock_table.delete_item.assert_has_calls(
+                [
+                    call(Key={"discord_id": "987654321"}),
+                    call(Key={"discord_id": "PENDING_REMOVAL_removal123"}),
+                    call(Key={"discord_id": "REMOVAL_REQUEST_987654321"}),
+                ],
+                any_order=True,
             )
 
             # Verify interaction response
@@ -1128,8 +1138,12 @@ class TestMemberRemovalView:
             await approve_func(view, mock_interaction, mock_button)
 
             # Verify pending removal was cleaned up
-            mock_table.delete_item.assert_called_once_with(
-                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            mock_table.delete_item.assert_has_calls(
+                [
+                    call(Key={"discord_id": "PENDING_REMOVAL_removal123"}),
+                    call(Key={"discord_id": "REMOVAL_REQUEST_987654321"}),
+                ],
+                any_order=True,
             )
 
             # Verify appropriate response was sent
@@ -1171,10 +1185,15 @@ class TestMemberRemovalView:
         mock_interaction.guild = mock_guild
         mock_interaction.user = mock_user
         mock_guild.get_member.return_value = mock_member
+        mock_member.guild = mock_guild
         mock_member.mention = "@testuser"
         mock_member.kick = AsyncMock(
             side_effect=discord.Forbidden(MagicMock(), "Forbidden")
         )
+        mock_member.remove_roles = AsyncMock()
+        mock_role = MagicMock()
+        mock_guild.get_role.return_value = mock_role
+        mock_member.roles = [mock_role]
 
         # Mock message editing
         mock_embed = MagicMock()
@@ -1197,14 +1216,121 @@ class TestMemberRemovalView:
 
             # Verify kick was attempted but failed
             mock_member.kick.assert_called_once()
+            mock_member.remove_roles.assert_awaited_once()
 
             # Verify database record was still deleted
-            mock_table.delete_item.assert_any_call(Key={"discord_id": "987654321"})
+            mock_table.delete_item.assert_has_calls(
+                [
+                    call(Key={"discord_id": "987654321"}),
+                    call(Key={"discord_id": "PENDING_REMOVAL_removal123"}),
+                    call(Key={"discord_id": "REMOVAL_REQUEST_987654321"}),
+                ],
+                any_order=True,
+            )
 
             # Verify response mentions kick failure
             mock_interaction.followup.send.assert_called_once()
             call_args = mock_interaction.followup.send.call_args[0][0]
             assert "⚠️ Could not kick member" in call_args
+
+    @pytest.mark.asyncio
+    async def test_remove_role_success(self):
+        """Test removing the verified role without kicking the member."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_user = MagicMock()
+        mock_user.mention = "@admin"
+
+        mock_interaction.guild = mock_guild
+        mock_interaction.user = mock_user
+        mock_guild.get_member.return_value = mock_member
+        mock_member.guild = mock_guild
+        mock_member.mention = "@testuser"
+        mock_member.kick = AsyncMock()
+        mock_member.remove_roles = AsyncMock()
+        mock_role = MagicMock()
+        mock_guild.get_role.return_value = mock_role
+        mock_member.roles = [mock_role]
+
+        mock_embed = MagicMock()
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            from bot import MemberRemovalView
+
+            remove_role_func = MemberRemovalView.__dict__["remove_role"]
+            await remove_role_func(view, mock_interaction, mock_button)
+
+            mock_member.kick.assert_not_called()
+            mock_member.remove_roles.assert_awaited_once()
+
+            mock_table.delete_item.assert_has_calls(
+                [
+                    call(Key={"discord_id": "987654321"}),
+                    call(Key={"discord_id": "PENDING_REMOVAL_removal123"}),
+                    call(Key={"discord_id": "REMOVAL_REQUEST_987654321"}),
+                ],
+                any_order=True,
+            )
+
+            mock_interaction.followup.send.assert_called_once()
+            followup_message = mock_interaction.followup.send.call_args[0][0]
+            assert "Removed verified role" in followup_message
+
+            mock_embed.add_field.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_remove_role_member_not_found(self):
+        """Test removing role when member is missing from the guild."""
+        mock_table = MagicMock()
+        mock_interaction = AsyncMock()
+        mock_guild = MagicMock()
+        mock_user = MagicMock()
+        mock_user.mention = "@admin"
+
+        mock_interaction.guild = mock_guild
+        mock_interaction.user = mock_user
+        mock_guild.get_member.return_value = None
+
+        mock_embed = MagicMock()
+        mock_message = MagicMock()
+        mock_message.embeds = [mock_embed]
+        mock_message.edit = AsyncMock()
+        mock_interaction.message = mock_message
+
+        view = bot.MemberRemovalView(
+            "removal123", "987654321", "#PLAYER123", "TestPlayer", "Left clan"
+        )
+
+        mock_button = MagicMock()
+
+        with patch.object(bot, "table", mock_table):
+            from bot import MemberRemovalView
+
+            remove_role_func = MemberRemovalView.__dict__["remove_role"]
+            await remove_role_func(view, mock_interaction, mock_button)
+
+            mock_table.delete_item.assert_has_calls(
+                [
+                    call(Key={"discord_id": "PENDING_REMOVAL_removal123"}),
+                    call(Key={"discord_id": "REMOVAL_REQUEST_987654321"}),
+                ],
+                any_order=True,
+            )
+            mock_interaction.followup.send.assert_called_once()
+            followup = mock_interaction.followup.send.call_args[0][0]
+            assert "Member 987654321 not found" in followup
 
     @pytest.mark.asyncio
     async def test_deny_removal_success(self):
@@ -1236,8 +1362,12 @@ class TestMemberRemovalView:
             await deny_func(view, mock_interaction, mock_button)
 
             # Verify pending removal was removed
-            mock_table.delete_item.assert_called_once_with(
-                Key={"discord_id": "PENDING_REMOVAL_removal123"}
+            mock_table.delete_item.assert_has_calls(
+                [
+                    call(Key={"discord_id": "PENDING_REMOVAL_removal123"}),
+                    call(Key={"discord_id": "REMOVAL_REQUEST_987654321"}),
+                ],
+                any_order=True,
             )
 
             # Verify denial marker stored
@@ -1289,6 +1419,7 @@ class TestSendRemovalApprovalRequest:
         mock_message.guild.id = 54321
         mock_log_channel.send.return_value = mock_message
         mock_table = MagicMock()
+        mock_table.get_item.return_value = {}
 
         with (
             patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
@@ -1316,7 +1447,17 @@ class TestSendRemovalApprovalRequest:
             assert "TestUser" in embed.description
             assert "@TestUser" in embed.description
 
-            mock_table.put_item.assert_called_once()
+            assert mock_table.get_item.call_count == 1
+            expected_key = {
+                "discord_id": "REMOVAL_REQUEST_123456789",
+            }
+            mock_table.get_item.assert_called_once_with(Key=expected_key)
+
+            assert mock_table.put_item.call_count == 2
+            pending_item = mock_table.put_item.call_args_list[0].kwargs["Item"]
+            notification_item = mock_table.put_item.call_args_list[1].kwargs["Item"]
+            assert pending_item["discord_id"] == "PENDING_REMOVAL_abcdef12"
+            assert notification_item["discord_id"] == "REMOVAL_REQUEST_123456789"
             mock_table.update_item.assert_called_once()
             update_kwargs = mock_table.update_item.call_args.kwargs
             assert update_kwargs["Key"] == {"discord_id": "PENDING_REMOVAL_abcdef12"}
@@ -1324,6 +1465,32 @@ class TestSendRemovalApprovalRequest:
             assert update_kwargs["ExpressionAttributeValues"][":chan_id"] == str(
                 mock_message.channel.id
             )
+
+    @pytest.mark.asyncio
+    async def test_send_removal_approval_request_skips_recent_notification(self):
+        """Ensure removal notifications are throttled to once per 24 hours."""
+        from datetime import UTC, datetime
+
+        mock_guild = MagicMock()
+        mock_member = MagicMock()
+        mock_member.id = 123456789
+        mock_log_channel = AsyncMock()
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {"timestamp": datetime.now(UTC).isoformat()}
+        }
+
+        with (
+            patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
+            patch.object(bot, "table", mock_table),
+        ):
+            await bot.send_removal_approval_request(
+                mock_guild, mock_member, "#PLAYER123", "TestPlayer", "Left clan"
+            )
+
+            mock_log_channel.send.assert_not_called()
+            mock_table.put_item.assert_not_called()
+            mock_table.update_item.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_removal_approval_request_no_log_channel(self):
@@ -1354,6 +1521,7 @@ class TestSendRemovalApprovalRequest:
         mock_log_channel.send.side_effect = discord.Forbidden(MagicMock(), "Forbidden")
         mock_log_channel.id = 67890
         mock_table = MagicMock()
+        mock_table.get_item.return_value = {}
 
         with (
             patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
@@ -1368,6 +1536,9 @@ class TestSendRemovalApprovalRequest:
 
             # Should handle the exception gracefully
             mock_log_channel.send.assert_called_once()
+            mock_table.delete_item.assert_called_with(
+                Key={"discord_id": "PENDING_REMOVAL_abcdef12"}
+            )
 
     @pytest.mark.asyncio
     async def test_send_removal_approval_request_http_exception(self):
@@ -1382,6 +1553,7 @@ class TestSendRemovalApprovalRequest:
             MagicMock(), "HTTP Error"
         )
         mock_table = MagicMock()
+        mock_table.get_item.return_value = {}
 
         with (
             patch.object(bot, "resolve_log_channel", return_value=mock_log_channel),
@@ -1396,6 +1568,9 @@ class TestSendRemovalApprovalRequest:
 
             # Should handle the exception gracefully
             mock_log_channel.send.assert_called_once()
+            mock_table.delete_item.assert_called_with(
+                Key={"discord_id": "PENDING_REMOVAL_abcdef12"}
+            )
 
 
 class TestCleanupExpiredPendingRemovals:
@@ -2216,6 +2391,9 @@ class TestPendingRemovalCleanup:
         )
         mock_table.delete_item.assert_any_call(
             Key={"discord_id": "PENDING_REMOVAL_456"}
+        )
+        mock_table.delete_item.assert_any_call(
+            Key={"discord_id": "REMOVAL_REQUEST_123456789"}
         )
         assert on_remove.await_count == 2
 
