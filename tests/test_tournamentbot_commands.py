@@ -1010,6 +1010,9 @@ async def test_whoisplayer_displays_roster_across_divisions(monkeypatch):
     assert "Substitute: Bench — #SUB1" in content
     assert "TH16 (th16) — Winner (champion)" in content
     assert "BetaOne — #BETA1" in content
+    assert "Schedule:" in content
+    assert "Final [R1M1] vs Bravo Squad — Completed — Loss" in content
+    assert "Final [R1M1] vs Gamma Squad — Completed — Win" in content
 
 
 @pytest.mark.asyncio

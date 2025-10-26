@@ -2656,6 +2656,69 @@ def bracket_champion_name(bracket: BracketState) -> str | None:
     return None
 
 
+def build_match_schedule(
+    bracket: BracketState | None,
+    registration: TeamRegistration,
+    registrations: Sequence[TeamRegistration],
+) -> list[str]:
+    if bracket is None:
+        return ["No bracket available yet"]
+
+    schedule_lines: list[str] = []
+    registration_lookup = {entry.user_id: entry for entry in registrations}
+
+    for round_ in bracket.rounds:
+        for match in round_.matches:
+            slots = (match.competitor_one, match.competitor_two)
+            participant_index: int | None = None
+            for idx, slot in enumerate(slots):
+                if slot.team_id == registration.user_id:
+                    participant_index = idx
+                    break
+            if participant_index is None:
+                continue
+
+            opponent_slot = slots[1 - participant_index]
+            opponent_label = opponent_slot.display()
+            opponent_team_id = opponent_slot.team_id
+            if opponent_team_id is not None:
+                opponent_registration = registration_lookup.get(opponent_team_id)
+                if opponent_registration is not None:
+                    opponent_label = team_display_name(opponent_registration)
+
+            if opponent_team_id is None:
+                opponent_label = "TBD"
+
+            if match.winner_index is None:
+                if opponent_team_id is None:
+                    status = "Upcoming (awaiting opponent)"
+                else:
+                    status = "Upcoming"
+            elif match.winner_index == participant_index:
+                status = "Completed — Win"
+            else:
+                status = "Completed — Loss"
+
+            window_note: str | None = None
+            if round_.window_opens_at and round_.window_closes_at:
+                window_note = (
+                    f"Window: {round_.window_opens_at} – {round_.window_closes_at}"
+                )
+            elif round_.window_opens_at:
+                window_note = f"Opens: {round_.window_opens_at}"
+            elif round_.window_closes_at:
+                window_note = f"Closes: {round_.window_closes_at}"
+
+            base = f"{round_.name} [{match.match_id}] vs {opponent_label} — {status}"
+            if window_note:
+                base = f"{base} ({window_note})"
+            schedule_lines.append(base)
+
+    if not schedule_lines:
+        return ["No matches recorded yet"]
+    return schedule_lines
+
+
 BRACKET_EMBED_FIRST_CHUNK_LIMIT: Final[int] = 3200
 BRACKET_EMBED_CONTINUATION_LIMIT: Final[int] = 3900
 
@@ -3939,7 +4002,7 @@ async def whoisplayer_command(  # pragma: no cover - Discord slash command wirin
     division_ids = set(division_lookup.keys())
     division_ids.update(storage.list_division_ids(guild.id))
 
-    records: list[tuple[str, str, TeamRegistration, str]] = []
+    records: list[tuple[str, str, TeamRegistration, str, list[str]]] = []
 
     for division_id in sorted(division_ids):
         registrations = storage.list_registrations(guild.id, division_id)
@@ -3951,6 +4014,11 @@ async def whoisplayer_command(  # pragma: no cover - Discord slash command wirin
             continue
 
         bracket = storage.get_bracket(guild.id, division_id)
+        if bracket is not None:
+            bracket_for_display = bracket.clone()
+            if apply_team_names(bracket_for_display, registrations):
+                storage.save_bracket(bracket_for_display)
+            bracket = bracket_for_display
         active_ids, eliminated_ids = categorize_captains_for_division(
             bracket, registrations
         )
@@ -3969,7 +4037,10 @@ async def whoisplayer_command(  # pragma: no cover - Discord slash command wirin
                 status = "Winner"
             if champion_id is not None and registration.user_id == champion_id:
                 status = "Winner (champion)"
-            records.append((division_name, division_id, registration, status))
+            schedule_lines = build_match_schedule(bracket, registration, registrations)
+            records.append(
+                (division_name, division_id, registration, status, schedule_lines)
+            )
 
     if not records:
         mention = getattr(target, "mention", str(target))
@@ -3985,7 +4056,13 @@ async def whoisplayer_command(  # pragma: no cover - Discord slash command wirin
     header = f"Tournament player records for {mention}:"
     lines: list[str] = [header]
 
-    for division_name, division_id, registration, status in records:
+    for (
+        division_name,
+        division_id,
+        registration,
+        status,
+        schedule_lines,
+    ) in records:
         division_label = f"{division_name} ({division_id})"
         lines.append(f"- {division_label} — {status}")
         if registration.team_name:
@@ -4007,6 +4084,10 @@ async def whoisplayer_command(  # pragma: no cover - Discord slash command wirin
             town_hall = registration.substitute.town_hall
             th_text = f" (TH{town_hall})" if town_hall else ""
             lines.append(f"    Substitute: {sub_name} — {sub_tag}{th_text}")
+
+        lines.append("    Schedule:")
+        for entry in schedule_lines:
+            lines.append(f"      - {entry}")
 
     max_length = 1800
     chunks: list[list[str]] = []
