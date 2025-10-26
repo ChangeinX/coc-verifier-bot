@@ -5125,7 +5125,7 @@ async def broadcast_bracket_command(  # pragma: no cover - Discord slash command
 
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
-    channel="Channel where players post result screenshots",
+    channel_value="Channel where players post result screenshots",
     clear="Remove any configured result channel for the division",
 )
 @tournament_command(
@@ -5136,7 +5136,7 @@ async def broadcast_bracket_command(  # pragma: no cover - Discord slash command
 async def set_result_channels_command(
     interaction: discord.Interaction,
     division: str,
-    channel: discord.TextChannel | None = None,
+    channel_value: str | None = None,
     clear: bool = False,
 ) -> None:
     try:
@@ -5166,16 +5166,37 @@ async def set_result_channels_command(
         )
         return
 
-    if channel is None:
+    if channel_value is None:
         await interaction.response.send_message(
             "Select a channel or set clear=true to remove a mapping.",
             ephemeral=True,
         )
         return
 
-    if channel.guild is not None and channel.guild.id != guild.id:
+    channel_id: int | None = None
+    match = re.search(r"([0-9]{15,25})", channel_value)
+    if match:
+        try:
+            channel_id = int(match.group(1))
+        except ValueError:  # pragma: no cover - defensive
+            channel_id = None
+    if channel_id is None:
         await interaction.response.send_message(
-            "Pick a channel from this server.", ephemeral=True
+            "Provide a valid channel ID or pick from the suggestions.",
+            ephemeral=True,
+        )
+        return
+
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(channel_id)
+        except discord.HTTPException:
+            channel = None
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "Only text channels can be mapped to tournament divisions.",
+            ephemeral=True,
         )
         return
 
@@ -6195,6 +6216,31 @@ async def _set_result_channels_division_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     return await division_autocomplete(interaction, current)
+
+
+@set_result_channels_command.autocomplete("channel_value")
+async def _set_result_channels_channel_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    guild = interaction.guild or (
+        interaction.client.get_guild(TOURNAMENT_GUILD_ID or 0)
+    )
+    if guild is None:
+        return []
+    lowered = current.lower()
+    matches: list[tuple[str, discord.TextChannel]] = []
+    for channel in guild.text_channels:
+        label_parts: list[str] = [channel.name]
+        if channel.category and channel.category.name:
+            label_parts.append(f"({channel.category.name})")
+        label = " ".join(label_parts)
+        if not lowered or lowered in label.lower():
+            matches.append((label, channel))
+    matches.sort(key=lambda item: (item[1].category_id or 0, item[1].position, item[0]))
+    choices: list[app_commands.Choice[str]] = []
+    for label, channel in matches[:25]:
+        choices.append(app_commands.Choice(name=f"#{label}", value=str(channel.id)))
+    return choices
 
 
 @show_registered_command.autocomplete("division")
