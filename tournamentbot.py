@@ -6190,6 +6190,13 @@ async def _register_sub_division_autocomplete(
     return await division_autocomplete(interaction, current)
 
 
+@set_result_channels_command.autocomplete("division")
+async def _set_result_channels_division_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await division_autocomplete(interaction, current)
+
+
 @show_registered_command.autocomplete("division")
 async def _show_registered_division_autocomplete(
     interaction: discord.Interaction, current: str
