@@ -897,8 +897,8 @@ class ReplaceCompetitorModal(discord.ui.Modal):
         self.adjust_view = adjust_view
         self.slot_index = slot_index
         self.captain_input = discord.ui.TextInput(
-            label="Captain Discord ID",
-            placeholder="1208203695028961330",
+            label="Captain or Player",
+            placeholder="Mention, ID, or username",
             max_length=32,
         )
         self.set_winner_input = discord.ui.TextInput(
@@ -907,29 +907,102 @@ class ReplaceCompetitorModal(discord.ui.Modal):
             required=False,
             max_length=5,
         )
+        self.player_tag_input = discord.ui.TextInput(
+            label="Player tag (optional)",
+            placeholder="#ABCD123",
+            required=False,
+            max_length=15,
+        )
         self.add_item(self.captain_input)
         self.add_item(self.set_winner_input)
+        self.add_item(self.player_tag_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        raw_id = self.captain_input.value.strip()
-        try:
-            captain_id = int(raw_id)
-        except (TypeError, ValueError):
+        guild = interaction.guild
+        if guild is None:
             await interaction.response.send_message(
-                "Provide a valid Discord user ID for the captain.",
+                "This action is only available inside a server.",
                 ephemeral=True,
             )
             return
+
+        member_input = self.captain_input.value.strip()
+        if not member_input:
+            await interaction.response.send_message(
+                "Provide a Discord member to place into this match.",
+                ephemeral=True,
+            )
+            return
+
+        mention_match = re.fullmatch(r"<@!?([0-9]+)>", member_input)
+        member_id: int | None = None
+        member: discord.Member | None = None
+        if mention_match:
+            member_id = int(mention_match.group(1))
+        elif member_input.isdigit():
+            member_id = int(member_input)
+
+        if member_id is not None:
+            member = await fetch_guild_member(guild, member_id)
+            if member is None:
+                await interaction.response.send_message(
+                    "Could not locate that member in this server.",
+                    ephemeral=True,
+                )
+                return
+        else:
+            candidate: discord.Member | None = None
+            get_named = getattr(guild, "get_member_named", None)
+            if callable(get_named):
+                candidate = get_named(member_input)
+            if candidate is None:
+                members_attr = getattr(guild, "members", None)
+                if isinstance(members_attr, dict):
+                    iterable = members_attr.values()
+                elif members_attr is not None:
+                    iterable = members_attr
+                else:
+                    iterable = []
+                lowered = member_input.lower()
+                for potential in iterable:
+                    name_options = [
+                        getattr(potential, "display_name", None),
+                        getattr(potential, "name", None),
+                        str(potential),
+                    ]
+                    if any(
+                        isinstance(option, str) and option.lower() == lowered
+                        for option in name_options
+                    ):
+                        candidate = potential
+                        break
+            if candidate is None:
+                await interaction.response.send_message(
+                    f"Could not find a server member matching '{member_input}'.",
+                    ephemeral=True,
+                )
+                return
+            member = candidate
+            member_id = getattr(member, "id", None)
+            if member_id is None:
+                await interaction.response.send_message(
+                    "Unable to determine the selected member's ID.",
+                    ephemeral=True,
+                )
+                return
+
         set_as_winner = self.set_winner_input.value.strip().lower() in {
             "yes",
             "true",
             "y",
             "1",
         }
+        player_tag = self.player_tag_input.value.strip() or None
         await self.adjust_view.replace_competitor(
             interaction,
             slot_index=self.slot_index,
-            captain_id=captain_id,
+            captain=member,
+            player_tag=player_tag,
             set_as_winner=set_as_winner,
         )
 
@@ -1315,7 +1388,8 @@ class BracketAdjustView(discord.ui.View):
         interaction: discord.Interaction,
         *,
         slot_index: int,
-        captain_id: int,
+        captain: discord.Member,
+        player_tag: str | None,
         set_as_winner: bool,
     ) -> None:
         if self.division_id is None or self.match_id is None:
@@ -1324,15 +1398,59 @@ class BracketAdjustView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        registration = storage.get_registration(
-            self.guild_id, self.division_id, captain_id
-        )
-        if registration is None:
+        guild = interaction.guild
+        if guild is None:
             await interaction.response.send_message(
-                "That captain is not registered for the selected division.",
+                "This action is only available inside a server.",
                 ephemeral=True,
             )
             return
+        captain_id = getattr(captain, "id", None)
+        if captain_id is None:
+            await interaction.response.send_message(
+                "Unable to determine the selected member.",
+                ephemeral=True,
+            )
+            return
+        registration = storage.get_registration(
+            self.guild_id, self.division_id, captain_id
+        )
+        tags: list[str] | None = None
+        config: TournamentConfig | None = None
+        if registration is None:
+            if not player_tag:
+                await interaction.response.send_message(
+                    "That captain is not registered for the selected division.",
+                    ephemeral=True,
+                )
+                return
+            try:
+                tags = parse_player_tags(player_tag)
+            except InvalidValueError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
+            if len(tags) != 1:
+                await interaction.response.send_message(
+                    "Provide exactly one player tag for the new competitor.",
+                    ephemeral=True,
+                )
+                return
+            config = storage.get_config(self.guild_id, self.division_id)
+            if config is None:
+                await interaction.response.send_message(
+                    "That division is not configured. Please ask an admin to run /setup.",
+                    ephemeral=True,
+                )
+                return
+            if config.team_size != 1:
+                await interaction.response.send_message(
+                    (
+                        "Quick additions are only supported for 1v1 divisions. "
+                        f"This division requires {config.team_size} registered players."
+                    ),
+                    ephemeral=True,
+                )
+                return
         bracket = storage.get_bracket(self.guild_id, self.division_id)
         if bracket is None:
             await interaction.response.send_message(
@@ -1352,6 +1470,43 @@ class BracketAdjustView(discord.ui.View):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
+        created_registration = False
+        if registration is None:
+            assert tags is not None
+            assert config is not None
+            try:
+                players = await fetch_players(tags)
+            except InvalidValueError as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                log.exception("Unexpected error fetching player data: %s", exc)
+                await interaction.followup.send(
+                    "Failed to validate player tag against the Clash of Clans API.",
+                    ephemeral=True,
+                )
+                return
+            player = players[0]
+            if player.town_hall not in config.allowed_town_halls:
+                await interaction.followup.send(
+                    (
+                        f"{player.name} (TH{player.town_hall}) isn't eligible for "
+                        f"{config.division_name}."
+                    ),
+                    ephemeral=True,
+                )
+                return
+            registration = TeamRegistration(
+                guild_id=guild.id,
+                division_id=self.division_id,
+                user_id=captain_id,
+                user_name=str(captain),
+                players=[player],
+                registered_at=utc_now_iso(),
+                team_name=player.name,
+            )
+            storage.save_registration(registration)
+            created_registration = True
         replace_match_competitor(
             bracket,
             match,
@@ -1364,6 +1519,8 @@ class BracketAdjustView(discord.ui.View):
         action_label = f"Replaced competitor {slot_index + 1} with {slot.display()}"
         if set_as_winner:
             action_label += ", set as winner"
+        if created_registration:
+            action_label += "; added player to division records"
         await self._finalize_action(interaction, action_label + ".")
 
     @discord.ui.button(

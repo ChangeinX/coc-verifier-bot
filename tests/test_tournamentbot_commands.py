@@ -782,3 +782,87 @@ async def test_adjust_bracket_command_swaps_captains(monkeypatch):
     next_round = updated.find_match("R2M1")
     assert next_round is not None
     assert next_round.competitor_one.team_id is None
+
+
+@pytest.mark.asyncio
+async def test_adjust_bracket_adds_unregistered_player(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=1, division_id="th17-1v1")
+    storage = InMemoryStorage(series, {"th17-1v1": config})
+
+    bracket = BracketState(
+        guild_id=1,
+        division_id="th17-1v1",
+        created_at=tournamentbot.isoformat_utc(now),
+        rounds=[
+            BracketRound(
+                name="Round 1",
+                matches=[
+                    BracketMatch(
+                        match_id="R1M1",
+                        round_index=0,
+                        competitor_one=BracketSlot(
+                            seed=1,
+                            team_id=None,
+                            team_label="Winner Q1",
+                        ),
+                        competitor_two=BracketSlot(
+                            seed=2,
+                            team_id=None,
+                            team_label="Winner Q2",
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+    storage.save_bracket(bracket)
+
+    async def fake_fetch_players(tags):
+        assert tags == ["#FRESH15"]
+        return [PlayerEntry(name="Fresh", tag="#FRESH15", town_hall=15)]
+
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+    monkeypatch.setattr(tournamentbot, "fetch_players", fake_fetch_players)
+
+    guild = FakeGuild(1)
+    admin = _make_admin()
+    admin.guild = guild
+    guild.register_member(admin)
+
+    new_member = FakeUser(303, roles=[])
+    new_member.guild = guild
+    guild.register_member(new_member)
+
+    interaction = FakeInteraction(user=admin, guild=guild)
+
+    view = tournamentbot.BracketAdjustView(
+        guild_id=guild.id,
+        requester_id=admin.id,
+        initial_division="th17-1v1",
+    )
+    view.match_id = "R1M1"
+
+    await view.replace_competitor(
+        interaction,
+        slot_index=1,
+        captain=new_member,
+        player_tag="#FRESH15",
+        set_as_winner=False,
+    )
+
+    registration = storage.get_registration(1, "th17-1v1", new_member.id)
+    assert registration is not None
+    assert registration.players[0].tag == "#FRESH15"
+    assert registration.team_name == "Fresh"
+
+    updated_bracket = storage.get_bracket(1, "th17-1v1")
+    assert updated_bracket is not None
+    updated_match = updated_bracket.find_match("R1M1")
+    assert updated_match is not None
+    assert updated_match.competitor_two.team_id == new_member.id
+
+    messages = interaction.followup.sent
+    assert messages
+    assert "added player to division records" in str(messages[-1]["content"]).lower()
