@@ -2640,13 +2640,17 @@ def bracket_summary(bracket: BracketState) -> str:
     return f"Teams: {len(team_ids)} | Rounds: {round_names}"
 
 
-def bracket_champion_name(bracket: BracketState) -> str | None:
-    if not bracket.rounds:
+def final_winner_slot(bracket: BracketState | None) -> BracketSlot | None:
+    if bracket is None or not bracket.rounds:
         return None
     final_round = bracket.rounds[-1]
     if not final_round.matches:
         return None
-    winner_slot = final_round.matches[-1].winner_slot()
+    return final_round.matches[-1].winner_slot()
+
+
+def bracket_champion_name(bracket: BracketState) -> str | None:
+    winner_slot = final_winner_slot(bracket)
     if winner_slot and winner_slot.team_id is not None:
         return winner_slot.display()
     return None
@@ -3890,6 +3894,139 @@ async def show_registered_command(  # pragma: no cover - Discord slash command w
 
     header = f"Registered teams for {config.division_name}:\n"
     first_message = header + "\n".join(chunks[0])
+    await interaction.response.send_message(first_message, ephemeral=True)
+
+    for chunk in chunks[1:]:
+        await interaction.followup.send("\n".join(chunk), ephemeral=True)
+
+
+@app_commands.describe(
+    member="Tournament participant to inspect; defaults to yourself",
+)
+@tournament_command(
+    name="whoisplayer",
+    description=(
+        "Show recorded in-game players for a tournament participant across divisions"
+    ),
+)
+async def whoisplayer_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    member: discord.Member | None = None,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    target = member if member is not None else interaction.user
+    target_id = getattr(target, "id", None)
+    if target_id is None:
+        await send_ephemeral(
+            interaction,
+            "Unable to determine the selected participant.",
+        )
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    configs = storage.list_division_configs(guild.id)
+    division_lookup = {config.division_id: config for config in configs}
+    division_ids = set(division_lookup.keys())
+    division_ids.update(storage.list_division_ids(guild.id))
+
+    records: list[tuple[str, str, TeamRegistration, str]] = []
+
+    for division_id in sorted(division_ids):
+        registrations = storage.list_registrations(guild.id, division_id)
+        if not registrations:
+            continue
+
+        matching = [reg for reg in registrations if reg.user_id == target_id]
+        if not matching:
+            continue
+
+        bracket = storage.get_bracket(guild.id, division_id)
+        active_ids, eliminated_ids = categorize_captains_for_division(
+            bracket, registrations
+        )
+        winner_slot = final_winner_slot(bracket)
+        champion_id = winner_slot.team_id if winner_slot is not None else None
+
+        config = division_lookup.get(division_id)
+        division_name = config.division_name if config else division_id.upper()
+
+        for registration in matching:
+            if registration.user_id in eliminated_ids:
+                status = "Loser (eliminated)"
+            elif registration.user_id in active_ids:
+                status = "Winner (still active)"
+            else:
+                status = "Winner"
+            if champion_id is not None and registration.user_id == champion_id:
+                status = "Winner (champion)"
+            records.append((division_name, division_id, registration, status))
+
+    if not records:
+        mention = getattr(target, "mention", str(target))
+        await send_ephemeral(
+            interaction,
+            f"No tournament records found for {mention}.",
+        )
+        return
+
+    records.sort(key=lambda item: (item[0].lower(), item[1]))
+
+    mention = getattr(target, "mention", str(target))
+    header = f"Tournament player records for {mention}:"
+    lines: list[str] = [header]
+
+    for division_name, division_id, registration, status in records:
+        division_label = f"{division_name} ({division_id})"
+        lines.append(f"- {division_label} — {status}")
+        if registration.team_name:
+            lines.append(f"    Team: {registration.team_name}")
+
+        if registration.players:
+            for player in registration.players:
+                player_name = player.name or "Unknown player"
+                player_tag = player.tag or "No tag on file"
+                town_hall = player.town_hall
+                th_text = f" (TH{town_hall})" if town_hall else ""
+                lines.append(f"    Player: {player_name} — {player_tag}{th_text}")
+        else:
+            lines.append("    Player: No roster on file")
+
+        if registration.substitute is not None:
+            sub_name = registration.substitute.name or "Unknown player"
+            sub_tag = registration.substitute.tag or "No tag on file"
+            town_hall = registration.substitute.town_hall
+            th_text = f" (TH{town_hall})" if town_hall else ""
+            lines.append(f"    Substitute: {sub_name} — {sub_tag}{th_text}")
+
+    max_length = 1800
+    chunks: list[list[str]] = []
+    current_chunk: list[str] = []
+    current_length = 0
+
+    for line in lines:
+        addition = len(line) + (1 if current_chunk else 0)
+        if current_chunk and current_length + addition > max_length:
+            chunks.append(current_chunk)
+            current_chunk = [line]
+            current_length = len(line)
+        else:
+            current_chunk.append(line)
+            current_length += addition
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    first_message = "\n".join(chunks[0])
     await interaction.response.send_message(first_message, ephemeral=True)
 
     for chunk in chunks[1:]:

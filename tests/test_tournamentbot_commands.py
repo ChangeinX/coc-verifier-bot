@@ -866,3 +866,171 @@ async def test_adjust_bracket_adds_unregistered_player(monkeypatch):
     messages = interaction.followup.sent
     assert messages
     assert "added player to division records" in str(messages[-1]["content"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_whoisplayer_displays_roster_across_divisions(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config_th15 = make_config(team_size=2, division_id="th15")
+    config_th16 = make_config(team_size=2, division_id="th16")
+    storage = InMemoryStorage(series, {"th15": config_th15, "th16": config_th16})
+
+    guild = FakeGuild(series.guild_id)
+    target = FakeUser(101, roles=[])
+    target.guild = guild
+    guild.register_member(target)
+
+    opponent_th15 = FakeUser(201, roles=[])
+    opponent_th16 = FakeUser(301, roles=[])
+
+    players_th15 = [
+        PlayerEntry(name="AlphaOne", tag="#ALPHA1", town_hall=15),
+        PlayerEntry(name="AlphaTwo", tag="#ALPHA2", town_hall=16),
+    ]
+    players_th16 = [
+        PlayerEntry(name="BetaOne", tag="#BETA1", town_hall=16),
+    ]
+
+    reg_th15 = TeamRegistration(
+        guild_id=guild.id,
+        division_id="th15",
+        user_id=target.id,
+        user_name="AlphaCaptain",
+        players=players_th15,
+        registered_at=tournamentbot.isoformat_utc(now),
+        team_name="Alpha Squad",
+        substitute=PlayerEntry(name="Bench", tag="#SUB1", town_hall=15),
+    )
+    opp_th15 = TeamRegistration(
+        guild_id=guild.id,
+        division_id="th15",
+        user_id=opponent_th15.id,
+        user_name="Opponent15",
+        players=[PlayerEntry(name="OppOne", tag="#OPP1", town_hall=15)],
+        registered_at=tournamentbot.isoformat_utc(now),
+        team_name="Bravo Squad",
+    )
+    reg_th16 = TeamRegistration(
+        guild_id=guild.id,
+        division_id="th16",
+        user_id=target.id,
+        user_name="BetaCaptain",
+        players=players_th16,
+        registered_at=tournamentbot.isoformat_utc(now),
+        team_name="Beta Squad",
+    )
+    opp_th16 = TeamRegistration(
+        guild_id=guild.id,
+        division_id="th16",
+        user_id=opponent_th16.id,
+        user_name="Opponent16",
+        players=[PlayerEntry(name="OppTwo", tag="#OPP2", town_hall=16)],
+        registered_at=tournamentbot.isoformat_utc(now),
+        team_name="Gamma Squad",
+    )
+
+    storage.save_registration(reg_th15)
+    storage.save_registration(opp_th15)
+    storage.save_registration(reg_th16)
+    storage.save_registration(opp_th16)
+
+    bracket_th15 = BracketState(
+        guild_id=guild.id,
+        division_id="th15",
+        created_at=tournamentbot.isoformat_utc(now),
+        rounds=[
+            BracketRound(
+                name="Final",
+                matches=[
+                    BracketMatch(
+                        match_id="R1M1",
+                        round_index=0,
+                        competitor_one=BracketSlot(
+                            seed=1,
+                            team_id=target.id,
+                            team_label="Alpha Squad",
+                        ),
+                        competitor_two=BracketSlot(
+                            seed=2,
+                            team_id=opponent_th15.id,
+                            team_label="Bravo Squad",
+                        ),
+                        winner_index=1,
+                    )
+                ],
+            )
+        ],
+    )
+
+    bracket_th16 = BracketState(
+        guild_id=guild.id,
+        division_id="th16",
+        created_at=tournamentbot.isoformat_utc(now),
+        rounds=[
+            BracketRound(
+                name="Final",
+                matches=[
+                    BracketMatch(
+                        match_id="R1M1",
+                        round_index=0,
+                        competitor_one=BracketSlot(
+                            seed=1,
+                            team_id=target.id,
+                            team_label="Beta Squad",
+                        ),
+                        competitor_two=BracketSlot(
+                            seed=2,
+                            team_id=opponent_th16.id,
+                            team_label="Gamma Squad",
+                        ),
+                        winner_index=0,
+                    )
+                ],
+            )
+        ],
+    )
+
+    storage.save_bracket(bracket_th15)
+    storage.save_bracket(bracket_th16)
+
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    interaction = FakeInteraction(user=target, guild=guild)
+
+    await tournamentbot.whoisplayer_command.callback(interaction, None)
+
+    assert interaction.response.messages
+    payload = interaction.response.messages[0]
+    assert payload["ephemeral"] is True
+    content = str(payload["content"])
+    assert "Tournament player records for" in content
+    assert "TH15 (th15) — Loser (eliminated)" in content
+    assert "AlphaOne — #ALPHA1" in content
+    assert "Substitute: Bench — #SUB1" in content
+    assert "TH16 (th16) — Winner (champion)" in content
+    assert "BetaOne — #BETA1" in content
+
+
+@pytest.mark.asyncio
+async def test_whoisplayer_handles_missing_participant(monkeypatch):
+    now = datetime.now(UTC)
+    series = make_series(now)
+    config = make_config(team_size=2, division_id="th15")
+    storage = InMemoryStorage(series, {"th15": config})
+
+    guild = FakeGuild(series.guild_id)
+    target = FakeUser(404, roles=[])
+    target.guild = guild
+    guild.register_member(target)
+
+    monkeypatch.setattr(tournamentbot, "storage", storage)
+
+    interaction = FakeInteraction(user=target, guild=guild)
+
+    await tournamentbot.whoisplayer_command.callback(interaction, None)
+
+    assert interaction.response.messages
+    payload = interaction.response.messages[0]
+    assert payload["ephemeral"] is True
+    assert "No tournament records found" in str(payload["content"])
