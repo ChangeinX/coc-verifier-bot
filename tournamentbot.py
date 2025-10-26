@@ -19,11 +19,13 @@ from discord import app_commands
 from discord.abc import Messageable
 from discord.app_commands import errors as app_errors
 
+from match_automation import MatchAutomationResult, MatchAutomationService
 from tournament_bot import (
     BracketMatch,
     BracketRound,
     BracketSlot,
     BracketState,
+    DivisionResultChannel,
     InvalidTownHallError,
     InvalidValueError,
     PlayerEntry,
@@ -200,6 +202,14 @@ table = dynamodb.Table(TOURNAMENT_TABLE_NAME) if TOURNAMENT_TABLE_NAME else None
 storage = TournamentStorage(table)
 
 coc_client: coc.Client | None = None
+automation_service = MatchAutomationService()
+
+RESULT_DIVISION_BY_CHANNEL: dict[int, str] = {}
+RESULT_CHANNEL_BY_DIVISION: dict[str, int] = {}
+RESULT_CHANNEL_LOCK = asyncio.Lock()
+
+AUTO_ACCEPT_CONFIDENCE = 0.8
+REVIEW_MIN_CONFIDENCE = 0.6
 
 
 def isoformat_utc(dt: datetime) -> str:
@@ -223,6 +233,396 @@ ROUND_WINDOW_ENTRY_SPLIT = re.compile(r"[;\n]+")
 
 def _normalize_round_identifier(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.strip().lower())
+
+
+async def refresh_result_channel_cache(guild_id: int) -> None:
+    try:
+        mappings = storage.list_result_channels(guild_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("Failed to load result channel mappings: %s", exc)
+        return
+    async with RESULT_CHANNEL_LOCK:
+        RESULT_DIVISION_BY_CHANNEL.clear()
+        RESULT_CHANNEL_BY_DIVISION.clear()
+        for mapping in mappings:
+            if mapping.channel_id:
+                RESULT_DIVISION_BY_CHANNEL[mapping.channel_id] = mapping.division_id
+                RESULT_CHANNEL_BY_DIVISION[mapping.division_id] = mapping.channel_id
+
+
+async def cache_result_channel(mapping: DivisionResultChannel) -> None:
+    async with RESULT_CHANNEL_LOCK:
+        previous_channel = RESULT_CHANNEL_BY_DIVISION.get(mapping.division_id)
+        if previous_channel is not None and previous_channel != mapping.channel_id:
+            RESULT_DIVISION_BY_CHANNEL.pop(previous_channel, None)
+        if mapping.channel_id:
+            RESULT_CHANNEL_BY_DIVISION[mapping.division_id] = mapping.channel_id
+            RESULT_DIVISION_BY_CHANNEL[mapping.channel_id] = mapping.division_id
+
+
+async def uncache_result_channel(division_id: str) -> None:
+    async with RESULT_CHANNEL_LOCK:
+        previous_channel = RESULT_CHANNEL_BY_DIVISION.pop(division_id, None)
+        if previous_channel is not None:
+            RESULT_DIVISION_BY_CHANNEL.pop(previous_channel, None)
+
+
+async def division_for_channel(channel_id: int) -> str | None:
+    async with RESULT_CHANNEL_LOCK:
+        return RESULT_DIVISION_BY_CHANNEL.get(channel_id)
+
+
+def should_auto_accept(result: MatchAutomationResult) -> bool:
+    if result.method == "score" and result.confidence >= AUTO_ACCEPT_CONFIDENCE:
+        return True
+    return False
+
+
+def format_score_summary(scores: dict[str, float | None]) -> str:
+    parts: list[str] = []
+    for label, value in scores.items():
+        if value is None:
+            continue
+        parts.append(f"{label} {int(value)}%")
+    return ", ".join(parts) if parts else "No score data"
+
+
+def is_image_attachment(attachment: discord.Attachment) -> bool:
+    if attachment.content_type and attachment.content_type.startswith("image/"):
+        return True
+    filename = attachment.filename.lower()
+    return filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+
+
+class ResultReviewView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        division_id: str,
+        match_id: str,
+        predicted_slot: int,
+        predicted_label: str,
+        source_channel_id: int,
+        source_message_id: int,
+    ) -> None:
+        super().__init__(timeout=3600)
+        self.division_id = division_id
+        self.match_id = match_id
+        self.predicted_slot = predicted_slot
+        self.predicted_label = predicted_label
+        self.source_channel_id = source_channel_id
+        self.source_message_id = source_message_id
+        self._processed = False
+
+    async def _ensure_permissions(self, interaction: discord.Interaction) -> bool:
+        if _has_admin_or_tournament_role(interaction):
+            return True
+        await interaction.response.send_message(
+            "Only tournament admins can act on this review.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _finalize(self, interaction: discord.Interaction, note: str) -> None:
+        self._processed = True
+        for child in self.children:
+            child.disabled = True
+        embed_to_use = None
+        if interaction.message and interaction.message.embeds:
+            embed_to_use = discord.Embed.from_dict(
+                interaction.message.embeds[0].to_dict()
+            )
+            embed_to_use.set_footer(text=note)
+        await interaction.message.edit(embed=embed_to_use, view=self)
+
+    async def _add_reaction_to_source(
+        self, interaction: discord.Interaction, emoji: str
+    ) -> None:
+        channel = interaction.client.get_channel(self.source_channel_id)
+        if channel is None:
+            try:
+                channel = await interaction.client.fetch_channel(self.source_channel_id)
+            except discord.HTTPException:  # pragma: no cover - defensive
+                return
+        try:
+            original = await channel.fetch_message(self.source_message_id)
+        except discord.HTTPException:  # pragma: no cover - defensive
+            return
+        try:
+            await original.add_reaction(emoji)
+        except discord.HTTPException:  # pragma: no cover - defensive
+            return
+
+    @discord.ui.button(label="Confirm Winner", style=discord.ButtonStyle.success)
+    async def confirm_winner(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        if not await self._ensure_permissions(interaction):
+            return
+        if self._processed:
+            await interaction.response.send_message(
+                "This review has already been processed.", ephemeral=True
+            )
+            return
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "This action is only available inside a server.",
+                ephemeral=True,
+            )
+            return
+        try:
+            storage.ensure_table()
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        bracket = storage.get_bracket(guild.id, self.division_id)
+        if bracket is None:
+            await interaction.response.send_message(
+                "No bracket found for this division.", ephemeral=True
+            )
+            return
+        registrations = storage.list_registrations(guild.id, self.division_id)
+        registration_lookup = {entry.user_id: entry for entry in registrations}
+        apply_team_names(bracket, registrations)
+        try:
+            set_match_winner(bracket, self.match_id, self.predicted_slot + 1)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            await self._finalize(interaction, f"Unable to record winner: {exc}")
+            return
+        storage.save_bracket(bracket)
+        match_obj = bracket.find_match(self.match_id)
+        await self._add_reaction_to_source(interaction, "👍")
+        await interaction.response.send_message(
+            f"Recorded {self.predicted_label} as winner for {self.match_id}.",
+            ephemeral=True,
+        )
+        if match_obj is not None:
+            channel = interaction.channel
+            if isinstance(channel, Messageable):
+                champion_now = bracket_champion_name(bracket)
+                lines = build_winner_update_lines(
+                    bracket,
+                    match_obj,
+                    registration_lookup=registration_lookup,
+                    champion=champion_now,
+                    annotation=(
+                        f"Recorded via OCR review by {interaction.user.mention}."
+                    ),
+                )
+                if lines:
+                    try:
+                        await channel.send("\n".join(lines))
+                    except discord.HTTPException as exc:  # pragma: no cover - defensive
+                        log.warning(
+                            "Failed to broadcast review confirmation for %s: %s",
+                            self.match_id,
+                            exc,
+                        )
+        await self._finalize(
+            interaction, f"Confirmed by {interaction.user.display_name}"
+        )
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary)
+    async def dismiss_review(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        if not await self._ensure_permissions(interaction):
+            return
+        if self._processed:
+            await interaction.response.send_message(
+                "This review has already been processed.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "Dismissed this OCR suggestion.", ephemeral=True
+        )
+        await self._finalize(
+            interaction, f"Dismissed by {interaction.user.display_name}"
+        )
+
+
+async def post_review_prompt(
+    message: discord.Message,
+    division_id: str,
+    match: BracketMatch,
+    result: MatchAutomationResult,
+) -> None:
+    channel = message.channel
+    if not isinstance(channel, Messageable):
+        return
+    opponent_one = match.competitor_one.display()
+    opponent_two = match.competitor_two.display()
+    embed = discord.Embed(
+        title=f"{division_id.upper()} | {match.match_id} review",
+        description=f"{opponent_one}\nvs\n{opponent_two}",
+        color=discord.Color.orange(),
+    )
+    embed.add_field(
+        name="Suggested winner",
+        value=result.winner_label,
+        inline=False,
+    )
+    embed.add_field(
+        name="Confidence",
+        value=f"{int(result.confidence * 100)}% ({result.method})",
+        inline=True,
+    )
+    embed.add_field(
+        name="Scores",
+        value=format_score_summary(result.scores),
+        inline=True,
+    )
+    embed.add_field(
+        name="Source",
+        value=f"[Jump to message]({message.jump_url})",
+        inline=False,
+    )
+    if result.evidence:
+        evidence = "\n".join(result.evidence[:3])
+        if len(evidence) > 1024:
+            evidence = evidence[:1021] + "..."
+        embed.add_field(name="OCR context", value=evidence, inline=False)
+
+    view = ResultReviewView(
+        division_id=division_id,
+        match_id=match.match_id,
+        predicted_slot=result.winner_slot,
+        predicted_label=result.winner_label,
+        source_channel_id=message.channel.id,
+        source_message_id=message.id,
+    )
+    await channel.send(embed=embed, view=view)
+
+
+async def handle_result_channel_message(
+    message: discord.Message, division_id: str
+) -> None:
+    image_attachments = [
+        attachment
+        for attachment in message.attachments
+        if is_image_attachment(attachment)
+    ]
+    if not image_attachments:
+        return
+    if message.guild is None:
+        return
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await message.channel.send(str(exc), delete_after=30)
+        return
+
+    bracket = storage.get_bracket(message.guild.id, division_id)
+    if bracket is None:
+        await message.channel.send(
+            f"No bracket found for division {division_id}.", delete_after=30
+        )
+        return
+
+    registrations = storage.list_registrations(message.guild.id, division_id)
+    registration_lookup = {entry.user_id: entry for entry in registrations}
+    names_changed = apply_team_names(bracket, registrations)
+    should_save = names_changed
+
+    predictions: dict[str, MatchAutomationResult] = {}
+
+    for attachment in image_attachments:
+        try:
+            image_bytes = await attachment.read()
+        except discord.HTTPException as exc:  # pragma: no cover - network failure
+            log.warning(
+                "Failed to download attachment %s for OCR: %s", attachment.id, exc
+            )
+            continue
+        if not image_bytes:
+            continue
+        try:
+            preview = await asyncio.to_thread(
+                automation_service.analyze_image,
+                bracket.clone(),
+                image_bytes,
+                registrations,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "OCR failed for message %s in division %s: %s",
+                message.id,
+                division_id,
+                exc,
+            )
+            continue
+        for result in preview.matches:
+            if result.confidence < REVIEW_MIN_CONFIDENCE:
+                continue
+            match_obj = bracket.find_match(result.match_id)
+            if match_obj is None or match_obj.winner_index is not None:
+                continue
+            existing = predictions.get(result.match_id)
+            if existing is None or result.confidence > existing.confidence:
+                predictions[result.match_id] = result
+
+    try:
+        await message.add_reaction("👍")
+    except discord.HTTPException:  # pragma: no cover - defensive
+        pass
+
+    if not predictions:
+        return
+
+    review_results: list[tuple[BracketMatch, MatchAutomationResult]] = []
+    for match_id, result in sorted(
+        predictions.items(), key=lambda item: item[1].confidence, reverse=True
+    ):
+        match_obj = bracket.find_match(match_id)
+        if match_obj is None or match_obj.winner_index is not None:
+            continue
+        if should_auto_accept(result):
+            try:
+                set_match_winner(bracket, match_id, result.winner_slot + 1)
+            except ValueError as exc:
+                log.warning(
+                    "Failed to auto-record winner for %s (%s): %s",
+                    match_id,
+                    division_id,
+                    exc,
+                )
+                review_results.append((match_obj, result))
+            else:
+                should_save = True
+                champion_now = bracket_champion_name(bracket)
+                lines = build_winner_update_lines(
+                    bracket,
+                    match_obj,
+                    registration_lookup=registration_lookup,
+                    champion=champion_now,
+                    annotation=(
+                        f"Automated via OCR ({int(result.confidence * 100)}% confidence, "
+                        f"method={result.method})."
+                    ),
+                )
+                if lines:
+                    try:
+                        await message.channel.send("\n".join(lines))
+                    except discord.HTTPException as exc:  # pragma: no cover - defensive
+                        log.warning(
+                            "Failed to broadcast automated bracket update: %s", exc
+                        )
+        else:
+            review_results.append((match_obj, result))
+
+    if should_save:
+        storage.save_bracket(bracket)
+
+    for match_obj, result in review_results:
+        await post_review_prompt(message, division_id, match_obj, result)
+
+    if review_results:
+        try:
+            await message.add_reaction("📝")
+        except discord.HTTPException:  # pragma: no cover - defensive
+            pass
 
 
 async def build_seeded_registrations_for_guild(
@@ -2235,6 +2635,106 @@ def describe_round(bracket: BracketState, match: BracketMatch) -> str:
     if 0 <= match.round_index < len(bracket.rounds):
         return bracket.rounds[match.round_index].name
     return f"Round {match.round_index + 1}"
+
+
+def build_winner_update_lines(
+    bracket: BracketState,
+    match: BracketMatch,
+    *,
+    registration_lookup: dict[int, TeamRegistration],
+    champion: str | None,
+    annotation: str | None = None,
+) -> list[str]:
+    winner_slot = match.winner_slot()
+    if winner_slot is None:
+        return []
+    if winner_slot is match.competitor_one:
+        loser_slot = match.competitor_two
+    else:
+        loser_slot = match.competitor_one
+
+    winner_registration = (
+        registration_lookup.get(winner_slot.team_id)
+        if winner_slot.team_id is not None
+        else None
+    )
+    loser_registration = (
+        registration_lookup.get(loser_slot.team_id)
+        if loser_slot.team_id is not None
+        else None
+    )
+
+    winner_label = (
+        team_display_name(winner_registration)
+        if winner_registration is not None
+        else winner_slot.display()
+    )
+    loser_label = (
+        team_display_name(loser_registration)
+        if loser_registration is not None
+        else loser_slot.display()
+    )
+
+    if winner_slot.team_id is not None:
+        winner_captain = f"<@{winner_slot.team_id}>"
+    else:
+        winner_captain = winner_label
+
+    if loser_slot.team_id is not None:
+        loser_captain = f"<@{loser_slot.team_id}>"
+    else:
+        loser_captain = None
+
+    lines = [
+        f"Winner recorded for {match.match_id}: {winner_label} defeated {loser_label}.",
+        f"Captain: {winner_captain}",
+    ]
+
+    if loser_captain is not None and loser_captain != winner_captain:
+        lines.append(f"Opponent captain: {loser_captain}")
+
+    next_match: BracketMatch | None = None
+    next_opponent_slot: BracketSlot | None = None
+    for downstream in bracket.all_matches():
+        for candidate_slot in (downstream.competitor_one, downstream.competitor_two):
+            if candidate_slot.source_match_id != match.match_id:
+                continue
+            next_match = downstream
+            next_opponent_slot = (
+                downstream.competitor_two
+                if candidate_slot is downstream.competitor_one
+                else downstream.competitor_one
+            )
+            break
+        if next_match is not None:
+            break
+
+    if next_match is not None:
+        next_round_name = describe_round(bracket, next_match)
+        if next_opponent_slot is not None:
+            if next_opponent_slot.team_id is not None:
+                next_reg = registration_lookup.get(next_opponent_slot.team_id)
+                if next_reg is not None:
+                    opponent_text = (
+                        f"{team_display_name(next_reg)} (<@{next_reg.user_id}>)"
+                    )
+                else:
+                    opponent_text = next_opponent_slot.display()
+            else:
+                opponent_text = next_opponent_slot.display()
+        else:
+            opponent_text = "TBD"
+        lines.append(
+            f"Next match: {next_round_name} ({next_match.match_id}) vs {opponent_text}."
+        )
+
+    if champion:
+        lines.append(f"Current champion: {champion}.")
+
+    if annotation:
+        lines.append(annotation)
+
+    return lines
 
 
 def propagate_match_result(bracket: BracketState, match: BracketMatch) -> None:
@@ -4625,6 +5125,207 @@ async def broadcast_bracket_command(  # pragma: no cover - Discord slash command
 
 @app_commands.describe(
     division="Tournament division identifier (e.g. th12)",
+    channel="Channel where players post result screenshots",
+    clear="Remove any configured result channel for the division",
+)
+@tournament_command(
+    name="setresultchannels",
+    description="Configure the channel that feeds OCR-based results for a division",
+)
+@require_admin_or_tournament_role()
+async def set_result_channels_command(
+    interaction: discord.Interaction,
+    division: str,
+    channel: discord.TextChannel | None = None,
+    clear: bool = False,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    if clear:
+        storage.delete_result_channel(guild.id, division_id)
+        await uncache_result_channel(division_id)
+        await interaction.response.send_message(
+            f"Cleared result channel mapping for {division_id}.",
+            ephemeral=True,
+        )
+        return
+
+    if channel is None:
+        await interaction.response.send_message(
+            "Select a channel or set clear=true to remove a mapping.",
+            ephemeral=True,
+        )
+        return
+
+    if channel.guild is not None and channel.guild.id != guild.id:
+        await interaction.response.send_message(
+            "Pick a channel from this server.", ephemeral=True
+        )
+        return
+
+    mapping = DivisionResultChannel(
+        guild_id=guild.id,
+        division_id=division_id,
+        channel_id=channel.id,
+        updated_by=interaction.user.id,
+        updated_at=utc_now_iso(),
+    )
+    storage.set_result_channel(mapping)
+    await cache_result_channel(mapping)
+
+    await interaction.response.send_message(
+        f"Mapped {division_id} to {channel.mention} for OCR processing.",
+        ephemeral=True,
+    )
+
+
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
+    image="Tournament screenshot or war result image",
+    max_matches="Maximum number of suggested winners to display",
+    evidence_limit="How many OCR evidence lines to include per match",
+)
+@tournament_command(
+    name="preview-auto-winners",
+    description="Analyze a screenshot and suggest bracket winners (read-only)",
+)
+@require_admin_or_tournament_role()
+async def preview_auto_winners_command(  # pragma: no cover - Discord slash command wiring
+    interaction: discord.Interaction,
+    division: str,
+    image: discord.Attachment,
+    max_matches: app_commands.Range[int, 1, 10] = 5,
+    evidence_limit: app_commands.Range[int, 0, 3] = 2,
+) -> None:
+    try:
+        guild = ensure_guild(interaction)
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    try:
+        storage.ensure_table()
+    except RuntimeError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    try:
+        division_id = normalize_division_value(division)
+    except InvalidValueError as exc:
+        await send_ephemeral(interaction, str(exc))
+        return
+
+    bracket = storage.get_bracket(guild.id, division_id)
+    if bracket is None:
+        await send_ephemeral(
+            interaction,
+            "No bracket found for that division. Run /create-bracket before previewing winners.",
+        )
+        return
+
+    registrations = storage.list_registrations(guild.id, division_id)
+    bracket_for_analysis = bracket.clone()
+    apply_team_names(bracket_for_analysis, registrations)
+
+    try:
+        image_bytes = await image.read()
+    except discord.HTTPException as exc:  # pragma: no cover - defensive
+        log.warning("Failed to download OCR attachment: %s", exc)
+        await send_ephemeral(
+            interaction,
+            "Unable to download that attachment from Discord.",
+        )
+        return
+
+    if not image_bytes:
+        await send_ephemeral(
+            interaction,
+            "The provided attachment appears to be empty.",
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        preview = await asyncio.to_thread(
+            automation_service.analyze_image,
+            bracket_for_analysis,
+            image_bytes,
+            registrations,
+        )
+    except RuntimeError as exc:
+        log.warning("Match automation OCR failed: %s", exc)
+        await interaction.followup.send(
+            "OCR was unable to extract any text from that image.",
+            ephemeral=True,
+        )
+        return
+    except Exception:  # pragma: no cover - defensive
+        log.exception("Unexpected OCR failure")
+        await interaction.followup.send(
+            "An unexpected error occurred while analyzing the screenshot.",
+            ephemeral=True,
+        )
+        return
+
+    if not preview.matches:
+        sample_lines = [line.content for line in preview.ocr_lines[:5]]
+        note = "\n".join(f"- {line}" for line in sample_lines if line)
+        message = "OCR completed but no confident winner suggestions were found."
+        if note:
+            message += "\nDetected text:\n" + note
+        await interaction.followup.send(message, ephemeral=True)
+        return
+
+    matches = preview.matches[:max_matches]
+    lines = [
+        "Automated OCR preview (no bracket updates were applied):",
+    ]
+    for result in matches:
+        confidence_pct = int(result.confidence * 100)
+        score_bits = [
+            f"{label}={score:.0f}%"
+            for label, score in result.scores.items()
+            if score is not None
+        ]
+        scores_note = f" | Scores: {', '.join(score_bits)}" if score_bits else ""
+        lines.append(
+            f"- [{result.match_id}] {result.winner_label} (confidence ~{confidence_pct}%, method={result.method}){scores_note}"
+        )
+        evidence_lines = result.evidence[:evidence_limit]
+        for evidence in evidence_lines:
+            if evidence:
+                lines.append(f"    • {evidence}")
+
+    if len(preview.matches) > max_matches:
+        remaining = len(preview.matches) - max_matches
+        lines.append(f"…and {remaining} additional match(es) not shown.")
+
+    output = "\n".join(lines)
+    if len(output) > 1900:
+        output = output[:1900] + "\n…output truncated."
+
+    await interaction.followup.send(output, ephemeral=True)
+
+
+@app_commands.describe(
+    division="Tournament division identifier (e.g. th12)",
     winner_captain="Team captain (Discord user) for the winning team",
 )
 @tournament_command(
@@ -4893,76 +5594,18 @@ async def select_round_winner_command(  # pragma: no cover - Discord slash comma
 
     channel = interaction.channel
     if isinstance(channel, Messageable):
-        winner_label = (
-            winner_slot_obj.display() if winner_slot_obj is not None else "Winner"
+        lines = build_winner_update_lines(
+            bracket,
+            match_obj,
+            registration_lookup=registration_lookup,
+            champion=champion,
         )
-        winner_captain_mention = (
-            f"<@{selected_registration.user_id}>"
-            if selected_registration is not None
-            else winner_captain.mention
-        )
-        if opponent_registration_pre is not None:
-            loser_label = team_display_name(opponent_registration_pre)
-            loser_captain = f"<@{opponent_registration_pre.user_id}>"
-        elif opponent_slot_pre.team_id is not None:
-            loser_label = opponent_slot_pre.display()
-            loser_captain = f"<@{opponent_slot_pre.team_id}>"
-        else:
-            loser_label = opponent_slot_pre.display()
-            loser_captain = None
-
-        next_match: BracketMatch | None = None
-        next_opponent_slot: BracketSlot | None = None
-        for downstream in bracket.all_matches():
-            for candidate_slot in (
-                downstream.competitor_one,
-                downstream.competitor_two,
-            ):
-                if candidate_slot.source_match_id == match_identifier:
-                    next_match = downstream
-                    next_opponent_slot = (
-                        downstream.competitor_two
-                        if candidate_slot is downstream.competitor_one
-                        else downstream.competitor_one
-                    )
-                    break
-            if next_match is not None:
-                break
-
-        lines = [
-            f"Winner recorded for {match_identifier}: {winner_label} defeated {loser_label}.",
-            f"Captain: {winner_captain_mention}",
-        ]
-        if loser_captain is not None:
-            lines.append(f"Opponent captain: {loser_captain}")
-
-        if next_match is not None:
-            next_round_name = describe_round(bracket, next_match)
-            if next_opponent_slot is not None:
-                if next_opponent_slot.team_id is not None:
-                    next_reg = registration_lookup.get(next_opponent_slot.team_id)
-                    if next_reg is not None:
-                        opponent_text = (
-                            f"{team_display_name(next_reg)} (<@{next_reg.user_id}>)"
-                        )
-                    else:
-                        opponent_text = next_opponent_slot.display()
-                else:
-                    opponent_text = next_opponent_slot.display()
-            else:
-                opponent_text = "TBD"
-            lines.append(
-                f"Next match: {next_round_name} ({next_match.match_id}) vs {opponent_text}."
-            )
-
-        if champion:
-            lines.append(f"Current champion: {champion}.")
-
-        channel_message = "\n".join(lines)
-        try:
-            await channel.send(channel_message)
-        except discord.HTTPException as exc:  # pragma: no cover - network failure
-            log.warning("Failed to post bracket update note: %s", exc)
+        if lines:
+            channel_message = "\n".join(lines)
+            try:
+                await channel.send(channel_message)
+            except discord.HTTPException as exc:  # pragma: no cover - network failure
+                log.warning("Failed to post bracket update note: %s", exc)
     else:
         log.debug("Skipping bracket update; channel not messageable")
 
@@ -5590,6 +6233,20 @@ async def _simulate_tourney_division_autocomplete(
 
 
 # ---------- Lifecycle ----------
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:  # pragma: no cover - Discord
+    if message.author.bot:
+        return
+    if message.guild is None:
+        return
+    division_id = await division_for_channel(message.channel.id)
+    if division_id is None:
+        return
+    asyncio.create_task(handle_result_channel_message(message, division_id))
+
+
 @bot.event
 async def on_ready() -> None:  # pragma: no cover - Discord lifecycle hook
     if TOURNAMENT_GUILD_ID is not None:
@@ -5599,9 +6256,12 @@ async def on_ready() -> None:  # pragma: no cover - Discord lifecycle hook
         await tree.sync(guild=None)
         await tree.sync(guild=guild)
         log.info("Commands synced to guild %s", TOURNAMENT_GUILD_ID)
+        await refresh_result_channel_cache(TOURNAMENT_GUILD_ID)
     else:
         await tree.sync()
         log.info("Commands synced globally")
+        if bot.guilds:
+            await refresh_result_channel_cache(bot.guilds[0].id)
     log.info("Signing in to CoC API for tournament bot...")
     global coc_client
     if coc_client is None:

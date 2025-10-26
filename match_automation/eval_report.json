@@ -1,0 +1,953 @@
+{
+  "Screenshot_2025-10-26-20-27-18-975_com.supercell.clashofclans.jpg": {
+    "best_division": "th17-1v1",
+    "metrics": {
+      "th10-1v1": {
+        "total_matches": 21,
+        "evaluable_matches": 19,
+        "correct_matches": 11,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.613
+      },
+      "th11-1v1": {
+        "total_matches": 27,
+        "evaluable_matches": 24,
+        "correct_matches": 15,
+        "incorrect_matches": 9,
+        "avg_confidence": 0.628
+      },
+      "th12-1v1": {
+        "total_matches": 20,
+        "evaluable_matches": 18,
+        "correct_matches": 10,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.621
+      },
+      "th13-1v1": {
+        "total_matches": 15,
+        "evaluable_matches": 14,
+        "correct_matches": 7,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.656
+      },
+      "th14-1v1": {
+        "total_matches": 13,
+        "evaluable_matches": 11,
+        "correct_matches": 5,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.597
+      },
+      "th15-1v1": {
+        "total_matches": 25,
+        "evaluable_matches": 23,
+        "correct_matches": 13,
+        "incorrect_matches": 10,
+        "avg_confidence": 0.684
+      },
+      "th16-1v1": {
+        "total_matches": 13,
+        "evaluable_matches": 10,
+        "correct_matches": 4,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.67
+      },
+      "th17-1v1": {
+        "total_matches": 44,
+        "evaluable_matches": 39,
+        "correct_matches": 26,
+        "incorrect_matches": 13,
+        "avg_confidence": 0.647
+      }
+    },
+    "top_matches": [
+      {
+        "match_id": "R1M32",
+        "winner_label": "Satyam",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Satyam": 88.0,
+          "ClashHuB": 8.0
+        },
+        "actual_label": "Satyam",
+        "correct": true
+      },
+      {
+        "match_id": "R1M56",
+        "winner_label": "VENOM",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "VENOM": 88.0,
+          "Shihab's Team": 8.0
+        },
+        "actual_label": "VENOM",
+        "correct": true
+      },
+      {
+        "match_id": "R3M14",
+        "winner_label": "VENOM",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "The Nutcracker": 8.0,
+          "VENOM": 88.0
+        },
+        "actual_label": "VENOM",
+        "correct": true
+      },
+      {
+        "match_id": "R2M4",
+        "winner_label": "arrow",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "arrow": null,
+          "Tomato Hut": null
+        },
+        "actual_label": "Tomato Hut",
+        "correct": false
+      },
+      {
+        "match_id": "R2M30",
+        "winner_label": "KkNation",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "KkNation": null,
+          "white devil": null
+        },
+        "actual_label": "white devil",
+        "correct": false
+      },
+      {
+        "match_id": "R1M34",
+        "winner_label": "Vyuh eSports",
+        "confidence": 0.764,
+        "method": "mentions",
+        "scores": {
+          "Captain marvel": 8.0,
+          "Vyuh eSports": 8.0
+        },
+        "actual_label": "Vyuh eSports",
+        "correct": true
+      }
+    ]
+  },
+  "Screenshot_2025-10-26-20-46-53-24_b864ea0b534de5941fd13c5c04397e2b.jpg": {
+    "best_division": "th17-1v1",
+    "metrics": {
+      "th10-1v1": {
+        "total_matches": 15,
+        "evaluable_matches": 14,
+        "correct_matches": 7,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.69
+      },
+      "th11-1v1": {
+        "total_matches": 18,
+        "evaluable_matches": 16,
+        "correct_matches": 10,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.616
+      },
+      "th12-1v1": {
+        "total_matches": 16,
+        "evaluable_matches": 14,
+        "correct_matches": 8,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.707
+      },
+      "th13-1v1": {
+        "total_matches": 15,
+        "evaluable_matches": 14,
+        "correct_matches": 8,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.768
+      },
+      "th14-1v1": {
+        "total_matches": 11,
+        "evaluable_matches": 9,
+        "correct_matches": 3,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.713
+      },
+      "th15-1v1": {
+        "total_matches": 24,
+        "evaluable_matches": 22,
+        "correct_matches": 13,
+        "incorrect_matches": 9,
+        "avg_confidence": 0.669
+      },
+      "th16-1v1": {
+        "total_matches": 11,
+        "evaluable_matches": 8,
+        "correct_matches": 5,
+        "incorrect_matches": 3,
+        "avg_confidence": 0.664
+      },
+      "th17-1v1": {
+        "total_matches": 35,
+        "evaluable_matches": 32,
+        "correct_matches": 20,
+        "incorrect_matches": 12,
+        "avg_confidence": 0.659
+      }
+    },
+    "top_matches": [
+      {
+        "match_id": "R1M34",
+        "winner_label": "Captain marvel",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Captain marvel": 100.0,
+          "Vyuh eSports": 6.0
+        },
+        "actual_label": "Vyuh eSports",
+        "correct": false
+      },
+      {
+        "match_id": "R1M32",
+        "winner_label": "Satyam",
+        "confidence": 0.863,
+        "method": "score",
+        "scores": {
+          "Satyam": 100.0,
+          "ClashHuB": 53.0
+        },
+        "actual_label": "Satyam",
+        "correct": true
+      },
+      {
+        "match_id": "R1M56",
+        "winner_label": "VENOM",
+        "confidence": 0.863,
+        "method": "score",
+        "scores": {
+          "VENOM": 100.0,
+          "Shihab's Team": 53.0
+        },
+        "actual_label": "VENOM",
+        "correct": true
+      },
+      {
+        "match_id": "R2M32",
+        "winner_label": "Rolig Records 2.0",
+        "confidence": 0.863,
+        "method": "score",
+        "scores": {
+          "MODI..KINGS.2": 53.0,
+          "Rolig Records 2.0": 100.0
+        },
+        "actual_label": "Rolig Records 2.0",
+        "correct": true
+      },
+      {
+        "match_id": "R2M4",
+        "winner_label": "arrow",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "arrow": null,
+          "Tomato Hut": null
+        },
+        "actual_label": "Tomato Hut",
+        "correct": false
+      },
+      {
+        "match_id": "R2M30",
+        "winner_label": "KkNation",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "KkNation": null,
+          "white devil": null
+        },
+        "actual_label": "white devil",
+        "correct": false
+      }
+    ]
+  },
+  "Screenshot_20251026-211943_Clash_of_Clans.jpg": {
+    "best_division": "th17-1v1",
+    "metrics": {
+      "th10-1v1": {
+        "total_matches": 16,
+        "evaluable_matches": 15,
+        "correct_matches": 8,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.733
+      },
+      "th11-1v1": {
+        "total_matches": 20,
+        "evaluable_matches": 17,
+        "correct_matches": 12,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.663
+      },
+      "th12-1v1": {
+        "total_matches": 18,
+        "evaluable_matches": 16,
+        "correct_matches": 9,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.709
+      },
+      "th13-1v1": {
+        "total_matches": 14,
+        "evaluable_matches": 13,
+        "correct_matches": 7,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.707
+      },
+      "th14-1v1": {
+        "total_matches": 10,
+        "evaluable_matches": 8,
+        "correct_matches": 3,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.702
+      },
+      "th15-1v1": {
+        "total_matches": 21,
+        "evaluable_matches": 19,
+        "correct_matches": 11,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.666
+      },
+      "th16-1v1": {
+        "total_matches": 8,
+        "evaluable_matches": 6,
+        "correct_matches": 4,
+        "incorrect_matches": 2,
+        "avg_confidence": 0.608
+      },
+      "th17-1v1": {
+        "total_matches": 34,
+        "evaluable_matches": 31,
+        "correct_matches": 20,
+        "incorrect_matches": 11,
+        "avg_confidence": 0.637
+      }
+    },
+    "top_matches": [
+      {
+        "match_id": "R1M56",
+        "winner_label": "Shihab's Team",
+        "confidence": 0.897,
+        "method": "score",
+        "scores": {
+          "VENOM": 4.0,
+          "Shihab's Team": 56.0
+        },
+        "actual_label": "VENOM",
+        "correct": false
+      },
+      {
+        "match_id": "R1M34",
+        "winner_label": "Vyuh eSports",
+        "confidence": 0.87,
+        "method": "score",
+        "scores": {
+          "Captain marvel": 8.0,
+          "Vyuh eSports": 56.0
+        },
+        "actual_label": "Vyuh eSports",
+        "correct": true
+      },
+      {
+        "match_id": "R1M51",
+        "winner_label": "Defnet",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "NOOB RUDY": null,
+          "Defnet": null
+        },
+        "actual_label": "NOOB RUDY",
+        "correct": false
+      },
+      {
+        "match_id": "R2M31",
+        "winner_label": "VNG eSports",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "VNG eSports": null,
+          "VAYNARD": null
+        },
+        "actual_label": "VAYNARD",
+        "correct": false
+      },
+      {
+        "match_id": "R1M32",
+        "winner_label": "Satyam",
+        "confidence": 0.7,
+        "method": "mentions",
+        "scores": {
+          "Satyam": 56.0,
+          "ClashHuB": 56.0
+        },
+        "actual_label": "Satyam",
+        "correct": true
+      },
+      {
+        "match_id": "R1M2",
+        "winner_label": "Lone wolf",
+        "confidence": 0.6,
+        "method": "score-single",
+        "scores": {
+          "chanika": null,
+          "Lone wolf": 56.0
+        },
+        "actual_label": "chanika",
+        "correct": false
+      }
+    ]
+  },
+  "Screenshot_20251026_204223_Clash_of_Clans.jpg": {
+    "best_division": "th17-1v1",
+    "metrics": {
+      "th10-1v1": {
+        "total_matches": 18,
+        "evaluable_matches": 16,
+        "correct_matches": 9,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.657
+      },
+      "th11-1v1": {
+        "total_matches": 21,
+        "evaluable_matches": 18,
+        "correct_matches": 13,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.638
+      },
+      "th12-1v1": {
+        "total_matches": 19,
+        "evaluable_matches": 17,
+        "correct_matches": 9,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.6
+      },
+      "th13-1v1": {
+        "total_matches": 22,
+        "evaluable_matches": 20,
+        "correct_matches": 12,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.629
+      },
+      "th14-1v1": {
+        "total_matches": 13,
+        "evaluable_matches": 11,
+        "correct_matches": 3,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.622
+      },
+      "th15-1v1": {
+        "total_matches": 25,
+        "evaluable_matches": 22,
+        "correct_matches": 13,
+        "incorrect_matches": 9,
+        "avg_confidence": 0.683
+      },
+      "th16-1v1": {
+        "total_matches": 14,
+        "evaluable_matches": 11,
+        "correct_matches": 7,
+        "incorrect_matches": 4,
+        "avg_confidence": 0.693
+      },
+      "th17-1v1": {
+        "total_matches": 40,
+        "evaluable_matches": 35,
+        "correct_matches": 25,
+        "incorrect_matches": 10,
+        "avg_confidence": 0.656
+      }
+    },
+    "top_matches": [
+      {
+        "match_id": "R1M34",
+        "winner_label": "Vyuh eSports",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Captain marvel": 10.0,
+          "Vyuh eSports": 99.0
+        },
+        "actual_label": "Vyuh eSports",
+        "correct": true
+      },
+      {
+        "match_id": "R1M32",
+        "winner_label": "Satyam",
+        "confidence": 0.93,
+        "method": "score",
+        "scores": {
+          "Satyam": 99.0,
+          "ClashHuB": 42.0
+        },
+        "actual_label": "Satyam",
+        "correct": true
+      },
+      {
+        "match_id": "R1M56",
+        "winner_label": "VENOM",
+        "confidence": 0.93,
+        "method": "score",
+        "scores": {
+          "VENOM": 99.0,
+          "Shihab's Team": 42.0
+        },
+        "actual_label": "VENOM",
+        "correct": true
+      },
+      {
+        "match_id": "R1M51",
+        "winner_label": "Defnet",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "NOOB RUDY": null,
+          "Defnet": null
+        },
+        "actual_label": "NOOB RUDY",
+        "correct": false
+      },
+      {
+        "match_id": "R2M4",
+        "winner_label": "arrow",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "arrow": null,
+          "Tomato Hut": null
+        },
+        "actual_label": "Tomato Hut",
+        "correct": false
+      },
+      {
+        "match_id": "R2M30",
+        "winner_label": "KkNation",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "KkNation": null,
+          "white devil": null
+        },
+        "actual_label": "white devil",
+        "correct": false
+      }
+    ]
+  },
+  "Screenshot_20251026_205005_com.supercell.clashofclans.jpg": {
+    "best_division": "th17-1v1",
+    "metrics": {
+      "th10-1v1": {
+        "total_matches": 16,
+        "evaluable_matches": 15,
+        "correct_matches": 7,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.625
+      },
+      "th11-1v1": {
+        "total_matches": 20,
+        "evaluable_matches": 17,
+        "correct_matches": 12,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.599
+      },
+      "th12-1v1": {
+        "total_matches": 16,
+        "evaluable_matches": 14,
+        "correct_matches": 8,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.654
+      },
+      "th13-1v1": {
+        "total_matches": 13,
+        "evaluable_matches": 12,
+        "correct_matches": 7,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.712
+      },
+      "th14-1v1": {
+        "total_matches": 11,
+        "evaluable_matches": 9,
+        "correct_matches": 3,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.656
+      },
+      "th15-1v1": {
+        "total_matches": 25,
+        "evaluable_matches": 22,
+        "correct_matches": 14,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.662
+      },
+      "th16-1v1": {
+        "total_matches": 9,
+        "evaluable_matches": 7,
+        "correct_matches": 3,
+        "incorrect_matches": 4,
+        "avg_confidence": 0.721
+      },
+      "th17-1v1": {
+        "total_matches": 37,
+        "evaluable_matches": 33,
+        "correct_matches": 23,
+        "incorrect_matches": 10,
+        "avg_confidence": 0.65
+      }
+    },
+    "top_matches": [
+      {
+        "match_id": "R1M32",
+        "winner_label": "Satyam",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Satyam": 100.0,
+          "ClashHuB": 28.0
+        },
+        "actual_label": "Satyam",
+        "correct": true
+      },
+      {
+        "match_id": "R1M34",
+        "winner_label": "Captain marvel",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Captain marvel": 100.0,
+          "Vyuh eSports": 10.0
+        },
+        "actual_label": "Vyuh eSports",
+        "correct": false
+      },
+      {
+        "match_id": "R1M56",
+        "winner_label": "VENOM",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "VENOM": 88.0,
+          "Shihab's Team": 28.0
+        },
+        "actual_label": "VENOM",
+        "correct": true
+      },
+      {
+        "match_id": "R2M32",
+        "winner_label": "Rolig Records 2.0",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "MODI..KINGS.2": 28.0,
+          "Rolig Records 2.0": 100.0
+        },
+        "actual_label": "Rolig Records 2.0",
+        "correct": true
+      },
+      {
+        "match_id": "R3M2",
+        "winner_label": "Tomato Hut",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Jail Boys": 10.0,
+          "Tomato Hut": 100.0
+        },
+        "actual_label": null,
+        "correct": false
+      },
+      {
+        "match_id": "R2M30",
+        "winner_label": "KkNation",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "KkNation": null,
+          "white devil": null
+        },
+        "actual_label": "white devil",
+        "correct": false
+      }
+    ]
+  },
+  "Screenshot_20251026_224823_Clash_of_Clans.jpg": {
+    "best_division": "th17-1v1",
+    "metrics": {
+      "th10-1v1": {
+        "total_matches": 15,
+        "evaluable_matches": 14,
+        "correct_matches": 7,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.622
+      },
+      "th11-1v1": {
+        "total_matches": 20,
+        "evaluable_matches": 17,
+        "correct_matches": 12,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.661
+      },
+      "th12-1v1": {
+        "total_matches": 22,
+        "evaluable_matches": 19,
+        "correct_matches": 12,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.666
+      },
+      "th13-1v1": {
+        "total_matches": 13,
+        "evaluable_matches": 12,
+        "correct_matches": 7,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.685
+      },
+      "th14-1v1": {
+        "total_matches": 11,
+        "evaluable_matches": 9,
+        "correct_matches": 4,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.659
+      },
+      "th15-1v1": {
+        "total_matches": 21,
+        "evaluable_matches": 19,
+        "correct_matches": 12,
+        "incorrect_matches": 7,
+        "avg_confidence": 0.695
+      },
+      "th16-1v1": {
+        "total_matches": 8,
+        "evaluable_matches": 6,
+        "correct_matches": 3,
+        "incorrect_matches": 3,
+        "avg_confidence": 0.735
+      },
+      "th17-1v1": {
+        "total_matches": 37,
+        "evaluable_matches": 33,
+        "correct_matches": 21,
+        "incorrect_matches": 12,
+        "avg_confidence": 0.64
+      }
+    },
+    "top_matches": [
+      {
+        "match_id": "R1M34",
+        "winner_label": "Captain marvel",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Captain marvel": 100.0,
+          "Vyuh eSports": 30.0
+        },
+        "actual_label": "Vyuh eSports",
+        "correct": false
+      },
+      {
+        "match_id": "R3M7",
+        "winner_label": "SKC",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "Musharaf": 27.0,
+          "SKC": 100.0
+        },
+        "actual_label": null,
+        "correct": false
+      },
+      {
+        "match_id": "R1M32",
+        "winner_label": "Satyam",
+        "confidence": 0.91,
+        "method": "score",
+        "scores": {
+          "Satyam": 100.0,
+          "ClashHuB": 46.0
+        },
+        "actual_label": "Satyam",
+        "correct": true
+      },
+      {
+        "match_id": "R2M32",
+        "winner_label": "Rolig Records 2.0",
+        "confidence": 0.91,
+        "method": "score",
+        "scores": {
+          "MODI..KINGS.2": 46.0,
+          "Rolig Records 2.0": 100.0
+        },
+        "actual_label": "Rolig Records 2.0",
+        "correct": true
+      },
+      {
+        "match_id": "R2M30",
+        "winner_label": "KkNation",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "KkNation": null,
+          "white devil": null
+        },
+        "actual_label": "white devil",
+        "correct": false
+      },
+      {
+        "match_id": "R1M56",
+        "winner_label": "Shihab's Team",
+        "confidence": 0.703,
+        "method": "score",
+        "scores": {
+          "VENOM": 77.0,
+          "Shihab's Team": 100.0
+        },
+        "actual_label": "VENOM",
+        "correct": false
+      }
+    ]
+  },
+  "Screenshot_20251026_231529_Clash_of_Clans.jpg": {
+    "best_division": "th17-1v1",
+    "metrics": {
+      "th10-1v1": {
+        "total_matches": 16,
+        "evaluable_matches": 14,
+        "correct_matches": 9,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.625
+      },
+      "th11-1v1": {
+        "total_matches": 22,
+        "evaluable_matches": 19,
+        "correct_matches": 14,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.618
+      },
+      "th12-1v1": {
+        "total_matches": 18,
+        "evaluable_matches": 16,
+        "correct_matches": 8,
+        "incorrect_matches": 8,
+        "avg_confidence": 0.662
+      },
+      "th13-1v1": {
+        "total_matches": 13,
+        "evaluable_matches": 12,
+        "correct_matches": 7,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.669
+      },
+      "th14-1v1": {
+        "total_matches": 14,
+        "evaluable_matches": 11,
+        "correct_matches": 5,
+        "incorrect_matches": 6,
+        "avg_confidence": 0.632
+      },
+      "th15-1v1": {
+        "total_matches": 24,
+        "evaluable_matches": 22,
+        "correct_matches": 13,
+        "incorrect_matches": 9,
+        "avg_confidence": 0.671
+      },
+      "th16-1v1": {
+        "total_matches": 13,
+        "evaluable_matches": 10,
+        "correct_matches": 5,
+        "incorrect_matches": 5,
+        "avg_confidence": 0.623
+      },
+      "th17-1v1": {
+        "total_matches": 37,
+        "evaluable_matches": 33,
+        "correct_matches": 22,
+        "incorrect_matches": 11,
+        "avg_confidence": 0.626
+      }
+    },
+    "top_matches": [
+      {
+        "match_id": "R2M18",
+        "winner_label": "bahubali",
+        "confidence": 0.95,
+        "method": "score",
+        "scores": {
+          "INDIAN CLASHERS": 4.0,
+          "bahubali": 72.0
+        },
+        "actual_label": "INDIAN CLASHERS",
+        "correct": false
+      },
+      {
+        "match_id": "R2M4",
+        "winner_label": "arrow",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "arrow": null,
+          "Tomato Hut": null
+        },
+        "actual_label": "Tomato Hut",
+        "correct": false
+      },
+      {
+        "match_id": "R2M30",
+        "winner_label": "KkNation",
+        "confidence": 0.85,
+        "method": "mentions",
+        "scores": {
+          "KkNation": null,
+          "white devil": null
+        },
+        "actual_label": "white devil",
+        "correct": false
+      },
+      {
+        "match_id": "R2M32",
+        "winner_label": "Rolig Records 2.0",
+        "confidence": 0.67,
+        "method": "score",
+        "scores": {
+          "MODI..KINGS.2": 72.0,
+          "Rolig Records 2.0": 90.0
+        },
+        "actual_label": "Rolig Records 2.0",
+        "correct": true
+      },
+      {
+        "match_id": "R1M2",
+        "winner_label": "Lone wolf",
+        "confidence": 0.6,
+        "method": "score-single",
+        "scores": {
+          "chanika": null,
+          "Lone wolf": 76.0
+        },
+        "actual_label": "chanika",
+        "correct": false
+      },
+      {
+        "match_id": "R1M3",
+        "winner_label": "CREW X \u2122",
+        "confidence": 0.6,
+        "method": "score-single",
+        "scores": {
+          "CREW X \u2122": 4.0,
+          "bella": null
+        },
+        "actual_label": "bella",
+        "correct": false
+      }
+    ]
+  },
+  "aggregate": {
+    "evaluable_matches": 236,
+    "correct_matches": 157,
+    "incorrect_matches": 79,
+    "images_processed": 7
+  }
+}

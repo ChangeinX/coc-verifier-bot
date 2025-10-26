@@ -358,6 +358,64 @@ class TeamRegistration:
 
 
 @dataclass(slots=True)
+class DivisionResultChannel:
+    guild_id: int
+    division_id: str
+    channel_id: int
+    updated_by: int
+    updated_at: str
+
+    PK_TEMPLATE: ClassVar[str] = "GUILD#%s"
+    SK_TEMPLATE: ClassVar[str] = "DIVISION#%s#RESULT_CHANNEL"
+
+    @classmethod
+    def key(cls, guild_id: int, division_id: str) -> dict[str, str]:
+        return {
+            "pk": cls.PK_TEMPLATE % guild_id,
+            "sk": cls.SK_TEMPLATE % division_id,
+        }
+
+    def to_item(self) -> dict[str, object]:
+        item = self.key(self.guild_id, self.division_id)
+        item.update(
+            {
+                "division_id": self.division_id,
+                "channel_id": str(self.channel_id),
+                "updated_by": str(self.updated_by),
+                "updated_at": self.updated_at,
+            }
+        )
+        return item
+
+    @classmethod
+    def from_item(cls, item: dict[str, object]) -> DivisionResultChannel:
+        pk_value = str(item["pk"])
+        guild_id = int(pk_value.split("#", 1)[1])
+        sk_value = str(item.get("sk", ""))
+        parts = sk_value.split("#")
+        division_id = str(
+            item.get("division_id") or (parts[1] if len(parts) > 2 else "default")
+        )
+        raw_channel = item.get("channel_id", 0)
+        try:
+            channel_id = int(raw_channel)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            channel_id = 0
+        updated_by_raw = item.get("updated_by", 0)
+        try:
+            updated_by = int(updated_by_raw)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            updated_by = 0
+        return cls(
+            guild_id=guild_id,
+            division_id=division_id,
+            channel_id=channel_id,
+            updated_by=updated_by,
+            updated_at=str(item.get("updated_at", "")),
+        )
+
+
+@dataclass(slots=True)
 class BracketSlot:
     seed: int | None
     team_id: int | None
@@ -552,6 +610,7 @@ __all__ = [
     "TournamentRoundWindows",
     "RoundWindowDefinition",
     "TournamentConfig",
+    "DivisionResultChannel",
     "TeamRegistration",
     "PlayerEntry",
     "BracketSlot",

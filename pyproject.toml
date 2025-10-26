@@ -25,7 +25,7 @@ py-modules = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["verifier_bot*"]
+include = ["verifier_bot*", "tournament_bot*", "match_automation*"]
 
 [project.optional-dependencies]
 dev = [

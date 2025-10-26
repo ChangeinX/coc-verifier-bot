@@ -5,6 +5,7 @@ from botocore.exceptions import ClientError
 
 from .models import (
     BracketState,
+    DivisionResultChannel,
     TeamRegistration,
     TournamentConfig,
     TournamentRoundWindows,
@@ -78,6 +79,47 @@ class TournamentStorage:
 
     def list_division_ids(self, guild_id: int) -> list[str]:
         return [cfg.division_id for cfg in self.list_division_configs(guild_id)]
+
+    # ----- Result Channels -----
+    def get_result_channel(
+        self, guild_id: int, division_id: str
+    ) -> DivisionResultChannel | None:
+        self.ensure_table()
+        resp = self._table.get_item(
+            Key=DivisionResultChannel.key(guild_id, division_id)
+        )
+        item = resp.get("Item")
+        if not item:
+            return None
+        return DivisionResultChannel.from_item(item)
+
+    def set_result_channel(self, mapping: DivisionResultChannel) -> None:
+        self.ensure_table()
+        self._table.put_item(Item=mapping.to_item())
+
+    def delete_result_channel(self, guild_id: int, division_id: str) -> None:
+        self.ensure_table()
+        self._table.delete_item(
+            Key=DivisionResultChannel.key(guild_id, division_id),
+        )
+
+    def list_result_channels(self, guild_id: int) -> list[DivisionResultChannel]:
+        self.ensure_table()
+        resp = self._table.query(
+            KeyConditionExpression=Key("pk").eq(
+                DivisionResultChannel.PK_TEMPLATE % guild_id
+            )
+            & Key("sk").begins_with("DIVISION#"),
+            Select="ALL_ATTRIBUTES",
+        )
+        items = resp.get("Items", [])
+        mappings = [
+            DivisionResultChannel.from_item(item)
+            for item in items
+            if str(item.get("sk", "")).endswith("#RESULT_CHANNEL")
+        ]
+        mappings.sort(key=lambda entry: entry.division_id)
+        return mappings
 
     # ----- Registrations -----
     def get_registration(
