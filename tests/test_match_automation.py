@@ -183,3 +183,18 @@ def test_analyzer_detects_special_char_names_when_present() -> None:
     result = results[0]
     assert result.winner_label == "AYRA"
     assert result.method == "score"
+
+
+def test_analyzer_links_score_on_following_line(simple_bracket) -> None:
+    bracket, registrations = simple_bracket
+    lines = [
+        DetectedLine(content="vraj2", confidence=0.9),
+        DetectedLine(content="54%", confidence=0.9),
+        DetectedLine(content="RUSHER X", confidence=0.9),
+        DetectedLine(content="88%", confidence=0.9),
+    ]
+    results = analyze_bracket_matches(bracket, lines, registrations)
+    assert results
+    result = results[0]
+    assert result.winner_label == "RUSHER X"
+    assert result.method == "score"

@@ -173,7 +173,7 @@ def _compute_observation(
             continue
         occurrences += 1
         evidence.append(line.original)
-        score_values = _scores_near_line(lines, idx)
+        score_values = _scores_near_line(lines, idx, synonyms)
         if score_values:
             top = max(score_values)
             if best_score is None or top > best_score:
@@ -192,13 +192,23 @@ def _compute_observation(
 def _scores_near_line(
     lines: Sequence[_ProcessedLine],
     idx: int,
+    synonyms: set[str],
 ) -> list[float]:
-    window = range(max(0, idx - 1), idx + 1)
+    window = range(max(0, idx - 1), min(len(lines), idx + 2))
     values: list[float] = []
     for position in window:
         text = lines[position].original
+        if position != idx and any(char.isalpha() for char in text):
+            if not _line_contains_synonym(lines[position], synonyms):
+                continue
         for match in SCORE_PATTERN.finditer(text):
             raw_value = match.group(1)
+            start = match.start(1)
+            end = match.end(1)
+            if (start > 0 and text[start - 1].isalpha()) or (
+                end < len(text) and text[end : end + 1].isalpha()
+            ):
+                continue
             try:
                 value = float(raw_value)
             except ValueError:  # pragma: no cover - defensive
