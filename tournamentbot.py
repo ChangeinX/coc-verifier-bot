@@ -278,8 +278,7 @@ async def division_for_channel(channel_id: int) -> str | None:
 
 
 def should_auto_accept(result: MatchAutomationResult) -> bool:
-    if result.method == "score" and result.confidence >= AUTO_ACCEPT_CONFIDENCE:
-        return True
+    """Currently disabled; require human confirmation for every match."""
     return False
 
 
@@ -307,6 +306,8 @@ class ResultReviewView(discord.ui.View):
         match_id: str,
         predicted_slot: int,
         predicted_label: str,
+        opponent_slot: int | None,
+        opponent_label: str | None,
         source_channel_id: int,
         source_message_id: int,
     ) -> None:
@@ -315,9 +316,15 @@ class ResultReviewView(discord.ui.View):
         self.match_id = match_id
         self.predicted_slot = predicted_slot
         self.predicted_label = predicted_label
+        self.opponent_slot = opponent_slot
+        self.opponent_label = opponent_label
         self.source_channel_id = source_channel_id
         self.source_message_id = source_message_id
         self._processed = False
+        if opponent_slot is None:
+            self.confirm_opponent.disabled = True
+        elif opponent_label:
+            self.confirm_opponent.label = f"Confirm {opponent_label}"
 
     async def _ensure_permissions(self, interaction: discord.Interaction) -> bool:
         if _has_admin_or_tournament_role(interaction):
@@ -358,9 +365,12 @@ class ResultReviewView(discord.ui.View):
         except discord.HTTPException:  # pragma: no cover - defensive
             return
 
-    @discord.ui.button(label="Confirm Winner", style=discord.ButtonStyle.success)
-    async def confirm_winner(
-        self, interaction: discord.Interaction, _: discord.ui.Button
+    async def _record_winner(
+        self,
+        interaction: discord.Interaction,
+        slot_index: int,
+        winner_label: str,
+        button_label: str,
     ) -> None:
         if not await self._ensure_permissions(interaction):
             return
@@ -391,16 +401,19 @@ class ResultReviewView(discord.ui.View):
         registration_lookup = {entry.user_id: entry for entry in registrations}
         apply_team_names(bracket, registrations)
         try:
-            set_match_winner(bracket, self.match_id, self.predicted_slot + 1)
+            set_match_winner(bracket, self.match_id, slot_index + 1)
         except ValueError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
-            await self._finalize(interaction, f"Unable to record winner: {exc}")
+            await self._finalize(
+                interaction,
+                f"Unable to record winner: {exc}",
+            )
             return
         storage.save_bracket(bracket)
         match_obj = bracket.find_match(self.match_id)
         await self._add_reaction_to_source(interaction, "👍")
         await interaction.response.send_message(
-            f"Recorded {self.predicted_label} as winner for {self.match_id}.",
+            f"Recorded {winner_label} as winner for {self.match_id}.",
             ephemeral=True,
         )
         if match_obj is not None:
@@ -413,7 +426,8 @@ class ResultReviewView(discord.ui.View):
                     registration_lookup=registration_lookup,
                     champion=champion_now,
                     annotation=(
-                        f"Recorded via OCR review by {interaction.user.mention}."
+                        f"Recorded via OCR review by {interaction.user.mention}"
+                        f" using '{button_label}'."
                     ),
                 )
                 if lines:
@@ -426,7 +440,41 @@ class ResultReviewView(discord.ui.View):
                             exc,
                         )
         await self._finalize(
-            interaction, f"Confirmed by {interaction.user.display_name}"
+            interaction,
+            f"Confirmed by {interaction.user.display_name} ({button_label})",
+        )
+
+    @discord.ui.button(label="Confirm Winner", style=discord.ButtonStyle.success)
+    async def confirm_winner(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        await self._record_winner(
+            interaction,
+            self.predicted_slot,
+            self.predicted_label,
+            "Confirm Winner",
+        )
+
+    @discord.ui.button(label="Confirm Opponent", style=discord.ButtonStyle.danger)
+    async def confirm_opponent(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.opponent_slot is None or self.opponent_label is None:
+            await interaction.response.send_message(
+                "Cannot determine the opposing team for this match.",
+                ephemeral=True,
+            )
+            return
+        label = (
+            f"Confirm {self.opponent_label}"
+            if self.opponent_label
+            else button.label or "Confirm Opponent"
+        )
+        await self._record_winner(
+            interaction,
+            self.opponent_slot,
+            self.opponent_label,
+            label,
         )
 
     @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary)
@@ -495,6 +543,16 @@ async def post_review_prompt(
         match_id=match.match_id,
         predicted_slot=result.winner_slot,
         predicted_label=result.winner_label,
+        opponent_slot=(
+            1 - result.winner_slot if result.winner_slot in (0, 1) else None
+        ),
+        opponent_label=(
+            match.competitor_two.display()
+            if result.winner_slot == 0
+            else match.competitor_one.display()
+            if result.winner_slot == 1
+            else None
+        ),
         source_channel_id=message.channel.id,
         source_message_id=message.id,
     )
