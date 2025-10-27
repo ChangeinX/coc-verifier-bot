@@ -12,6 +12,7 @@ from tournament_bot.models import (
     TeamRegistration,
 )
 
+from .nlp import contains_token, token_forms
 from .ocr import DetectedLine, normalize_text
 
 SCORE_PATTERN = re.compile(r"(\d{1,3})(?:\.\d+)?%?")
@@ -45,6 +46,19 @@ class _CompetitorObservation:
     evidence: list[str]
 
 
+def _line_contains_synonym(line: _ProcessedLine, synonyms: set[str]) -> bool:
+    normalized = line.normalized
+    tokens = line.tokens
+    for synonym in synonyms:
+        if not synonym:
+            continue
+        if len(synonym) >= 4 and synonym in normalized:
+            return True
+        if contains_token(tokens, synonym):
+            return True
+    return False
+
+
 def analyze_bracket_matches(
     state: BracketState,
     lines: Sequence[DetectedLine],
@@ -54,7 +68,7 @@ def analyze_bracket_matches(
         _ProcessedLine(
             original=item.content,
             normalized=normalize_text(item.content),
-            tokens=set(re.findall(r"[a-z0-9]+", item.content.lower())),
+            tokens=set(token_forms(item.content)),
         )
         for item in lines
         if item.content.strip()
@@ -128,8 +142,17 @@ def _synonyms_for_slot(
         base = normalize_text(value)
         if base:
             normalized.add(base)
-        tokens = re.findall(r"[a-z0-9]+", value.lower())
-        normalized.update(token for token in tokens if token)
+        forms = token_forms(value)
+        for token in forms:
+            if not token:
+                continue
+            if token.isdigit():
+                continue
+            if len(token) < 3:
+                continue
+            if not any(char.isalpha() for char in token):
+                continue
+            normalized.add(token)
     return normalized
 
 
@@ -146,9 +169,7 @@ def _compute_observation(
     for idx, line in enumerate(lines):
         if not line.normalized:
             continue
-        if not any(syn in line.normalized for syn in synonyms) and synonyms.isdisjoint(
-            line.tokens
-        ):
+        if not _line_contains_synonym(line, synonyms):
             continue
         occurrences += 1
         evidence.append(line.original)

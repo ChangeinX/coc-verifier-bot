@@ -104,3 +104,82 @@ def test_match_automation_service_reads_real_image(simple_bracket) -> None:
     assert preview.ocr_lines, "Expected OCR to return at least one line"
     # We only assert that automation runs; accuracy is validated separately with unit tests.
     assert isinstance(preview.matches, list)
+
+
+def test_analyzer_ignores_short_synonym_false_positive() -> None:
+    base_time = utc_now_iso()
+    registrations = [
+        TeamRegistration(
+            guild_id=1,
+            division_id="solo",
+            user_id=111,
+            user_name="[K$C -> SAMPARK ]",
+            team_name="[K$C -> SAMPARK ]",
+            players=[PlayerEntry(name="Leader", tag="#AAA", town_hall=16)],
+            registered_at=base_time,
+        ),
+        TeamRegistration(
+            guild_id=1,
+            division_id="solo",
+            user_id=222,
+            user_name="nova",
+            team_name="nova",
+            players=[PlayerEntry(name="Nova", tag="#BBB", town_hall=16)],
+            registered_at=base_time,
+        ),
+    ]
+    bracket = create_bracket_state(1, "solo", registrations)
+    lines = [
+        DetectedLine(content="Clan Message", confidence=0.9),
+        DetectedLine(content="FCs 22%", confidence=0.9),
+        DetectedLine(content="10%", confidence=0.9),
+    ]
+    results = analyze_bracket_matches(bracket, lines, registrations)
+    assert results == []
+
+
+def _build_registration(
+    user_id: int,
+    name: str,
+    *,
+    player_name: str,
+) -> TeamRegistration:
+    base_time = utc_now_iso()
+    return TeamRegistration(
+        guild_id=1,
+        division_id="solo",
+        user_id=user_id,
+        user_name=name,
+        team_name=name,
+        players=[PlayerEntry(name=player_name, tag="#AAA", town_hall=16)],
+        registered_at=base_time,
+    )
+
+
+def test_analyzer_ignores_noise_tokens_for_special_char_names() -> None:
+    ayra = _build_registration(111, "AYRA", player_name="A¥RA")
+    opponent = _build_registration(222, "ah not him", player_name="D⭕️rt")
+    bracket = create_bracket_state(1, "solo", [ayra, opponent])
+    lines = [
+        DetectedLine(content="10m left", confidence=0.8),
+        DetectedLine(content="Leader online", confidence=0.8),
+        DetectedLine(content="3m Challenge", confidence=0.8),
+        DetectedLine(content="69%", confidence=0.8),
+    ]
+    results = analyze_bracket_matches(bracket, lines, [ayra, opponent])
+    assert results == []
+
+
+def test_analyzer_detects_special_char_names_when_present() -> None:
+    ayra = _build_registration(111, "AYRA", player_name="A¥RA")
+    opponent = _build_registration(222, "ah not him", player_name="D⭕️rt")
+    bracket = create_bracket_state(1, "solo", [ayra, opponent])
+    lines = [
+        DetectedLine(content="ah not him 64%", confidence=0.9),
+        DetectedLine(content="AYRA 92%", confidence=0.9),
+    ]
+    results = analyze_bracket_matches(bracket, lines, [ayra, opponent])
+    assert results
+    result = results[0]
+    assert result.winner_label == "AYRA"
+    assert result.method == "score"
