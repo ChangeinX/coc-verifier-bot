@@ -501,6 +501,7 @@ async def post_review_prompt(
     division_id: str,
     match: BracketMatch,
     result: MatchAutomationResult,
+    registration_lookup: dict[int, TeamRegistration],
 ) -> None:
     channel = message.channel
     if not isinstance(channel, Messageable):
@@ -527,6 +528,20 @@ async def post_review_prompt(
         value=format_score_summary(result.scores),
         inline=True,
     )
+
+    competitor_lines: list[str] = []
+    for slot in (match.competitor_one, match.competitor_two):
+        registration = (
+            registration_lookup.get(slot.team_id) if slot.team_id is not None else None
+        )
+        label = slot.display()
+        discord_name = registration.user_name if registration else "Unknown"
+        ingame = format_player_names(registration) if registration else "Unknown"
+        competitor_lines.append(
+            f"{label}\nDiscord: {discord_name}\nIn-game: {ingame}"
+        )
+    competitors_value = "\n\n".join(competitor_lines)[:1024]
+    embed.add_field(name="Teams", value=competitors_value, inline=False)
     embed.add_field(
         name="Source",
         value=f"[Jump to message]({message.jump_url})",
@@ -722,7 +737,13 @@ async def handle_result_channel_message(
         storage.save_bracket(bracket)
 
     for match_obj, result in review_results:
-        await post_review_prompt(message, division_id, match_obj, result)
+        await post_review_prompt(
+            message,
+            division_id,
+            match_obj,
+            result,
+            registration_lookup,
+        )
 
     if review_results:
         try:
