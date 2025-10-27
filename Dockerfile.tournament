@@ -13,4 +13,5 @@ COPY tournamentbot.py .
 COPY tournament_bot ./tournament_bot
 COPY verifier_bot ./verifier_bot
 COPY match_automation ./match_automation
+
 CMD ["python", "tournamentbot.py"]
