@@ -230,6 +230,11 @@ data "aws_iam_policy_document" "task_extra" {
       "${aws_cloudwatch_log_group.tournament.arn}:*"
     ]
   }
+
+  statement {
+    actions   = ["textract:DetectDocumentText"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "task_extra" {
