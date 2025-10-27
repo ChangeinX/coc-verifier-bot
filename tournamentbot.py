@@ -205,6 +205,10 @@ storage = TournamentStorage(table)
 coc_client: coc.Client | None = None
 automation_service = MatchAutomationService()
 
+STAFF_ALERT_MENTION: Final[str] = f"<@&{TOURNAMENT_ADMIN_ROLE_ID}>"
+OCR_RETRY_EMOJI: Final[str] = "🔁"
+OCR_BACKFILL_EMOJI: Final[str] = "🆕"
+
 RESULT_DIVISION_BY_CHANNEL: dict[int, str] = {}
 RESULT_CHANNEL_BY_DIVISION: dict[str, int] = {}
 RESULT_CHANNEL_LOCK = asyncio.Lock()
@@ -528,6 +532,7 @@ async def handle_result_channel_message(
     should_save = names_changed
 
     predictions: dict[str, MatchAutomationResult] = {}
+    failure_alert_sent = False
 
     for attachment in image_attachments:
         try:
@@ -544,7 +549,7 @@ async def handle_result_channel_message(
                 automation_service.analyze_image,
                 bracket.clone(),
                 image_bytes,
-                registrations,
+                registrations=registrations,
             )
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
@@ -553,6 +558,25 @@ async def handle_result_channel_message(
                 division_id,
                 exc,
             )
+            if not failure_alert_sent:
+                failure_alert_sent = True
+                alert_lines = [
+                    f"{STAFF_ALERT_MENTION} ⚠️ I couldn't process the screenshot from"
+                    f" {message.author.mention} automatically.",
+                    message.jump_url,
+                    (
+                        f"React with {OCR_RETRY_EMOJI} to retry OCR or"
+                        f" {OCR_BACKFILL_EMOJI} to process older screenshots."
+                    ),
+                ]
+                try:
+                    await message.channel.send("\n".join(alert_lines))
+                except discord.HTTPException as send_exc:  # pragma: no cover - network
+                    log.warning(
+                        "Failed to post OCR failure alert for message %s: %s",
+                        message.id,
+                        send_exc,
+                    )
             continue
         for result in preview.matches:
             if result.confidence < REVIEW_MIN_CONFIDENCE:
@@ -5289,7 +5313,7 @@ async def preview_auto_winners_command(  # pragma: no cover - Discord slash comm
             automation_service.analyze_image,
             bracket_for_analysis,
             image_bytes,
-            registrations,
+            registrations=registrations,
         )
     except RuntimeError as exc:
         log.warning("Match automation OCR failed: %s", exc)
@@ -6298,6 +6322,54 @@ async def on_message(message: discord.Message) -> None:  # pragma: no cover - Di
     division_id = await division_for_channel(message.channel.id)
     if division_id is None:
         return
+    asyncio.create_task(handle_result_channel_message(message, division_id))
+
+
+@bot.event
+async def on_raw_reaction_add(
+    payload: discord.RawReactionActionEvent,
+) -> None:  # pragma: no cover - Discord
+    if payload.user_id == getattr(bot.user, "id", None):
+        return
+    if payload.guild_id is None:
+        return
+
+    emoji = str(payload.emoji)
+    if emoji not in {OCR_RETRY_EMOJI, OCR_BACKFILL_EMOJI}:
+        return
+
+    division_id = await division_for_channel(payload.channel_id)
+    if division_id is None:
+        return
+
+    channel = bot.get_channel(payload.channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(payload.channel_id)
+        except discord.HTTPException as exc:  # pragma: no cover - network
+            log.warning(
+                "Failed to fetch channel %s for OCR reaction: %s",
+                payload.channel_id,
+                exc,
+            )
+            return
+
+    fetch_message = getattr(channel, "fetch_message", None)
+    if fetch_message is None:
+        return
+
+    try:
+        message = await fetch_message(payload.message_id)
+    except discord.NotFound:  # pragma: no cover - Discord
+        return
+    except discord.HTTPException as exc:  # pragma: no cover - network
+        log.warning(
+            "Failed to fetch message %s for OCR reaction: %s",
+            payload.message_id,
+            exc,
+        )
+        return
+
     asyncio.create_task(handle_result_channel_message(message, division_id))
 
 
