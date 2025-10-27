@@ -6,6 +6,7 @@ from botocore.exceptions import ClientError
 from .models import (
     BracketState,
     DivisionResultChannel,
+    MatchAutomationFeedback,
     TeamRegistration,
     TournamentConfig,
     TournamentRoundWindows,
@@ -202,6 +203,11 @@ class TournamentStorage:
         if not item:
             return None
         return BracketState.from_item(item)
+
+    # ----- Match Automation Feedback -----
+    def save_feedback_entry(self, feedback: MatchAutomationFeedback) -> None:
+        self.ensure_table()
+        self._table.put_item(Item=feedback.to_item())
 
     def delete_bracket(self, guild_id: int, division_id: str) -> None:
         self.ensure_table()

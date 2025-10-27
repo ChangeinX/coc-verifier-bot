@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import ClassVar
 
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -86,6 +87,131 @@ class RoundWindowDefinition:
         opens_at = str(data.get("opens_at", ""))
         closes_at = str(data.get("closes_at", ""))
         return cls(position=position, opens_at=opens_at, closes_at=closes_at)
+
+
+@dataclass(slots=True)
+class MatchAutomationFeedback:
+    guild_id: int
+    division_id: str
+    match_id: str
+    source_channel_id: int
+    source_message_id: int
+    source_message_url: str
+    reviewer_id: int
+    reviewer_name: str
+    selected_slot: int
+    selected_label: str
+    predicted_slot: int
+    predicted_label: str
+    predicted_confidence: float
+    predicted_method: str
+    predicted_scores: dict[str, float | None]
+    predicted_evidence: list[str]
+    recorded_at: str
+    attachments: list[str]
+    source_author_id: int | None = None
+    source_author_name: str | None = None
+
+    PK_TEMPLATE: ClassVar[str] = "FEEDBACK#%s"
+    SK_TEMPLATE: ClassVar[str] = "DIVISION#%s#MATCH#%s#%s"
+
+    @classmethod
+    def key(
+        cls, guild_id: int, division_id: str, match_id: str, recorded_at: str
+    ) -> dict[str, str]:
+        return {
+            "pk": cls.PK_TEMPLATE % guild_id,
+            "sk": cls.SK_TEMPLATE % (division_id, match_id, recorded_at),
+        }
+
+    def to_item(self) -> dict[str, object]:
+        item = self.key(
+            self.guild_id, self.division_id, self.match_id, self.recorded_at
+        )
+        item.update(
+            {
+                "division_id": self.division_id,
+                "match_id": self.match_id,
+                "source_channel_id": str(self.source_channel_id),
+                "source_message_id": str(self.source_message_id),
+                "source_message_url": self.source_message_url,
+                "reviewer_id": str(self.reviewer_id),
+                "reviewer_name": self.reviewer_name,
+                "selected_slot": self.selected_slot,
+                "selected_label": self.selected_label,
+                "predicted_slot": self.predicted_slot,
+                "predicted_label": self.predicted_label,
+                "predicted_confidence": Decimal(str(self.predicted_confidence)),
+                "predicted_method": self.predicted_method,
+                "predicted_scores": {
+                    label: Decimal(str(score))
+                    for label, score in self.predicted_scores.items()
+                    if score is not None
+                },
+                "predicted_evidence": list(self.predicted_evidence),
+                "recorded_at": self.recorded_at,
+                "attachments": list(self.attachments),
+            }
+        )
+        if self.source_author_id is not None:
+            item["source_author_id"] = str(self.source_author_id)
+        if self.source_author_name is not None:
+            item["source_author_name"] = self.source_author_name
+        return item
+
+    @classmethod
+    def from_item(cls, item: dict[str, object]) -> MatchAutomationFeedback:
+        pk_value = str(item.get("pk", ""))
+        try:
+            guild_id = int(pk_value.split("#", 1)[1])
+        except (IndexError, ValueError):  # pragma: no cover - defensive
+            guild_id = 0
+        sk_value = str(item.get("sk", ""))
+        parts = sk_value.split("#")
+        division_id = parts[1] if len(parts) > 1 else ""
+        match_id = parts[3] if len(parts) > 3 else ""
+        recorded_at = parts[4] if len(parts) > 4 else str(item.get("recorded_at", ""))
+        raw_scores = item.get("predicted_scores", {})  # type: ignore[assignment]
+        scores: dict[str, float] = {}
+        if isinstance(raw_scores, dict):
+            for label, value in raw_scores.items():
+                try:
+                    scores[str(label)] = float(value)
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    continue
+        evidence_raw = item.get("predicted_evidence", [])  # type: ignore[assignment]
+        evidence = [str(value) for value in evidence_raw if value]
+        attachments_raw = item.get("attachments", [])  # type: ignore[assignment]
+        attachments = [str(value) for value in attachments_raw if value]
+        source_author_raw = item.get("source_author_id")
+        try:
+            source_author_id = (
+                int(source_author_raw) if source_author_raw is not None else None
+            )
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            source_author_id = None
+        return cls(
+            guild_id=guild_id,
+            division_id=str(item.get("division_id", division_id)),
+            match_id=str(item.get("match_id", match_id)),
+            source_channel_id=int(str(item.get("source_channel_id", "0"))),
+            source_message_id=int(str(item.get("source_message_id", "0"))),
+            source_message_url=str(item.get("source_message_url", "")),
+            reviewer_id=int(str(item.get("reviewer_id", "0"))),
+            reviewer_name=str(item.get("reviewer_name", "")),
+            selected_slot=int(str(item.get("selected_slot", "0"))),
+            selected_label=str(item.get("selected_label", "")),
+            predicted_slot=int(str(item.get("predicted_slot", "0"))),
+            predicted_label=str(item.get("predicted_label", "")),
+            predicted_confidence=float(item.get("predicted_confidence", 0.0)),
+            predicted_method=str(item.get("predicted_method", "")),
+            predicted_scores=scores,
+            predicted_evidence=evidence,
+            recorded_at=str(item.get("recorded_at", recorded_at)),
+            attachments=attachments,
+            source_author_id=source_author_id,
+            source_author_name=str(item.get("source_author_name", "")) or None,
+        )
 
 
 @dataclass(slots=True)

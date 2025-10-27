@@ -19,7 +19,12 @@ from discord import app_commands
 from discord.abc import Messageable
 from discord.app_commands import errors as app_errors
 
-from match_automation import MatchAutomationResult, MatchAutomationService
+from match_automation import (
+    FeedbackAttachment,
+    FeedbackRecorder,
+    MatchAutomationResult,
+    MatchAutomationService,
+)
 from tournament_bot import (
     BracketMatch,
     BracketRound,
@@ -62,6 +67,8 @@ COC_EMAIL: Final[str | None] = os.getenv("COC_EMAIL")
 COC_PASSWORD: Final[str | None] = os.getenv("COC_PASSWORD")
 TOURNAMENT_TABLE_NAME: Final[str | None] = os.getenv("TOURNAMENT_TABLE_NAME")
 AWS_REGION: Final[str] = os.getenv("AWS_REGION", "us-east-1")
+MATCH_FEEDBACK_BUCKET: Final[str | None] = os.getenv("MATCH_FEEDBACK_BUCKET")
+MATCH_FEEDBACK_PREFIX: Final[str] = os.getenv("MATCH_FEEDBACK_PREFIX", "")
 REGISTRATION_CHANNEL_ID_RAW: Final[str | None] = os.getenv(
     "TOURNAMENT_REGISTRATION_CHANNEL_ID"
 )
@@ -204,6 +211,16 @@ storage = TournamentStorage(table)
 
 coc_client: coc.Client | None = None
 automation_service = MatchAutomationService()
+if MATCH_FEEDBACK_BUCKET:
+    s3_client = boto3.client("s3", region_name=AWS_REGION)
+else:
+    s3_client = None
+feedback_recorder = FeedbackRecorder(
+    table=table,
+    s3_client=s3_client,
+    bucket=MATCH_FEEDBACK_BUCKET,
+    prefix=MATCH_FEEDBACK_PREFIX,
+)
 
 STAFF_ALERT_MENTION: Final[str] = f"<@&{TOURNAMENT_ADMIN_ROLE_ID}>"
 OCR_RETRY_EMOJI: Final[str] = "🔁"
@@ -347,6 +364,10 @@ class ResultReviewView(discord.ui.View):
         match_id: str,
         predicted_slot: int,
         predicted_label: str,
+        prediction_confidence: float,
+        prediction_method: str,
+        prediction_scores: dict[str, float | None],
+        prediction_evidence: list[str],
         opponent_slot: int | None,
         opponent_label: str | None,
         current_winner_slot: int | None,
@@ -358,6 +379,10 @@ class ResultReviewView(discord.ui.View):
         self.match_id = match_id
         self.predicted_slot = predicted_slot
         self.predicted_label = predicted_label
+        self.prediction_confidence = prediction_confidence
+        self.prediction_method = prediction_method
+        self.prediction_scores = dict(prediction_scores)
+        self.prediction_evidence = list(prediction_evidence)
         self.opponent_slot = opponent_slot
         self.opponent_label = opponent_label
         self.current_winner_slot = current_winner_slot
@@ -412,23 +437,66 @@ class ResultReviewView(discord.ui.View):
                         exc,
                     )
 
-    async def _add_reaction_to_source(
-        self, interaction: discord.Interaction, emoji: str
-    ) -> None:
+    async def _get_source_message(
+        self, interaction: discord.Interaction
+    ) -> discord.Message | None:
         channel = interaction.client.get_channel(self.source_channel_id)
         if channel is None:
             try:
                 channel = await interaction.client.fetch_channel(self.source_channel_id)
             except discord.HTTPException:  # pragma: no cover - defensive
-                return
+                return None
+        if not isinstance(channel, Messageable):
+            return None
         try:
-            original = await channel.fetch_message(self.source_message_id)
+            return await channel.fetch_message(self.source_message_id)
         except discord.HTTPException:  # pragma: no cover - defensive
-            return
+            return None
+
+    async def _collect_feedback_attachments(
+        self, message: discord.Message | None
+    ) -> list[FeedbackAttachment]:
+        if message is None:
+            return []
+        collected: list[FeedbackAttachment] = []
+        for attachment in message.attachments:
+            if not is_image_attachment(attachment):
+                continue
+            try:
+                data = await attachment.read()
+            except discord.HTTPException as exc:  # pragma: no cover - defensive
+                log.warning(
+                    "Failed to download source attachment %s for feedback: %s",
+                    attachment.id,
+                    exc,
+                )
+                continue
+            if not data:
+                continue
+            collected.append(
+                FeedbackAttachment(
+                    filename=attachment.filename,
+                    content_type=attachment.content_type,
+                    data=data,
+                )
+            )
+        return collected
+
+    async def _add_reaction_to_source(
+        self,
+        interaction: discord.Interaction,
+        emoji: str,
+        *,
+        message: discord.Message | None = None,
+    ) -> discord.Message | None:
+        original = message or await self._get_source_message(interaction)
+        if original is None:
+            return None
         try:
             await original.add_reaction(emoji)
         except discord.HTTPException:  # pragma: no cover - defensive
-            return
+            pass
+        return original
 
     async def _record_winner(
         self,
@@ -471,6 +539,28 @@ class ResultReviewView(discord.ui.View):
                 "Match no longer exists in the bracket.", ephemeral=True
             )
             return
+
+        record_feedback = (
+            feedback_recorder.enabled
+            and slot_index in (0, 1)
+            and self.predicted_slot in (0, 1)
+            and slot_index != self.predicted_slot
+        )
+        source_message: discord.Message | None = None
+        source_attachments: list[FeedbackAttachment] = []
+        source_author_id: int | None = None
+        source_author_name: str | None = None
+        if record_feedback:
+            source_message = await self._get_source_message(interaction)
+            source_attachments = await self._collect_feedback_attachments(
+                source_message
+            )
+            if source_message is not None:
+                author = source_message.author
+                source_author_id = getattr(author, "id", None)
+                source_author_name = getattr(author, "display_name", None) or getattr(
+                    author, "name", None
+                )
         if match_obj.winner_index is not None and match_obj.winner_index != slot_index:
             clear_match_winner(bracket, match_obj)
         try:
@@ -484,7 +574,46 @@ class ResultReviewView(discord.ui.View):
             return
         storage.save_bracket(bracket)
         match_obj = bracket.find_match(self.match_id)
-        await self._add_reaction_to_source(interaction, "👍")
+        original_message = await self._add_reaction_to_source(
+            interaction,
+            "👍",
+            message=source_message,
+        )
+        if record_feedback and guild is not None:
+            message_url = (
+                original_message.jump_url
+                if original_message is not None
+                else f"https://discord.com/channels/{guild.id}/{self.source_channel_id}/{self.source_message_id}"
+            )
+            try:
+                await asyncio.to_thread(
+                    feedback_recorder.record_disagreement,
+                    guild_id=guild.id,
+                    division_id=self.division_id,
+                    match_id=self.match_id,
+                    prediction_slot=self.predicted_slot,
+                    prediction_label=self.predicted_label,
+                    prediction_confidence=self.prediction_confidence,
+                    prediction_method=self.prediction_method,
+                    prediction_scores=self.prediction_scores,
+                    prediction_evidence=self.prediction_evidence,
+                    selection_slot=slot_index,
+                    selection_label=winner_label,
+                    reviewer_id=interaction.user.id,
+                    reviewer_name=interaction.user.display_name,
+                    source_channel_id=self.source_channel_id,
+                    source_message_id=self.source_message_id,
+                    source_message_url=message_url,
+                    source_author_id=source_author_id,
+                    source_author_name=source_author_name,
+                    attachments=source_attachments,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning(
+                    "Failed to record OCR feedback for match %s: %s",
+                    self.match_id,
+                    exc,
+                )
         await interaction.response.send_message(
             f"Recorded {winner_label} as winner for {self.match_id}.",
             ephemeral=True,
@@ -643,6 +772,10 @@ async def post_review_prompt(
         match_id=match.match_id,
         predicted_slot=result.winner_slot,
         predicted_label=result.winner_label,
+        prediction_confidence=result.confidence,
+        prediction_method=result.method,
+        prediction_scores=result.scores,
+        prediction_evidence=result.evidence,
         opponent_slot=(
             1 - result.winner_slot if result.winner_slot in (0, 1) else None
         ),

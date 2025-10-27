@@ -55,6 +55,8 @@ Configure the environment separately for each bot. All bots require AWS credenti
 - `TOURNAMENT_TABLE_NAME` - DynamoDB table for tournament configuration and registrations.
 - `TOURNAMENT_ADMIN_ROLE_ID` - Discord role allowed to run tournament admin commands.
 - `TOURNAMENT_CAPTAIN_ROLE_ID` - Discord role applied to active team captains.
+- `MATCH_FEEDBACK_BUCKET` (optional) - S3 bucket for storing OCR feedback artifacts when moderators override suggestions. Provisioned automatically by Terraform.
+- `MATCH_FEEDBACK_PREFIX` (optional) - Path prefix used when uploading feedback attachments (defaults to none).
 - `AWS_REGION` (optional, defaults to `us-east-1`).
 
 ## 5. Running locally

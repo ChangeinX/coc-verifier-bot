@@ -173,6 +173,38 @@ resource "aws_dynamodb_table" "tournaments" {
   }
 }
 
+resource "random_id" "match_feedback_suffix" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "match_feedback" {
+  bucket        = "coc-match-feedback-${random_id.match_feedback_suffix.hex}"
+  force_destroy = true
+
+  tags = {
+    Purpose = "match-automation-feedback"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "match_feedback" {
+  bucket = aws_s3_bucket.match_feedback.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "match_feedback" {
+  bucket = aws_s3_bucket.match_feedback.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 
 data "aws_iam_policy_document" "ecs_task_assume" {
   statement {
@@ -229,6 +261,20 @@ data "aws_iam_policy_document" "task_extra" {
       "${aws_cloudwatch_log_group.giveaway.arn}:*",
       "${aws_cloudwatch_log_group.tournament.arn}:*"
     ]
+  }
+
+  statement {
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:AbortMultipartUpload"
+    ]
+    resources = ["${aws_s3_bucket.match_feedback.arn}/*"]
+  }
+
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.match_feedback.arn]
   }
 
   statement {
@@ -417,6 +463,8 @@ resource "aws_ecs_task_definition" "tournament_bot" {
         { name = "TOURNAMENT_GUILD_ID", value = var.tournament_guild_id },
         { name = "TOURNAMENT_ADMIN_ROLE_ID", value = var.tournament_admin_role_id },
         { name = "TOURNAMENT_CAPTAIN_ROLE_ID", value = var.tournament_captain_role_id },
+        { name = "MATCH_FEEDBACK_BUCKET", value = aws_s3_bucket.match_feedback.bucket },
+        { name = "MATCH_FEEDBACK_PREFIX", value = "ocr-feedback" },
         { name = "AWS_REGION", value = var.aws_region }
       ]
       logConfiguration = {
