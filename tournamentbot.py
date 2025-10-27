@@ -561,8 +561,11 @@ async def handle_result_channel_message(
             if not failure_alert_sent:
                 failure_alert_sent = True
                 alert_lines = [
-                    f"{STAFF_ALERT_MENTION} ⚠️ I couldn't process the screenshot from"
-                    f" {message.author.mention} automatically.",
+                    (
+                        f"{STAFF_ALERT_MENTION} ⚠️ I couldn't process this"
+                        " screenshot automatically."
+                    ),
+                    f"Posted by {message.author.display_name}",
                     message.jump_url,
                     (
                         f"React with {OCR_RETRY_EMOJI} to retry OCR or"
