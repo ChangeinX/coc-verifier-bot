@@ -92,13 +92,16 @@ def _analyze_single_match(
     registrations: dict[int, TeamRegistration],
 ) -> MatchAutomationResult | None:
     slots = [match.competitor_one, match.competitor_two]
+    synonyms_map: list[set[str]] = []
     observations: list[_CompetitorObservation] = []
 
-    for index, slot in enumerate(slots):
+    for slot in slots:
         if slot.team_label == "BYE" or slot.team_id is None:
             return None
-        synonyms = _synonyms_for_slot(slot, registrations.get(slot.team_id))
-        observation = _compute_observation(index, slot.team_label, synonyms, lines)
+        synonyms_map.append(_synonyms_for_slot(slot, registrations.get(slot.team_id)))
+
+    for index, slot in enumerate(slots):
+        observation = _compute_observation(index, slot.team_label, synonyms_map, lines)
         observations.append(observation)
 
     if not any(obs.occurrences for obs in observations):
@@ -159,9 +162,10 @@ def _synonyms_for_slot(
 def _compute_observation(
     slot_index: int,
     label: str,
-    synonyms: set[str],
+    synonyms_map: Sequence[set[str]],
     lines: Sequence[_ProcessedLine],
 ) -> _CompetitorObservation:
+    synonyms = synonyms_map[slot_index]
     occurrences = 0
     evidence: list[str] = []
     best_score: float | None = None
@@ -173,7 +177,7 @@ def _compute_observation(
             continue
         occurrences += 1
         evidence.append(line.original)
-        score_values = _scores_near_line(lines, idx, synonyms)
+        score_values = _scores_near_line(lines, idx, slot_index, synonyms_map)
         if score_values:
             top = max(score_values)
             if best_score is None or top > best_score:
@@ -192,14 +196,15 @@ def _compute_observation(
 def _scores_near_line(
     lines: Sequence[_ProcessedLine],
     idx: int,
-    synonyms: set[str],
+    slot_index: int,
+    synonyms_map: Sequence[set[str]],
 ) -> list[float]:
-    window = range(max(0, idx - 1), min(len(lines), idx + 2))
+    window = range(max(0, idx - 1), min(len(lines), idx + 5))
     values: list[float] = []
     for position in window:
         text = lines[position].original
         if position != idx and any(char.isalpha() for char in text):
-            if not _line_contains_synonym(lines[position], synonyms):
+            if not _line_contains_synonym(lines[position], synonyms_map[slot_index]):
                 continue
         for match in SCORE_PATTERN.finditer(text):
             raw_value = match.group(1)
@@ -209,6 +214,12 @@ def _scores_near_line(
                 end < len(text) and text[end : end + 1].isalpha()
             ):
                 continue
+            if _line_contains_synonym(lines[position], synonyms_map[slot_index]):
+                owner = slot_index
+            else:
+                owner = _score_owner(lines, position, synonyms_map)
+            if owner is not None and owner != slot_index:
+                continue
             try:
                 value = float(raw_value)
             except ValueError:  # pragma: no cover - defensive
@@ -216,6 +227,42 @@ def _scores_near_line(
             if 0 <= value <= 100:
                 values.append(value)
     return values
+
+
+def _score_owner(
+    lines: Sequence[_ProcessedLine],
+    score_idx: int,
+    synonyms_map: Sequence[set[str]],
+) -> int | None:
+    search_start = max(0, score_idx - 6)
+    hits: list[tuple[int, int]] = []
+    seen_slots: set[int] = set()
+    for position in range(score_idx - 1, search_start - 1, -1):
+        candidate = lines[position]
+        if not candidate.normalized:
+            continue
+        for slot_index, synonyms in enumerate(synonyms_map):
+            if _line_contains_synonym(candidate, synonyms):
+                if slot_index in seen_slots:
+                    continue
+                hits.append((slot_index, position))
+                seen_slots.add(slot_index)
+                break
+    if not hits:
+        return None
+
+    replay_ahead = False
+    for position in range(score_idx + 1, min(len(lines), score_idx + 3)):
+        normalized = lines[position].normalized
+        if normalized and "replay" in normalized:
+            replay_ahead = True
+            break
+
+    if replay_ahead:
+        chosen = min(hits, key=lambda item: item[1])
+    else:
+        chosen = max(hits, key=lambda item: item[1])
+    return chosen[0]
 
 
 def _decide_winner(

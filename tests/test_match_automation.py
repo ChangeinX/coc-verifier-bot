@@ -188,13 +188,52 @@ def test_analyzer_detects_special_char_names_when_present() -> None:
 def test_analyzer_links_score_on_following_line(simple_bracket) -> None:
     bracket, registrations = simple_bracket
     lines = [
-        DetectedLine(content="vraj2", confidence=0.9),
-        DetectedLine(content="54%", confidence=0.9),
         DetectedLine(content="RUSHER X", confidence=0.9),
         DetectedLine(content="88%", confidence=0.9),
+        DetectedLine(content="vraj2", confidence=0.9),
+        DetectedLine(content="54%", confidence=0.9),
     ]
     results = analyze_bracket_matches(bracket, lines, registrations)
     assert results
     result = results[0]
     assert result.winner_label == "RUSHER X"
     assert result.method == "score"
+
+
+def test_analyzer_prefers_attacker_in_textract_layout(simple_bracket) -> None:
+    attacker = TeamRegistration(
+        guild_id=1,
+        division_id="solo",
+        user_id=1,
+        user_name="SanD BoX",
+        team_name="SanD BoX",
+        players=[PlayerEntry(name="SanD BoX", tag="#AAA", town_hall=16)],
+        registered_at=utc_now_iso(),
+    )
+    defender = TeamRegistration(
+        guild_id=1,
+        division_id="solo",
+        user_id=2,
+        user_name="Indrathereal",
+        team_name="Indrathereal",
+        players=[PlayerEntry(name="Indrathereal", tag="#BBB", town_hall=16)],
+        registered_at=utc_now_iso(),
+    )
+    registrations = [attacker, defender]
+    bracket = create_bracket_state(1, "solo", registrations)
+    lines = [
+        DetectedLine(content="SanD BoX", confidence=0.9),
+        DetectedLine(content="Indrathereal", confidence=0.9),
+        DetectedLine(content="100%", confidence=0.9),
+        DetectedLine(content="Replay", confidence=0.9),
+        DetectedLine(content="Indrathereal", confidence=0.9),
+        DetectedLine(content="SanD BoX", confidence=0.9),
+        DetectedLine(content="74%", confidence=0.9),
+        DetectedLine(content="Replay", confidence=0.9),
+    ]
+    results = analyze_bracket_matches(bracket, lines, registrations)
+    assert results
+    result = results[0]
+    assert result.winner_label == "SanD BoX"
+    assert result.scores["SanD BoX"] == 100.0
+    assert result.scores["Indrathereal"] == 74.0
