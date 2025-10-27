@@ -368,7 +368,7 @@ def test_resolve_registration_owner_rejects_non_admin():
         tournamentbot.resolve_registration_owner(interaction, target)
 
 
-def _simple_bracket() -> tuple[tournamentbot.BracketState, str]:
+def _simple_bracket() -> tuple[tournamentbot.BracketState, str, list[TeamRegistration]]:
     base_time = utc_now_iso()
     registrations = [
         TeamRegistration(
@@ -392,11 +392,11 @@ def _simple_bracket() -> tuple[tournamentbot.BracketState, str]:
     ]
     bracket = create_bracket_state(1, "solo", registrations)
     match_id = bracket.rounds[0].matches[0].match_id
-    return bracket, match_id
+    return bracket, match_id, registrations
 
 
 def test_collect_review_predictions_uses_low_confidence_fallback():
-    bracket, match_id = _simple_bracket()
+    bracket, match_id, _ = _simple_bracket()
     low_confidence = SimpleNamespace(
         match_id=match_id,
         winner_slot=0,
@@ -416,7 +416,7 @@ def test_collect_review_predictions_uses_low_confidence_fallback():
 
 
 def test_collect_review_predictions_prefers_high_confidence():
-    bracket, match_id = _simple_bracket()
+    bracket, match_id, _ = _simple_bracket()
     high_confidence = SimpleNamespace(
         match_id=match_id,
         winner_slot=0,
@@ -436,7 +436,7 @@ def test_collect_review_predictions_prefers_high_confidence():
 
 
 def test_collect_review_predictions_skips_completed_matches():
-    bracket, match_id = _simple_bracket()
+    bracket, match_id, _ = _simple_bracket()
     match = bracket.find_match(match_id)
     assert match is not None
     match.winner_index = 0
@@ -454,3 +454,23 @@ def test_collect_review_predictions_skips_completed_matches():
 
     assert predictions == {}
     assert fallback is None
+
+
+def test_build_winner_update_lines_use_in_game_name():
+    bracket, match_id, registrations = _simple_bracket()
+    match = bracket.find_match(match_id)
+    assert match is not None
+    match.winner_index = 0
+    registration_lookup = {
+        registration.user_id: registration for registration in registrations
+    }
+
+    lines = tournamentbot.build_winner_update_lines(
+        bracket,
+        match,
+        registration_lookup=registration_lookup,
+        champion=None,
+    )
+
+    assert any("Winner (in-game): Alpha" in line for line in lines)
+    assert all("Captain:" not in line for line in lines)

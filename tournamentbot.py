@@ -382,17 +382,35 @@ class ResultReviewView(discord.ui.View):
         )
         return False
 
-    async def _finalize(self, interaction: discord.Interaction, note: str) -> None:
+    async def _finalize(
+        self,
+        interaction: discord.Interaction,
+        note: str,
+        *,
+        delete_message: bool = False,
+    ) -> None:
         self._processed = True
         for child in self.children:
             child.disabled = True
-        embed_to_use = None
-        if interaction.message and interaction.message.embeds:
-            embed_to_use = discord.Embed.from_dict(
-                interaction.message.embeds[0].to_dict()
-            )
-            embed_to_use.set_footer(text=note)
-        await interaction.message.edit(embed=embed_to_use, view=self)
+        message = interaction.message
+        if message is not None:
+            embed_to_use = None
+            if message.embeds:
+                embed_to_use = discord.Embed.from_dict(message.embeds[0].to_dict())
+                embed_to_use.set_footer(text=note)
+            try:
+                await message.edit(embed=embed_to_use, view=self)
+            except discord.HTTPException:  # pragma: no cover - defensive
+                pass
+            if delete_message:
+                try:
+                    await message.delete()
+                except discord.HTTPException as exc:  # pragma: no cover - defensive
+                    log.warning(
+                        "Failed to delete OCR review message for %s: %s",
+                        self.match_id,
+                        exc,
+                    )
 
     async def _add_reaction_to_source(
         self, interaction: discord.Interaction, emoji: str
@@ -497,6 +515,7 @@ class ResultReviewView(discord.ui.View):
         await self._finalize(
             interaction,
             f"Confirmed by {interaction.user.display_name} ({button_label})",
+            delete_message=True,
         )
 
     @discord.ui.button(label="Confirm Winner", style=discord.ButtonStyle.success)
@@ -2828,6 +2847,18 @@ def format_player_names(registration: TeamRegistration) -> str:
     return ", ".join(names) if names else "No player names on file"
 
 
+def primary_player_name(registration: TeamRegistration | None) -> str:
+    if registration is None:
+        return "Unknown player"
+    for player in registration.players:
+        if player.name:
+            return player.name
+    substitute = registration.substitute
+    if substitute and substitute.name:
+        return substitute.name
+    return team_display_name(registration)
+
+
 def describe_round(bracket: BracketState, match: BracketMatch) -> str:
     if 0 <= match.round_index < len(bracket.rounds):
         return bracket.rounds[match.round_index].name
@@ -2872,23 +2903,18 @@ def build_winner_update_lines(
         else loser_slot.display()
     )
 
-    if winner_slot.team_id is not None:
-        winner_captain = f"<@{winner_slot.team_id}>"
-    else:
-        winner_captain = winner_label
-
-    if loser_slot.team_id is not None:
-        loser_captain = f"<@{loser_slot.team_id}>"
-    else:
-        loser_captain = None
+    winner_player = primary_player_name(winner_registration)
+    loser_player = (
+        primary_player_name(loser_registration) if loser_registration else None
+    )
 
     lines = [
         f"Winner recorded for {match.match_id}: {winner_label} defeated {loser_label}.",
-        f"Captain: {winner_captain}",
+        f"Winner (in-game): {winner_player}",
     ]
 
-    if loser_captain is not None and loser_captain != winner_captain:
-        lines.append(f"Opponent captain: {loser_captain}")
+    if loser_player and loser_player != winner_player:
+        lines.append(f"Opponent (in-game): {loser_player}")
 
     next_match: BracketMatch | None = None
     next_opponent_slot: BracketSlot | None = None
