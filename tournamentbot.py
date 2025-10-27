@@ -534,6 +534,13 @@ async def handle_result_channel_message(
     predictions: dict[str, MatchAutomationResult] = {}
     failure_alert_sent = False
 
+    log.info(
+        "Match automation starting for message_id=%s division=%s attachments=%s",
+        message.id,
+        division_id,
+        [attachment.filename for attachment in image_attachments],
+    )
+
     for attachment in image_attachments:
         try:
             image_bytes = await attachment.read()
@@ -544,6 +551,13 @@ async def handle_result_channel_message(
             continue
         if not image_bytes:
             continue
+        log.info(
+            "Submitting attachment=%s size=%d bytes for OCR (message_id=%s division=%s)",
+            attachment.filename,
+            len(image_bytes),
+            message.id,
+            division_id,
+        )
         try:
             preview = await asyncio.to_thread(
                 automation_service.analyze_image,
@@ -581,6 +595,12 @@ async def handle_result_channel_message(
                         send_exc,
                     )
             continue
+        log.info(
+            "OCR completed for attachment=%s message_id=%s with %d candidate matches",
+            attachment.filename,
+            message.id,
+            len(preview.matches),
+        )
         for result in preview.matches:
             if result.confidence < REVIEW_MIN_CONFIDENCE:
                 continue

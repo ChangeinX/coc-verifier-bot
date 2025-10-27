@@ -391,8 +391,8 @@ resource "aws_ecs_task_definition" "tournament_bot" {
   family                   = "coc-tournament-bot"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = "256"
-  memory                   = "512"
+  cpu                      = "512"
+  memory                   = "1024"
   runtime_platform {
     cpu_architecture        = "ARM64"
     operating_system_family = "LINUX"
