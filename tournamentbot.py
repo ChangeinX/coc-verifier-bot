@@ -144,6 +144,7 @@ TOURNAMENT_GUILD_ID: Final[int | None] = _guild_id
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
+intents.message_content = True
 
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
