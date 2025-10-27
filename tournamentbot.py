@@ -308,6 +308,7 @@ class ResultReviewView(discord.ui.View):
         predicted_label: str,
         opponent_slot: int | None,
         opponent_label: str | None,
+        current_winner_slot: int | None,
         source_channel_id: int,
         source_message_id: int,
     ) -> None:
@@ -318,6 +319,7 @@ class ResultReviewView(discord.ui.View):
         self.predicted_label = predicted_label
         self.opponent_slot = opponent_slot
         self.opponent_label = opponent_label
+        self.current_winner_slot = current_winner_slot
         self.source_channel_id = source_channel_id
         self.source_message_id = source_message_id
         self._processed = False
@@ -325,6 +327,10 @@ class ResultReviewView(discord.ui.View):
             self.confirm_opponent.disabled = True
         elif opponent_label:
             self.confirm_opponent.label = f"Confirm {opponent_label}"
+        if current_winner_slot == predicted_slot:
+            self.confirm_winner.label = "Confirm Winner (current)"
+        elif current_winner_slot is not None:
+            self.confirm_winner.label = "Confirm Winner (override)"
 
     async def _ensure_permissions(self, interaction: discord.Interaction) -> bool:
         if _has_admin_or_tournament_role(interaction):
@@ -400,6 +406,17 @@ class ResultReviewView(discord.ui.View):
         registrations = storage.list_registrations(guild.id, self.division_id)
         registration_lookup = {entry.user_id: entry for entry in registrations}
         apply_team_names(bracket, registrations)
+        match_obj = bracket.find_match(self.match_id)
+        if match_obj is None:
+            await interaction.response.send_message(
+                "Match no longer exists in the bracket.", ephemeral=True
+            )
+            return
+        if (
+            match_obj.winner_index is not None
+            and match_obj.winner_index != slot_index
+        ):
+            clear_match_winner(bracket, match_obj)
         try:
             set_match_winner(bracket, self.match_id, slot_index + 1)
         except ValueError as exc:
@@ -502,6 +519,7 @@ async def post_review_prompt(
     match: BracketMatch,
     result: MatchAutomationResult,
     registration_lookup: dict[int, TeamRegistration],
+    current_winner_slot: int | None,
 ) -> None:
     channel = message.channel
     if not isinstance(channel, Messageable):
@@ -542,6 +560,18 @@ async def post_review_prompt(
         )
     competitors_value = "\n\n".join(competitor_lines)[:1024]
     embed.add_field(name="Teams", value=competitors_value, inline=False)
+
+    if current_winner_slot in (0, 1):
+        current_label = (
+            match.competitor_one.display()
+            if current_winner_slot == 0
+            else match.competitor_two.display()
+        )
+        embed.add_field(
+            name="Currently recorded",
+            value=current_label,
+            inline=False,
+        )
     embed.add_field(
         name="Source",
         value=f"[Jump to message]({message.jump_url})",
@@ -568,6 +598,7 @@ async def post_review_prompt(
             if result.winner_slot == 1
             else None
         ),
+        current_winner_slot=match.winner_index,
         source_channel_id=message.channel.id,
         source_message_id=message.id,
     )
@@ -743,6 +774,7 @@ async def handle_result_channel_message(
             match_obj,
             result,
             registration_lookup,
+            match_obj.winner_index,
         )
 
     if review_results:
