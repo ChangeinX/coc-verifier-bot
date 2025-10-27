@@ -282,6 +282,47 @@ def should_auto_accept(result: MatchAutomationResult) -> bool:
     return False
 
 
+def _collect_review_predictions(
+    bracket: BracketState,
+    matches: Sequence[MatchAutomationResult],
+) -> tuple[dict[str, MatchAutomationResult], MatchAutomationResult | None]:
+    """Return the highest-confidence review predictions per match.
+
+    When no prediction meets the review confidence threshold, fall back to the
+    best available candidate so moderators can still review the OCR result
+    manually.
+    """
+
+    predictions: dict[str, MatchAutomationResult] = {}
+    fallback_candidate: tuple[str, MatchAutomationResult] | None = None
+
+    for result in matches:
+        match = bracket.find_match(result.match_id)
+        if match is None or match.winner_index is not None:
+            continue
+
+        if (
+            fallback_candidate is None
+            or result.confidence > fallback_candidate[1].confidence
+        ):
+            fallback_candidate = (result.match_id, result)
+
+        if result.confidence < REVIEW_MIN_CONFIDENCE:
+            continue
+
+        existing = predictions.get(result.match_id)
+        if existing is None or result.confidence > existing.confidence:
+            predictions[result.match_id] = result
+
+    fallback_used: MatchAutomationResult | None = None
+    if not predictions and fallback_candidate is not None:
+        match_id, result = fallback_candidate
+        predictions[match_id] = result
+        fallback_used = result
+
+    return predictions, fallback_used
+
+
 def format_score_summary(scores: dict[str, float | None]) -> str:
     parts: list[str] = []
     for label, value in scores.items():
@@ -412,10 +453,7 @@ class ResultReviewView(discord.ui.View):
                 "Match no longer exists in the bracket.", ephemeral=True
             )
             return
-        if (
-            match_obj.winner_index is not None
-            and match_obj.winner_index != slot_index
-        ):
+        if match_obj.winner_index is not None and match_obj.winner_index != slot_index:
             clear_match_winner(bracket, match_obj)
         try:
             set_match_winner(bracket, self.match_id, slot_index + 1)
@@ -555,9 +593,7 @@ async def post_review_prompt(
         label = slot.display()
         discord_name = registration.user_name if registration else "Unknown"
         ingame = format_player_names(registration) if registration else "Unknown"
-        competitor_lines.append(
-            f"{label}\nDiscord: {discord_name}\nIn-game: {ingame}"
-        )
+        competitor_lines.append(f"{label}\nDiscord: {discord_name}\nIn-game: {ingame}")
     competitors_value = "\n\n".join(competitor_lines)[:1024]
     embed.add_field(name="Teams", value=competitors_value, inline=False)
 
@@ -635,7 +671,7 @@ async def handle_result_channel_message(
     names_changed = apply_team_names(bracket, registrations)
     should_save = names_changed
 
-    predictions: dict[str, MatchAutomationResult] = {}
+    collected_results: list[MatchAutomationResult] = []
     failure_alert_sent = False
 
     log.info(
@@ -705,20 +741,22 @@ async def handle_result_channel_message(
             message.id,
             len(preview.matches),
         )
-        for result in preview.matches:
-            if result.confidence < REVIEW_MIN_CONFIDENCE:
-                continue
-            match_obj = bracket.find_match(result.match_id)
-            if match_obj is None or match_obj.winner_index is not None:
-                continue
-            existing = predictions.get(result.match_id)
-            if existing is None or result.confidence > existing.confidence:
-                predictions[result.match_id] = result
+        collected_results.extend(preview.matches)
 
     try:
         await message.add_reaction("👍")
     except discord.HTTPException:  # pragma: no cover - defensive
         pass
+
+    predictions, fallback_prediction = _collect_review_predictions(
+        bracket, collected_results
+    )
+    if fallback_prediction is not None:
+        log.info(
+            "No high-confidence OCR result found; using best candidate for manual review: match_id=%s confidence=%.2f",
+            fallback_prediction.match_id,
+            fallback_prediction.confidence,
+        )
 
     if not predictions:
         return

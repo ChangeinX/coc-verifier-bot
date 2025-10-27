@@ -15,6 +15,7 @@ from tournament_bot import (
     TournamentSeries,
     utc_now_iso,
 )
+from tournament_bot.bracket import create_bracket_state
 
 
 def test_build_setup_overview_embed_lists_divisions():
@@ -365,3 +366,91 @@ def test_resolve_registration_owner_rejects_non_admin():
 
     with pytest.raises(PermissionError):
         tournamentbot.resolve_registration_owner(interaction, target)
+
+
+def _simple_bracket() -> tuple[tournamentbot.BracketState, str]:
+    base_time = utc_now_iso()
+    registrations = [
+        TeamRegistration(
+            guild_id=1,
+            division_id="solo",
+            user_id=101,
+            user_name="Alpha",
+            team_name="Alpha",
+            players=[PlayerEntry(name="Alpha", tag="#AAA", town_hall=16)],
+            registered_at=base_time,
+        ),
+        TeamRegistration(
+            guild_id=1,
+            division_id="solo",
+            user_id=202,
+            user_name="Bravo",
+            team_name="Bravo",
+            players=[PlayerEntry(name="Bravo", tag="#BBB", town_hall=16)],
+            registered_at=base_time,
+        ),
+    ]
+    bracket = create_bracket_state(1, "solo", registrations)
+    match_id = bracket.rounds[0].matches[0].match_id
+    return bracket, match_id
+
+
+def test_collect_review_predictions_uses_low_confidence_fallback():
+    bracket, match_id = _simple_bracket()
+    low_confidence = SimpleNamespace(
+        match_id=match_id,
+        winner_slot=0,
+        winner_label="Alpha",
+        confidence=0.45,
+        method="mentions",
+        evidence=["Alpha wins"],
+        scores={"Alpha": None, "Bravo": None},
+    )
+
+    predictions, fallback = tournamentbot._collect_review_predictions(
+        bracket, [low_confidence]
+    )
+
+    assert predictions == {match_id: low_confidence}
+    assert fallback is low_confidence
+
+
+def test_collect_review_predictions_prefers_high_confidence():
+    bracket, match_id = _simple_bracket()
+    high_confidence = SimpleNamespace(
+        match_id=match_id,
+        winner_slot=0,
+        winner_label="Alpha",
+        confidence=0.82,
+        method="score",
+        evidence=["Alpha 82%"],
+        scores={"Alpha": 82.0, "Bravo": 14.0},
+    )
+
+    predictions, fallback = tournamentbot._collect_review_predictions(
+        bracket, [high_confidence]
+    )
+
+    assert predictions == {match_id: high_confidence}
+    assert fallback is None
+
+
+def test_collect_review_predictions_skips_completed_matches():
+    bracket, match_id = _simple_bracket()
+    match = bracket.find_match(match_id)
+    assert match is not None
+    match.winner_index = 0
+    result = SimpleNamespace(
+        match_id=match_id,
+        winner_slot=0,
+        winner_label="Alpha",
+        confidence=0.75,
+        method="score",
+        evidence=["Alpha 75%"],
+        scores={"Alpha": 75.0, "Bravo": 10.0},
+    )
+
+    predictions, fallback = tournamentbot._collect_review_predictions(bracket, [result])
+
+    assert predictions == {}
+    assert fallback is None

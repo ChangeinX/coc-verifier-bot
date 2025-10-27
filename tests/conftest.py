@@ -3,6 +3,28 @@ from __future__ import annotations
 import sys
 import types
 
+
+STRIPPABLE_PUNCTUATION = "[](){}<>\"'"
+
+
+def _register_spacy_stub() -> None:
+    if "spacy" in sys.modules:
+        return
+
+    def _fake_tokenizer(value: str):
+        tokens = []
+        for raw in value.split():
+            cleaned = raw.strip(STRIPPABLE_PUNCTUATION)
+            if not cleaned:
+                cleaned = raw
+            tokens.append(types.SimpleNamespace(text=cleaned, lemma_=cleaned))
+        return tokens
+
+    spacy_module = types.ModuleType("spacy")
+    spacy_module.blank = lambda _lang: types.SimpleNamespace(tokenizer=_fake_tokenizer)
+    sys.modules["spacy"] = spacy_module
+
+
 if "coc" not in sys.modules:
     coc_module = types.ModuleType("coc")
 
@@ -35,3 +57,6 @@ if "coc" not in sys.modules:
     coc_module.HTTPException = DummyHTTPException
     coc_module.NotFound = DummyNotFound
     sys.modules["coc"] = coc_module
+
+
+_register_spacy_stub()
