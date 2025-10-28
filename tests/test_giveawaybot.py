@@ -3,6 +3,7 @@
 import asyncio
 import datetime
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import discord
@@ -941,6 +942,53 @@ class TestFinishGiveaway:
         scheduled_time = datetime.datetime.fromisoformat(scheduled_iso)
         assert scheduled_time.tzinfo is not None
         assert scheduled_time >= start + datetime.timedelta(minutes=59)
+
+    @pytest.mark.asyncio
+    async def test_finish_giveaway_reschedules_when_raid_log_not_ready(self):
+        """Gift card draws should push back when raid log data is stale."""
+
+        run_id = "run123"
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {
+            "Item": {
+                "run_id": run_id,
+                "message_id": "111222333",
+                "draw_time": "2025-10-26T23:00:00+00:00",
+            }
+        }
+        mock_table.query.return_value = {
+            "Items": [{"user_id": f"{run_id}#555555555555555555"}]
+        }
+
+        mock_ver_table = MagicMock()
+        mock_ver_table.get_item.return_value = {
+            "Item": {"player_tag": "#PLAYER1", "clan_tag": "#TESTCLAN"}
+        }
+
+        stale_entry = MagicMock()
+        stale_entry.get_member.return_value = None
+        stale_entry.end_time = SimpleNamespace(
+            time=datetime.datetime(2025, 10, 19, 5, 0, 0)
+        )
+
+        coc_client_mock = MagicMock()
+        coc_client_mock.get_raid_log = AsyncMock(return_value=[stale_entry])
+
+        with (
+            patch.object(giveawaybot, "table", mock_table),
+            patch.object(giveawaybot, "ver_table", mock_ver_table),
+            patch.object(giveawaybot, "coc_client", coc_client_mock),
+            patch.object(
+                giveawaybot,
+                "_reschedule_giveaway_draw",
+                return_value=datetime.datetime(2025, 10, 27, 0, 0, tzinfo=datetime.UTC),
+            ) as reschedule_mock,
+        ):
+            winners = await giveawaybot.finish_giveaway("giftcard-2025-10-23")
+
+        assert winners == []
+        reschedule_mock.assert_called_once_with("giftcard-2025-10-23")
+        mock_table.update_item.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_finish_giveaway_logs_when_reschedule_fails(self):

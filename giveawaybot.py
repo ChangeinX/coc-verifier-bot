@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import datetime
 import logging
@@ -7,7 +9,7 @@ import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from zoneinfo import ZoneInfo
 
 import boto3
@@ -44,6 +46,9 @@ from discord.ext import tasks
 
 # Import fairness system
 from giveaway_fairness import select_fair_winners, update_giveaway_stats
+
+if TYPE_CHECKING:
+    from coc.raid import RaidLogEntry
 
 
 def _ensure_messageable_channel(channel: object) -> discord.abc.Messageable | None:
@@ -232,6 +237,9 @@ GUILD_OBJECT = (
     discord.Object(id=GIVEAWAY_GUILD_ID) if GIVEAWAY_GUILD_ID is not None else None
 )
 
+RAID_WEEKEND_END_HOUR_UTC: Final[int] = 7
+GIFT_CARD_DRAW_DELAY: Final[datetime.timedelta] = datetime.timedelta(hours=4)
+
 
 def giveaway_command(*args, **kwargs):
     """Register a giveaway slash command scoped to the configured guild."""
@@ -333,6 +341,28 @@ GIVEAWAY_RETRY_DELAY: Final[datetime.timedelta] = datetime.timedelta(hours=1)
 
 class TransientRaidLogError(RuntimeError):
     """Raised when raid log retrieval fails due to a transient API issue."""
+
+
+class RaidLogNotReadyError(TransientRaidLogError):
+    """Raised when the raid log has not yet published the relevant weekend."""
+
+    def __init__(
+        self,
+        clan_tag: str,
+        *,
+        expected_end: datetime.datetime | None = None,
+        actual_end: datetime.datetime | None = None,
+    ) -> None:
+        message = f"Raid log for {clan_tag} is not yet available"
+        if expected_end is not None and actual_end is not None:
+            message = (
+                f"Raid log for {clan_tag} is not yet available "
+                f"(expected >= {expected_end.isoformat()}, got {actual_end.isoformat()})"
+            )
+        super().__init__(message)
+        self.clan_tag = clan_tag
+        self.expected_end = expected_end
+        self.actual_end = actual_end
 
 
 def _reschedule_giveaway_draw(gid: str) -> datetime.datetime | None:
@@ -834,10 +864,11 @@ async def schedule_check() -> None:
         gid = weekly_giveaway_id(today)
         if not await giveaway_exists(gid):
             sunday = today + datetime.timedelta(days=3)
-            draw_time = datetime.datetime.combine(
-                sunday,
-                datetime.time(hour=18, tzinfo=ZoneInfo("America/Chicago")),
-            ).astimezone(datetime.UTC)
+            weekend_close = datetime.datetime.combine(
+                sunday + datetime.timedelta(days=1),
+                datetime.time(hour=RAID_WEEKEND_END_HOUR_UTC, tzinfo=datetime.UTC),
+            )
+            draw_time = weekend_close + GIFT_CARD_DRAW_DELAY
             await create_giveaway(
                 gid,
                 "🎁 $10 Gift Card Giveaway",
@@ -864,7 +895,30 @@ async def giveaway_exists(giveaway_id: str) -> bool:
     return bool(item and not item.get("drawn"))
 
 
-async def eligible_for_giftcard(discord_id: str) -> bool:
+def _giftcard_weekend_end(giveaway_id: str) -> datetime.datetime | None:
+    """Return the expected end of the raid weekend for the giveaway."""
+
+    if not giveaway_id.startswith("giftcard-"):
+        return None
+
+    date_fragment = giveaway_id[len("giftcard-") :]
+    try:
+        giveaway_date = datetime.date.fromisoformat(date_fragment)
+    except ValueError:
+        return None
+
+    weekend_end_date = giveaway_date + datetime.timedelta(days=4)
+    return datetime.datetime.combine(
+        weekend_end_date, datetime.time(tzinfo=datetime.UTC)
+    )
+
+
+async def eligible_for_giftcard(
+    discord_id: str,
+    *,
+    weekend_end: datetime.datetime | None = None,
+    raid_cache: dict[str, RaidLogEntry | None] | None = None,
+) -> bool:
     item: dict | None = None
     if ver_table is not None:
         try:
@@ -894,37 +948,92 @@ async def eligible_for_giftcard(discord_id: str) -> bool:
         log.debug("No player tag recorded for %s", discord_id)
         return False
 
-    clan_tag = item.get("clan_tag") or CLAN_TAG
-    if not clan_tag:
+    candidate_clans: list[str] = []
+    clan_tag = item.get("clan_tag")
+    if isinstance(clan_tag, str) and clan_tag.strip():
+        candidate_clans.append(clan_tag.strip())
+
+    if CLAN_TAG and CLAN_TAG not in candidate_clans:
+        candidate_clans.append(CLAN_TAG)
+
+    if FEEDER_CLAN_TAG and FEEDER_CLAN_TAG not in candidate_clans:
+        candidate_clans.append(FEEDER_CLAN_TAG)
+
+    if not candidate_clans:
         log.warning(
             "No clan tag available for %s; cannot validate eligibility", discord_id
         )
         return False
 
-    try:
-        raid_log = await coc_client.get_raid_log(clan_tag, limit=1)
-        if not raid_log:
-            return False
-        entry = raid_log[0]
+    cache = raid_cache if raid_cache is not None else {}
+
+    def _recorded_end(entry: RaidLogEntry) -> datetime.datetime:
+        end_time = entry.end_time.time
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=datetime.UTC)
+        return end_time
+
+    async def _latest_entry(clan: str) -> RaidLogEntry | None:
+        if clan in cache:
+            return cache[clan]
+        try:
+            raid_log = await coc_client.get_raid_log(clan, limit=1)
+        except Exception as exc:  # pylint: disable=broad-except
+            if _is_transient_coc_error(exc):
+                log.warning(
+                    "Raid log temporarily unavailable for clan %s; retrying in one hour",
+                    clan,
+                    exc_info=exc,
+                )
+                raise TransientRaidLogError(clan) from exc
+            log.exception("Raid log check failed for clan %s: %s", clan, exc)
+            cache[clan] = None
+            return None
+
+        entry = raid_log[0] if raid_log else None
+        cache[clan] = entry
+        return entry
+
+    for idx, candidate in enumerate(candidate_clans):
+        entry = await _latest_entry(candidate)
+        if entry is None:
+            if idx == 0 and weekend_end is not None:
+                log.info(
+                    "Raid log missing for first-choice clan %s (expected >= %s)",
+                    candidate,
+                    weekend_end.isoformat(),
+                )
+                raise RaidLogNotReadyError(candidate, expected_end=weekend_end)
+            continue
+
+        if weekend_end is not None:
+            end_time = _recorded_end(entry)
+            if end_time < weekend_end:
+                if idx == 0:
+                    log.info(
+                        "Raid log still on previous weekend for %s (expected >= %s, observed %s)",
+                        candidate,
+                        weekend_end.isoformat(),
+                        end_time.isoformat(),
+                    )
+                    raise RaidLogNotReadyError(
+                        candidate, expected_end=weekend_end, actual_end=end_time
+                    )
+                continue
+
         member = entry.get_member(tag)
         if TEST_MODE:
             log.info(
-                "TEST_MODE: capital loot check for %s -> %s",
+                "TEST_MODE: capital loot check for %s in %s -> %s",
                 discord_id,
+                candidate,
                 member.capital_resources_looted if member else "None",
             )
         if member is None:
-            return False
+            continue
+
         return member.capital_resources_looted >= 23_000
-    except Exception as exc:  # pylint: disable=broad-except
-        if _is_transient_coc_error(exc):
-            log.warning(
-                "Raid log temporarily unavailable for clan %s; retrying in one hour",
-                clan_tag,
-                exc_info=exc,
-            )
-            raise TransientRaidLogError(clan_tag) from exc
-        log.exception("Raid log check failed for clan %s: %s", clan_tag, exc)
+
     return False
 
 
@@ -975,9 +1084,13 @@ async def finish_giveaway(
 
     if giveaway_type == "giftcard":
         filtered_entries: list[str] = []
+        weekend_end = _giftcard_weekend_end(gid)
+        raid_cache: dict[str, RaidLogEntry | None] = {}
         for entry in entries_list:
             try:
-                if await eligible_for_giftcard(entry):
+                if await eligible_for_giftcard(
+                    entry, weekend_end=weekend_end, raid_cache=raid_cache
+                ):
                     filtered_entries.append(entry)
             except TransientRaidLogError:
                 rescheduled_at = _reschedule_giveaway_draw(gid)
@@ -985,6 +1098,31 @@ async def finish_giveaway(
                     log.error(
                         "Unable to reschedule giveaway %s after transient error",
                         gid,
+                    )
+                return []
+            except RaidLogNotReadyError as exc:
+                rescheduled_at = _reschedule_giveaway_draw(gid)
+                if rescheduled_at is not None:
+                    log.info(
+                        (
+                            "Raid log data for %s not ready (expected >= %s, got %s); "
+                            "rescheduled giveaway %s to %s"
+                        ),
+                        exc.clan_tag,
+                        exc.expected_end.isoformat()
+                        if exc.expected_end is not None
+                        else "unknown",
+                        exc.actual_end.isoformat()
+                        if exc.actual_end is not None
+                        else "unknown",
+                        gid,
+                        rescheduled_at.isoformat() if rescheduled_at else "unknown",
+                    )
+                else:
+                    log.error(
+                        "Unable to reschedule giveaway %s when raid log %s not ready",
+                        gid,
+                        exc.clan_tag,
                     )
                 return []
             except Exception as exc:  # pylint: disable=broad-except
