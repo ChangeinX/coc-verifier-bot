@@ -691,9 +691,59 @@ class ResultReviewView(discord.ui.View):
                 "This review has already been processed.", ephemeral=True
             )
             return
+        guild = interaction.guild
+        record_feedback = feedback_recorder.enabled and guild is not None
+        source_message: discord.Message | None = None
+        source_attachments: list[FeedbackAttachment] = []
+        source_author_id: int | None = None
+        source_author_name: str | None = None
+        if record_feedback:
+            source_message = await self._get_source_message(interaction)
+            source_attachments = await self._collect_feedback_attachments(
+                source_message
+            )
+            if source_message is not None:
+                author = source_message.author
+                source_author_id = getattr(author, "id", None)
+                source_author_name = getattr(author, "display_name", None) or getattr(
+                    author, "name", None
+                )
         await interaction.response.send_message(
             "Dismissed this OCR suggestion.", ephemeral=True
         )
+        if record_feedback:
+            message_url = (
+                source_message.jump_url
+                if source_message is not None
+                else f"https://discord.com/channels/{guild.id}/{self.source_channel_id}/{self.source_message_id}"
+            )
+            try:
+                await asyncio.to_thread(
+                    feedback_recorder.record_dismissal,
+                    guild_id=guild.id,
+                    division_id=self.division_id,
+                    match_id=self.match_id,
+                    prediction_slot=self.predicted_slot,
+                    prediction_label=self.predicted_label,
+                    prediction_confidence=self.prediction_confidence,
+                    prediction_method=self.prediction_method,
+                    prediction_scores=self.prediction_scores,
+                    prediction_evidence=self.prediction_evidence,
+                    reviewer_id=interaction.user.id,
+                    reviewer_name=interaction.user.display_name,
+                    source_channel_id=self.source_channel_id,
+                    source_message_id=self.source_message_id,
+                    source_message_url=message_url,
+                    source_author_id=source_author_id,
+                    source_author_name=source_author_name,
+                    attachments=source_attachments,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning(
+                    "Failed to record OCR dismissal for match %s: %s",
+                    self.match_id,
+                    exc,
+                )
         await self._finalize(
             interaction, f"Dismissed by {interaction.user.display_name}"
         )

@@ -140,3 +140,42 @@ def test_feedback_recorder_records_and_uploads() -> None:
     assert len(stored["predicted_evidence"]) == 10
     assert len(s3.objects) == 2
     assert s3.objects[0][0] == "bucket"
+
+
+def test_feedback_recorder_records_dismissal() -> None:
+    table = FakeTable()
+    s3 = FakeS3()
+    recorder = FeedbackRecorder(
+        table=table,
+        s3_client=s3,
+        bucket="bucket",
+        prefix="feedback",
+        clock=lambda: "2024-06-01T12:00:00.000Z",
+    )
+
+    result = recorder.record_dismissal(
+        guild_id=55,
+        division_id="beta",
+        match_id="M3",
+        prediction_slot=0,
+        prediction_label="Team X",
+        prediction_confidence=0.42,
+        prediction_method="ocr",
+        prediction_scores={"Team X": 42.0, "Team Y": None},
+        prediction_evidence=["line"],
+        reviewer_id=101,
+        reviewer_name="Reviewer",
+        source_channel_id=500,
+        source_message_id=600,
+        source_message_url="https://discord.test",
+        source_author_id=77,
+        source_author_name="Author",
+        attachments=[],
+    )
+
+    assert result is not None
+    assert len(table.items) == 1
+    stored = table.items[0]
+    assert stored["selected_slot"] == -1
+    assert stored["selected_label"] == "DISMISSED"
+    assert stored["predicted_scores"] == {"Team X": Decimal("42.0")}

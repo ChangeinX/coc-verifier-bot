@@ -62,6 +62,98 @@ class FeedbackRecorder:
         source_author_name: str | None,
         attachments: Sequence[FeedbackAttachment],
     ) -> MatchAutomationFeedback | None:
+        """Persist feedback when a reviewer overrides the OCR prediction."""
+
+        return self._record_feedback(
+            guild_id=guild_id,
+            division_id=division_id,
+            match_id=match_id,
+            prediction_slot=prediction_slot,
+            prediction_label=prediction_label,
+            prediction_confidence=prediction_confidence,
+            prediction_method=prediction_method,
+            prediction_scores=prediction_scores,
+            prediction_evidence=prediction_evidence,
+            selection_slot=selection_slot,
+            selection_label=selection_label,
+            reviewer_id=reviewer_id,
+            reviewer_name=reviewer_name,
+            source_channel_id=source_channel_id,
+            source_message_id=source_message_id,
+            source_message_url=source_message_url,
+            source_author_id=source_author_id,
+            source_author_name=source_author_name,
+            attachments=attachments,
+        )
+
+    def record_dismissal(
+        self,
+        *,
+        guild_id: int,
+        division_id: str,
+        match_id: str,
+        prediction_slot: int,
+        prediction_label: str,
+        prediction_confidence: float,
+        prediction_method: str,
+        prediction_scores: dict[str, float | None],
+        prediction_evidence: Sequence[str],
+        reviewer_id: int,
+        reviewer_name: str,
+        source_channel_id: int,
+        source_message_id: int,
+        source_message_url: str,
+        source_author_id: int | None,
+        source_author_name: str | None,
+        attachments: Sequence[FeedbackAttachment],
+    ) -> MatchAutomationFeedback | None:
+        """Persist feedback when a reviewer dismisses the OCR suggestion entirely."""
+
+        return self._record_feedback(
+            guild_id=guild_id,
+            division_id=division_id,
+            match_id=match_id,
+            prediction_slot=prediction_slot,
+            prediction_label=prediction_label,
+            prediction_confidence=prediction_confidence,
+            prediction_method=prediction_method,
+            prediction_scores=prediction_scores,
+            prediction_evidence=prediction_evidence,
+            selection_slot=-1,
+            selection_label="DISMISSED",
+            reviewer_id=reviewer_id,
+            reviewer_name=reviewer_name,
+            source_channel_id=source_channel_id,
+            source_message_id=source_message_id,
+            source_message_url=source_message_url,
+            source_author_id=source_author_id,
+            source_author_name=source_author_name,
+            attachments=attachments,
+        )
+
+    def _record_feedback(
+        self,
+        *,
+        guild_id: int,
+        division_id: str,
+        match_id: str,
+        prediction_slot: int,
+        prediction_label: str,
+        prediction_confidence: float,
+        prediction_method: str,
+        prediction_scores: dict[str, float | None],
+        prediction_evidence: Sequence[str],
+        selection_slot: int,
+        selection_label: str,
+        reviewer_id: int,
+        reviewer_name: str,
+        source_channel_id: int,
+        source_message_id: int,
+        source_message_url: str,
+        source_author_id: int | None,
+        source_author_name: str | None,
+        attachments: Sequence[FeedbackAttachment],
+    ) -> MatchAutomationFeedback | None:
         if not self.enabled:
             return None
 
